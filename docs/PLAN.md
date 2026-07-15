@@ -8,7 +8,7 @@
 1. **Inference service:** FastAPI + self-hosted DistilBERT (SST-2 sentiment). `POST /predict`, `GET /health`, `GET /metrics` (prometheus-client), structured logging, typed config.
 2. **Event pipeline:** API `XADD`s prediction events to **Redis Streams** → consumer service (consumer group, at-least-once) → **PostgreSQL** predictions table.
 3. **Drift detection:** frozen reference baseline vs sliding production window; **Chi-squared** (prediction-class + token-length distributions) + **KL divergence** (confidence distribution); drift scores exported to Prometheus; **Slack webhook alert** on threshold breach.
-4. **Traffic simulator with drift injection** (`--inject-drift` swaps input domain corpus) — the demo engine; without it the platform demonstrates nothing.
+4. **Traffic simulator with drift injection** (`--mode drift` swaps input domain corpus) — the demo engine; without it the platform demonstrates nothing.
 5. **Grafana dashboards** provisioned as JSON in-repo: latency p50/p95, throughput, prediction/confidence distributions, drift scores.
 6. **Engineering hygiene:** pytest suite, GitHub Actions CI (lint + tests + docker build), Docker Compose full stack, load-test numbers (hey/locust) recorded in README, mermaid architecture diagram, demo GIF, polished README.
 7. **Deploy:** single AWS **EC2 t3.medium** via Docker Compose (stop instance when not demoing); set GitHub repo `homepage` field to demo/README anchor.
