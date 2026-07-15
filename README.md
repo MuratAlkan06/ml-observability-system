@@ -12,7 +12,7 @@ A single-node platform that will serve a self-hosted sentiment model, stream eve
 
 ```mermaid
 flowchart LR
-    sim[["Traffic simulator<br/>(host · --inject-drift)"]] -->|POST /predict| api["FastAPI inference<br/>DistilBERT SST-2"]
+    sim[["Traffic simulator<br/>(host · --mode drift)"]] -->|POST /predict| api["FastAPI inference<br/>DistilBERT SST-2"]
     api -->|XADD mlobs:predictions| redis[("Redis Streams")]
     redis -->|consumer group| consumer["Consumer<br/>(at-least-once)"]
     consumer -->|INSERT| pg[("PostgreSQL")]
@@ -48,7 +48,7 @@ Built in waves of independently reviewable slices. Unchecked items are **not bui
 - [x] **S1 · Inference service** — FastAPI app, self-hosted model load, `POST /predict`, `GET /health`, `GET /metrics`
 - [ ] **S2 · Event pipeline** — Redis Streams producer → consumer group → PostgreSQL, at-least-once with idempotent writes
 - [ ] **S3 · Drift detection** — frozen baseline vs sliding window, Chi-squared + KL divergence, Prometheus export, Slack alerting
-- [ ] **S4 · Simulator + dashboards** — host-side traffic generator with drift injection, provisioned Grafana dashboards
+- [x] **S4 · Simulator + dashboards** — host-side traffic generator with drift injection, provisioned Grafana dashboards
 
 **Wave 3**
 
