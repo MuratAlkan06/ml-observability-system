@@ -1,0 +1,15 @@
+# Grafana datasource provisioning (Grafana 12.1.0; docs/PLAN.md §6).
+# UID is pinned so in-repo dashboard JSON can reference it deterministically.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
