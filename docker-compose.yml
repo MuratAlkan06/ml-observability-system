@@ -1,0 +1,13 @@
+# ML Observability System — v1 stack (docs/PLAN.md §0, §7).
+# Slice ownership: each implementation slice adds services ONLY under its own marker below.
+# NOTE: this file is a skeleton until S1 merges; `docker compose config` is expected to fail until then.
+
+services:
+
+  # --- S1: api, redis ---
+
+  # --- S2: postgres, consumer ---
+
+  # --- S3: drift ---
+
+  # --- S4: prometheus, grafana ---
