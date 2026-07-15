@@ -1,0 +1,5 @@
+# Consumer service — Redis Streams -> PostgreSQL writer (see docs/PLAN.md §1).
+redis~=8.0.1
+psycopg[binary]~=3.3.4
+prometheus-client~=0.25.0
+pydantic-settings~=2.14.2
