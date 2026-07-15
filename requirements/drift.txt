@@ -1,0 +1,6 @@
+# Drift detection service — pins frozen in docs/PLAN.md §1.
+# No scipy/numpy: drift math is pure Python against hard-coded critical values.
+psycopg[binary]~=3.3.4
+prometheus-client~=0.25.0
+pydantic-settings~=2.14.2
+httpx~=0.28.1

@@ -9,5 +9,22 @@ services:
   # --- S2: postgres, consumer ---
 
   # --- S3: drift ---
+  drift:
+    build:
+      context: .
+      dockerfile: docker/drift.Dockerfile
+    environment:
+      # Must match the postgres credentials defined by S2's marker above.
+      DATABASE_URL: postgresql://mlobs:mlobs@postgres:5432/mlobs
+      BASELINE_PATH: /baseline/baseline.json
+      # Empty value disables alerting; evaluation + drift_runs writes continue.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./baseline:/baseline:ro
+    ports:
+      - "9109:9109"
+    depends_on:
+      - postgres
+    restart: unless-stopped
 
   # --- S4: prometheus, grafana ---
