@@ -6,7 +6,7 @@ uvicorn[standard]~=0.51.0
 pydantic~=2.13.4
 pydantic-settings~=2.14.2
 transformers==5.13.1          # EXACT: v5 ships breaking changes in minor releases; requires torch>=2.4
-tokenizers==0.22.2            # EXACT: transformers 5.13.1 caps <=0.23.0; 0.23.0 final was never published, 0.23.1 violates the cap
+tokenizers==0.23.1            # EXACT: transformers 5.13.1 caps <=0.23.0; 0.23.0 final was never published, 0.23.1 violates the cap
 torch==2.13.0                 # install from CPU index (below)
 prometheus-client~=0.25.0
 redis~=8.0.1
