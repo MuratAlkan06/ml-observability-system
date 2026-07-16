@@ -1,80 +1,107 @@
 """Input corpora for the traffic simulator.
 
-Two corpora, selected by ``--mode`` (docs/PLAN.md §5, §7):
+Two corpora, selected by ``--mode`` (docs/PLAN.md §5, §7). Both were validated
+against the baked ``distilbert-sst2-v1`` model and the frozen
+``baseline/baseline.json`` reference (the E2E measurement in S5): every corpus
+text is <=1000 characters with >=1 non-whitespace character (the API input
+contract, docs/PLAN.md §2), and the two corpora sit on opposite sides of the
+three §5 drift thresholds when they saturate the latest-500 window.
 
-* ``NORMAL_CORPUS`` — short, clearly polarized SST-2-style movie reviews,
-  roughly balanced positive/negative. High-confidence predictions land in the
-  top confidence bin and short texts land in the low token-length bins, so the
-  production window tracks the frozen baseline and no drift test fires.
+* ``NORMAL_CORPUS`` — clearly polarized, roughly class-balanced SST-2-style
+  movie reviews spanning the full range of lengths so the production window
+  tracks the frozen baseline on all three axes and NO drift test fires:
+  class chi-squared ~1 (<6.635), token-length chi-squared ~6 (<13.277), and
+  confidence KL ~0.089 (<0.10). Length matters: the reviews are deliberately
+  spread across all five token-length bins (a few very short, most medium,
+  many long) to mirror the baseline's ``token_len_probs`` — a corpus of only
+  short reviews would fire the token-length test even on "normal" traffic.
 
-* ``DRIFT_CORPUS`` — long (30+ words each), negative-leaning, hedged and
-  out-of-domain text, engineered to trip all three §5 tests inside a single
-  500-row window simultaneously:
-    1. class chi-squared (>6.635, df1) — heavily negative-skewed sentiment vs
-       the ~51/49 baseline;
+* ``DRIFT_CORPUS`` — long (>=33 tokens each), negative-skewed, hedged and
+  ambiguous out-of-domain text engineered to trip all three §5 tests inside a
+  single 500-row window simultaneously:
+    1. class chi-squared (>6.635, df1) — heavily negative-skewed vs the ~47/53
+       baseline (stat ~558);
     2. token-length chi-squared (>13.277, df4) — long enough to flood the fat
-       ``[32, 257)`` token bin (DistilBERT tokenization incl. [CLS]/[SEP],
-       max_length=256);
-    3. confidence KL (>0.10 nats) — neutral/ambiguous/out-of-domain phrasing
-       pushes softmax confidence mass down out of the 0.95-1.0 bin where
-       polarized SST-2 text concentrates.
-
-Every text is <=1000 characters and has >=1 non-whitespace character so the API
-input contract (docs/PLAN.md §2) never rejects it.
+       ``[32, 257)`` token bin, DistilBERT tokenization incl. [CLS]/[SEP],
+       max_length=256 (stat ~1382);
+    3. confidence KL (>0.10 nats) — a deliberate mix of strongly-negative and
+       genuinely ambiguous (mixed-sentiment / neutral) reviews pushes softmax
+       confidence mass DOWN out of the 0.95-1.0 bin where polarized SST-2 text
+       concentrates (KL ~0.198). DistilBERT is highly confident even on long
+       bureaucratic prose, so the ambiguous, praise-then-pan reviews are what
+       actually move confidence below threshold.
 """
 
 from __future__ import annotations
 
 NORMAL_CORPUS: list[str] = [
-    # Positive — clearly polarized, high confidence.
-    "This film is an absolute masterpiece from start to finish.",
-    "A brilliant, heartfelt performance that left me in tears of joy.",
-    "One of the best movies I have ever had the pleasure of watching.",
-    "Stunning visuals and a gripping story make this a must-see triumph.",
-    "The acting was superb and the direction was flawless throughout.",
-    "An unforgettable, delightful adventure that thrilled me completely.",
-    "Wonderful, witty, and wildly entertaining from the very first scene.",
-    "A gorgeous, moving triumph that I will happily watch again and again.",
-    "The screenplay is sharp, funny, and genuinely inspiring.",
-    "Pure cinematic magic; I loved every single minute of it.",
-    # Negative — clearly polarized, high confidence.
-    "This movie was a complete disaster and a total waste of time.",
-    "Dull, lifeless, and painfully boring from beginning to end.",
-    "One of the worst films I have ever been forced to sit through.",
-    "The plot was incoherent and the acting was absolutely terrible.",
-    "A dreadful, tedious mess that insults the intelligence of its audience.",
-    "I hated every minute of this awful, poorly written disaster.",
+    "Absolutely magnificent.",
     "Cheap effects and wooden performances ruin this dreadful bore.",
     "An utterly forgettable film with no redeeming qualities whatsoever.",
-    "The dialogue was cringeworthy and the story made absolutely no sense.",
+    "I hated every minute of this awful, poorly written disaster.",
+    "An unforgettable, delightful adventure that thrilled me completely.",
+    "Wonderful, witty, and wildly entertaining from the very first scene.",
+    "The screenplay is sharp, funny, and genuinely inspiring.",
+    "The acting was superb and the direction was flawless throughout.",
+    "A dreadful, tedious mess that insults the intelligence of its audience.",
     "A boring, pretentious failure that I deeply regret ever watching.",
+    "A dull, clumsy, poorly written mess that wastes a very good cast on a terrible script.",
+    "One of the worst films I have ever been forced to sit through.",
+    "The dialogue was cringeworthy and the story made absolutely no sense.",
+    "A charming, tender, wonderfully acted little comedy that left me smiling from beginning to happy end.",
+    "A sharp, funny, deeply satisfying film that had the whole audience laughing and cheering throughout.",
+    "A gorgeous, moving triumph that I will happily watch again and again.",
+    "A brilliant, heartfelt performance that left me in tears of joy.",
+    "An elegant, moving, gorgeously shot drama anchored by two of the finest performances of the year.",
+    "Stunning visuals and a gripping story make this a must-see triumph.",
+    "Cheap effects, wooden acting, and a lazy script make this one of the dullest films of the entire year.",
+    "A tedious, poorly acted slog that squanders a promising premise and an obviously talented ensemble cast.",
+    "A dreary, lifeless bore that lurches from one flat, charmless scene to the next without a shred of real tension.",
+    "A lazy, cynical, joyless slog with no wit, no tension, and no real reason to exist.",
+    "A lazy, cynical misfire that wastes a fine cast on a witless script and painfully limp, uninspired, joyless direction.",
+    "A delightful, big-hearted charmer, funny and touching in equal measure, that sends its audience home grinning from ear to ear.",
+    "A warm and generous film, beautifully acted and gorgeously shot, that earns every laugh and every tear it draws from its grateful audience.",
+    "A sharp, witty, wonderfully inventive comedy that kept the entire audience laughing from the very first scene to the last.",
+    "A warm, generous, beautifully acted film that earns every laugh and every tear it so effortlessly draws out.",
+    "Warm, funny, and genuinely moving, it is the rare crowd-pleaser that actually deserves the applause it gets.",
+    "A gorgeous, moving, superbly acted triumph that swept me up completely and left me quietly cheering at the end.",
+    "A witless, charmless, punishingly loud disaster with no discernible plot and no likable characters, and I resented nearly every tedious and wildly overlong minute of it.",
+    "Cheap, cynical, and utterly charmless, this dreary slog lurches from one lifeless scene to the next without ever generating a single moment of genuine tension, humor, or honest emotional truth.",
+    "A lumbering, humorless bore that squanders its talented cast on a witless script, limp direction, and a story so predictable that I had guessed the ending within the first ten minutes.",
+    "This is easily the worst film I have endured in years, a witless, charmless, punishingly loud disaster with no discernible plot, no likable characters, and no ambition beyond assaulting the senses, and I resented every single tedious, insulting, wildly overlong minute of the whole miserable ordeal from start to finish.",
+    "A grim and pretentious failure, airless and self-important, that mistakes tedium for depth and leaves its talented cast stranded with absolutely nothing worthwhile to do.",
+    "Every performance is pitch perfect, the script crackles with wit and warmth, and the direction is so confident and assured that the whole film feels like an instant timeless classic.",
+    "An exhilarating, wonderfully surprising adventure, full of wit and heart, that delivers spectacular thrills and real emotional depth in almost equal and thoroughly satisfying measure.",
+    "From its opening frames to its rousing finale this is a warm, generous, beautifully acted film that earns every ounce of the joy and emotion it so effortlessly delivers.",
+    "A stirring, gorgeously mounted triumph, marvelously acted and deeply felt, that had me grinning through happy tears from its first scene to its glorious final closing shot.",
+    "This is, without the slightest hesitation, one of the most stirring and gorgeously mounted films I have seen in years, a sweeping, tender, marvelously acted triumph that had me grinning through happy tears from its very first scene straight through to its glorious and deeply satisfying conclusion.",
 ]
 
 DRIFT_CORPUS: list[str] = [
-    "The quarterly logistics reconciliation report suggests that several intermediate distribution nodes may possibly have experienced some intermittent throughput degradation, though the underlying causes remain rather unclear and the operational teams have not yet offered any conclusive explanation for the recurring anomalies observed across the affected regional warehouses this period.",
-    "According to the preliminary compliance memorandum, it appears that certain procedural checkpoints might not have been fully documented, which could conceivably indicate a lapse in oversight, although management maintains that the situation is somewhat ambiguous and that further review will probably be required before any firm conclusions can reasonably be drawn.",
-    "The homeowner association newsletter notes that the perpetually malfunctioning irrigation controller has once again failed to activate on schedule, leaving several common areas parched and neglected, and residents are understandably frustrated, though nobody seems entirely certain whether the fault lies with the aging hardware or the recently updated firmware.",
-    "Our internal survey results are frankly difficult to interpret, since respondents expressed a confusing mixture of mild dissatisfaction and cautious indifference, and while the overall tone leans somewhat negative, the sample size is arguably too small to support any sweeping generalization about employee morale across the wider organization at this time.",
-    "The appliance warranty documentation is written in such convoluted, bureaucratic language that it is genuinely hard to tell whether the intermittent compressor failure would even be covered, and the customer service representative I spoke with seemed just as uncertain, offering only vague reassurances and no actual commitment to any repair.",
-    "The municipal water treatment status update indicates that turbidity levels have been fluctuating unpredictably over the past several weeks, and while officials insist there is no immediate cause for alarm, the report itself acknowledges that the monitoring equipment has been unreliable and that some of the readings may be inaccurate or incomplete.",
-    "I attempted to follow the assembly instructions for the flat-pack cabinet, but the diagrams were so poorly labeled and the hardware bags so mysteriously mismatched that after nearly three hours of mounting frustration I still cannot say with any confidence whether the finished result is structurally sound or dangerously unstable.",
-    "The software release notes vaguely mention that a number of unspecified issues have been partially addressed, yet several long-standing defects apparently persist, and the changelog is so terse and noncommittal that it is nearly impossible to determine whether upgrading would actually improve the situation or merely introduce a fresh set of complications.",
-    "The regional transit authority's service advisory admits that delays have become somewhat routine, though it stops short of explaining why, and commuters are left to speculate whether the recurring signal faults, the aging rolling stock, or simple mismanagement is chiefly responsible for the deteriorating and increasingly unpredictable schedule.",
-    "The insurance adjuster's preliminary assessment is so hedged with qualifications and conditional clauses that it remains genuinely unclear whether the water damage claim will be approved, denied, or endlessly deferred, and repeated attempts to obtain a straight answer have so far yielded nothing but polite, noncommittal deflection.",
-    "The laboratory's equipment maintenance log records a troubling pattern of intermittent calibration drift across multiple instruments, but the accompanying notes are inconsistent and occasionally contradictory, making it difficult to establish whether the anomalies stem from operator error, environmental fluctuation, or a more serious and systematic underlying malfunction.",
-    "The tenant complaint form describes a persistent, unidentifiable odor emanating from somewhere within the walls, and although two separate inspectors have already visited the unit, neither could locate the source nor rule out the possibility of a hidden leak, leaving the increasingly exasperated resident with far more questions than answers.",
-    "The annual budget variance commentary attributes the disappointing shortfall to a vague constellation of external headwinds and unforeseen operational frictions, but the explanation is so generic and evasive that it provides almost no actionable insight into what specifically went wrong or how similar disappointments might plausibly be avoided in future.",
-    "The firmware update advisory cautiously warns that some devices may experience reduced battery performance, unexpected reboots, or degraded connectivity following installation, and while the manufacturer conspicuously downplays the severity, the sheer length of the accompanying list of known issues does very little to inspire genuine confidence in the release.",
-    "The property inspection summary flags a number of minor-to-moderate concerns, including questionable wiring, uneven settling, and possible moisture intrusion, yet it repeatedly emphasizes that further specialized evaluation would be necessary before any of these somewhat worrying observations could be definitively characterized as serious structural or safety deficiencies.",
-    "The customer feedback aggregation for this quarter paints a decidedly muddled picture, with lukewarm praise awkwardly interleaved with pointed criticism, and although the net sentiment appears to tilt mildly toward disappointment, the responses are so internally inconsistent that drawing any confident conclusion feels frankly premature and possibly misleading.",
-    "The road maintenance bulletin acknowledges that the recurring potholes along the northern corridor have not been adequately repaired despite repeated resurfacing attempts, and it offers only a tentative timeline for future work, hedged with the usual caveats about weather, funding, and competing infrastructure priorities elsewhere across the district.",
+    "There is intelligence here, and ambition, and a few scenes of startling power, yet they float in a sea of longueurs and misjudged comic beats, and I left admiring individual pieces of the thing while feeling almost nothing at all about the whole.",
+    "I found it by turns dazzling and tiresome, moving and mechanical, genuinely funny and painfully strained, and this ceaseless oscillation between real accomplishment and obvious miscalculation left me unable to decide whether I had enjoyed myself or merely endured the experience.",
+    "There are flashes of brilliance scattered throughout, a witty exchange here, a breathtaking image there, and I kept waiting for them to cohere into something greater, but they never quite did, and what remained was handsome, ambitious, and finally rather hollow.",
+    "The craft is undeniable, the ambition admirable, and a handful of scenes achieve a startling, aching beauty, yet the whole remains stubbornly less than the sum of its gleaming parts, admirable in the abstract and strangely unmoving in the moment.",
+    "Neither the triumph its admirers claim nor the fiasco its detractors insist upon, it is instead a curious, uneven, occasionally lovely and frequently frustrating film that left me genuinely unsure whether I had witnessed something flawed and ambitious or merely handsome and empty.",
+    "Alternately gorgeous and ungainly, tender and pretentious, sharply funny and tediously overwrought, the film never settles into a coherent identity, and by the end I admired individual pieces of it while feeling almost nothing at all about the exhausting whole.",
+    "It is competent enough, I suppose, and a few performances rise above the material, yet nothing about this cautious, middling, oddly passionless picture lingers in the memory, and within an hour of leaving the theater I could scarcely recall a single distinct scene.",
+    "It has genuine virtues, real ones, a luminous lead performance and a few sequences of considerable power, but they are marooned in a sprawling, undisciplined, self-regarding film that mistakes length for depth and solemnity for genuine emotional weight.",
+    "It is not without its virtues, the score is lovely and a handful of scenes genuinely land, but the sluggish pacing, the muddled screenplay, and the strangely inert direction gradually smother whatever promise the material might once have had.",
+    "It aspires to profundity and occasionally brushes against it, yet just as often it topples into pretension, and this constant wobble between the genuinely moving and the faintly ridiculous makes for a frustrating, curiously weightless couple of hours at the cinema.",
+    "Beautifully mounted and often quite affecting, it is also overlong, self-important, and curiously inert, so that every stretch of genuine grace is followed almost immediately by another of airless, ponderous, thoroughly avoidable tedium that steadily erodes one's goodwill.",
+    "There is wit here, and warmth, and moments of real visual splendor, but they are scattered so unevenly across such a long, meandering, self-satisfied running time that the cumulative effect is less exhilaration than a kind of patient, low-grade exasperation.",
     "The medical device recall notice is phrased with such extraordinary caution that patients are left genuinely unsure whether they should discontinue use immediately, schedule a consultation, or simply monitor for symptoms, and the accompanying support hotline has been so overwhelmed that obtaining any clarifying guidance has proven nearly impossible.",
+    "There are moments of real beauty scattered throughout, and the lead performance is undeniably committed, yet the film is so tonally erratic and structurally confused that these fleeting pleasures never coalesce into anything remotely satisfying or coherent.",
+    "The performances range from genuinely affecting to distractingly mannered, the tone lurches between earnest and glib, and while it is never quite boring it is also never quite convincing, leaving a vaguely dissatisfied aftertaste that lingers far longer than the film itself.",
+    "For all its evident craft and occasional flashes of brilliance, the film is finally undone by its own excess, a sprawling, self-serious, emotionally distant work that inspires admiration far more readily than affection and exhaustion far more readily than either.",
+    "I wanted to love it, and for stretches I nearly did, yet the longer it went on the more its flaws accumulated, until the graceful early promise curdled into something muddled, overlong, and faintly exasperating that left me more puzzled than genuinely moved.",
+    "The property inspection summary flags a number of minor-to-moderate concerns, including questionable wiring, uneven settling, and possible moisture intrusion, yet it repeatedly emphasizes that further specialized evaluation would be necessary before any of these somewhat worrying observations could be definitively characterized as serious structural or safety deficiencies.",
+    "I can see why some viewers respond to it, and there is undeniable skill on display, but the relentless bleakness, the airless pacing, and the smugly withheld emotion left me cold, detached, and increasingly impatient for the whole solemn ordeal to end.",
     "The vendor's incident postmortem concedes that the prolonged outage was regrettable, yet it conspicuously avoids assigning any concrete cause, instead gesturing vaguely toward a cascade of contributing factors that, taken together, explain remarkably little and leave affected customers with scant assurance that the same failure will not simply recur.",
-    "The community garden coordination email laments that the shared tool shed has once again been left in complete disarray, with several missing implements and an unexplained broken lock, and while no one wishes to point fingers, the lingering ambiguity has quietly soured the atmosphere among the otherwise amicable volunteers.",
-    "The archived meeting minutes are so fragmentary and riddled with unresolved action items that it is genuinely difficult to reconstruct what, if anything, was actually decided, and the few conclusions that can be inferred seem tentative, provisional, and rather likely to be revisited or quietly abandoned at some later date.",
-    "The utility company's rate adjustment notification buries its most consequential changes beneath dense layers of technical qualification, and after reading it several times over I remain honestly uncertain whether my monthly costs will rise substantially, marginally, or perhaps not at all, depending on factors that are never quite clearly specified.",
     "The travel advisory for the region is couched in such carefully noncommittal language that it is nearly impossible to gauge the actual level of risk, oscillating between reassurance and caution from one paragraph to the very next, and ultimately leaving the prospective traveler no better informed than they were before consulting it.",
-    "The recurring server monitoring digest reports a steady trickle of low-priority warnings that never quite escalate into anything actionable, yet also never fully resolve, and this persistent background noise has made it increasingly difficult for the on-call engineers to distinguish a genuine emerging problem from the usual ambient dysfunction.",
+    "The community garden coordination email laments that the shared tool shed has once again been left in complete disarray, with several missing implements and an unexplained broken lock, and while no one wishes to point fingers, the lingering ambiguity has quietly soured the atmosphere among the otherwise amicable volunteers.",
+    "There is a decent, even affecting film buried somewhere inside this bloated, meandering, tonally uncertain one, but it is so obscured by needless subplots and self-indulgent flourishes that recovering it requires far more patience than most reasonable viewers will possess.",
+    "The insurance adjuster's preliminary assessment is so hedged with qualifications and conditional clauses that it remains genuinely unclear whether the water damage claim will be approved, denied, or endlessly deferred, and repeated attempts to obtain a straight answer have so far yielded nothing but polite, noncommittal deflection.",
 ]
 
 

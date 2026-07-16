@@ -33,11 +33,21 @@ def test_all_texts_satisfy_api_input_contract(corpus):
         assert text.strip() != ""
 
 
-def test_normal_corpus_is_short_and_balanced():
-    # Short texts keep token_count in the low bins and away from [32, 257).
-    for text in NORMAL_CORPUS:
-        assert _word_count(text) < 30
-    # Roughly balanced positive/negative (built as 10/10).
+def test_normal_corpus_spans_length_range_and_is_balanced():
+    # Corrected invariant (S5 E2E finding): a corpus of only SHORT texts fires
+    # the token-length drift test even on "normal" traffic, because the frozen
+    # baseline spreads ~53% of its mass into the two longest token bins. The
+    # normal corpus must therefore SPAN the length range (a few very short,
+    # most medium, many long) so the production window tracks the baseline's
+    # token_len_probs and no test fires.
+    word_counts = [_word_count(t) for t in NORMAL_CORPUS]
+    assert min(word_counts) <= 6, "need very short texts for the low token bins"
+    assert max(word_counts) >= 30, "need long texts for the fat [32, 257) bin"
+    # A genuine spread across tiers, not a single length band.
+    assert any(w < 12 for w in word_counts)
+    assert any(12 <= w < 22 for w in word_counts)
+    assert any(w >= 22 for w in word_counts)
+    # Roughly class-balanced -> even corpus size.
     assert len(NORMAL_CORPUS) % 2 == 0
 
 

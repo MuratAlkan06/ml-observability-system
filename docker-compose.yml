@@ -45,7 +45,10 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: mlobs
-      POSTGRES_PASSWORD: mlobs
+      # Secret comes from .env (never committed); `:?` fails fast if unset so a
+      # weak default can't silently ship (security review M1). Applied only at
+      # first initdb — rotate by recreating the volume (`down -v`).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       POSTGRES_DB: mlobs
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -62,10 +65,10 @@ services:
       dockerfile: docker/consumer.Dockerfile
     environment:
       MLOBS_REDIS_URL: redis://redis:6379/0
-      MLOBS_PG_DSN: postgresql://mlobs:mlobs@postgres:5432/mlobs
+      MLOBS_PG_DSN: postgresql://mlobs:${POSTGRES_PASSWORD}@postgres:5432/mlobs
       MLOBS_METRICS_PORT: "9108"
-    ports:
-      - "9108:9108"
+    # No host publish: Prometheus scrapes `consumer:9108` over the compose
+    # network (security review H2). Nothing off-box needs this port.
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,25 +82,33 @@ services:
       context: .
       dockerfile: docker/drift.Dockerfile
     environment:
-      # Must match the postgres credentials defined by S2's marker above.
-      DATABASE_URL: postgresql://mlobs:mlobs@postgres:5432/mlobs
+      # Must match the postgres credentials defined by S2's marker above;
+      # password threaded from .env (security review M1).
+      DATABASE_URL: postgresql://mlobs:${POSTGRES_PASSWORD}@postgres:5432/mlobs
       BASELINE_PATH: /baseline/baseline.json
       # Empty value disables alerting; evaluation + drift_runs writes continue.
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     volumes:
       - ./baseline:/baseline:ro
-    ports:
-      - "9109:9109"
+    # No host publish: Prometheus scrapes `drift:9109` over the compose
+    # network (security review H2). Nothing off-box needs this port.
     depends_on:
-      - postgres
+      # Wait for Postgres to accept connections (matches the consumer service);
+      # `service_started` alone races the DB and the first cycle logs a spurious
+      # connection-refused error before the 60s retry (S5 E2E finding).
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # --- S4: prometheus, grafana ---
 
   prometheus:
     image: prom/prometheus:v3.5.0
+    # Loopback-only publish (security review H1): reachable for local debugging
+    # / SSH-tunnel on the box, never exposed on the EC2 security group. Grafana
+    # queries it over the compose network, not via this host port.
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
@@ -110,6 +121,12 @@ services:
       # (docs/PLAN.md §0 non-goals); the login screen only gets in the way.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      # Admin lockdown (security review B1): required password from .env (no
+      # default so it can't silently ship weak), a non-`admin` login name, and
+      # self-service sign-up explicitly off. Anonymous Viewer stays as above.
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-mlobsadmin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:?set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

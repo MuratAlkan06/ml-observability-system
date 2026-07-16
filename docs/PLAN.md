@@ -37,7 +37,7 @@ Single source of truth for v1. Implementation sessions build against it without 
 - **Non-goals:** auth, TLS, batch prediction, retraining/registry, ORM/Alembic, Kubernetes, horizontal scaling, multi-model, retention jobs. Grafana dashboard JSON authored by implementation slices against §6 (not frozen here).
 - **Constraints:** Python 3.12; `python:3.12-slim`; plain SQL init; single t3.medium (~4GB); CPU inference; 1 uvicorn worker; `torch.set_num_threads(2)`.
 - **Assumptions:** ≤ ~20 req/s, thousands of rows/day; single consumer; empty `SLACK_WEBHOOK_URL` silently disables alerting (job still evaluates + records).
-- **Acceptance:** `docker compose up` → passing `/health`; simulator drift mode fires all three drift tests within 5 min; duplicate stream deliveries produce zero duplicate Postgres rows; all §6 metrics visible in Prometheus.
+- **Acceptance:** `cp .env.example .env` (set `POSTGRES_PASSWORD` + `GF_ADMIN_PASSWORD`) → `docker compose up` → passing `/health`; simulator drift mode fires all three drift tests within 5 min; duplicate stream deliveries produce zero duplicate Postgres rows; all §6 metrics visible in Prometheus.
 
 ## 1. Dependency pins (PyPI-verified, cp312 wheels confirmed)
 Pin style `~=X.Y.Z` (patch-compatible) except where an ecosystem constraint forces `==`.
