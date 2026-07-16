@@ -82,30 +82,38 @@ Then look at:
 
 ## Load test
 
-Measured **locally** on an Apple M4 Pro (Docker Desktop, 14-vCPU VM) with
-[`hey`](https://github.com/rakyll/hey) `0.1.5` against the containerized API:
+Measured **on the deployed EC2 t3.medium** (2 vCPU, us-west-2, Ubuntu 24.04, Docker Compose,
+single uvicorn worker) with [`hey`](https://github.com/rakyll/hey) `0.1.5` run on-instance over
+loopback — 15 s warm-up to prime the model, then 60 s measured runs of a 26-token
+positive-review payload:
 
-> **≈28 req/s sustained, 0 errors; p95 38 ms at concurrency 1.**
+> **≈14.7 req/s sustained, p95 85 ms on EC2 t3.medium — 0 errors.**
 
-| Metric | Value |
-| --- | --- |
-| Throughput | 28.8 req/s |
-| Requests | 1731 (all HTTP 200, 0 errors) |
-| Latency p50 / p95 / p99 | 34 ms / 37 ms / 43 ms |
-| Concurrency | 1 (single uvicorn worker, `torch.set_num_threads(2)`) |
+| Concurrency | Throughput | p50 | p95 | p99 | Errors |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 14.72 req/s | 63.5 ms | 84.6 ms | 185.9 ms | 0 |
+| 2 | 14.74 req/s | 126.7 ms | 197.9 ms | 390.6 ms | 0 |
+| 4 | 14.77 req/s | 254.3 ms | 331.6 ms | 691.1 ms | 0 |
 
-Reproduce (a short warm-up primes the model, then the measured 60-second run):
+Throughput is flat across c=1/2/4 while latency scales linearly — the single-worker, CPU-only
+inference path is the ceiling, so added concurrency just queues. CPU held ~66% avg / 86% max
+during the runs. The instance ran in **unlimited CPU-credit mode**, so these reflect full burst
+rather than a throttled t3 baseline.
+
+For reference, the same methodology run **locally** on an Apple M4 Pro (Docker Desktop, 14-vCPU
+VM) sustains **28.8 req/s at p95 37 ms** (concurrency 1, `torch.set_num_threads(2)`, 0 errors) —
+roughly 2× the EC2 throughput, as expected from the wider host.
+
+Reproduce (short warm-up primes the model, then the measured 60-second run; vary `-c` for
+concurrency):
 
 ```bash
 PAYLOAD='{"text":"A thrilling, moving, and beautifully acted film."}'
 # warm-up
-hey -z 10s -c 1 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
+hey -z 15s -c 1 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
 # measured
 hey -z 60s -c 1 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
 ```
-
-These are local numbers. The v1 target deploy is a single **EC2 t3.medium** (2 vCPU); its
-sustained throughput will be materially lower and will be added here after deployment.
 
 ## How drift detection works
 
@@ -155,7 +163,9 @@ Built in waves of independently reviewable slices.
 
 **Wave 3**
 - [x] **S5 · End-to-end + load test** — full integration demo (above) and local load test
-- [ ] **S5 · Deploy** — single-node EC2 t3.medium deployment; publish live demo numbers
+- [x] **S5 · Deploy** — single-node EC2 t3.medium (Docker Compose, Ubuntu 24.04); only `:8000`
+  and `:3000` exposed, IMDSv2 enforced. Live-verified on the instance: exactly-once pipeline at
+  ~4.7k predictions and all three drift tests firing real Slack alerts.
 
 ## Frozen specification
 
