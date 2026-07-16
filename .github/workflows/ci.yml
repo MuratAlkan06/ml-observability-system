@@ -47,6 +47,25 @@ jobs:
           done
       - run: pytest
 
+  Drift-Integration-Tests:
+    name: Drift integration tests
+    # S3: drift integration tests against a throwaway postgres container.
+    # REQUIRE_DRIFT_INTEGRATION=1 turns the tests' local-convenience skips
+    # (missing psycopg/docker) into hard failures so they cannot silently skip.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements/dev.txt
+            requirements/drift.txt
+      - run: pip install -r requirements/dev.txt -r requirements/drift.txt
+      - run: pytest tests/drift -v -rs
+        env:
+          REQUIRE_DRIFT_INTEGRATION: "1"
   DockerBuild:
     runs-on: ubuntu-latest
     steps:
