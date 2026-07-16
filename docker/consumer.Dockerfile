@@ -11,4 +11,10 @@ RUN pip install --no-cache-dir -r requirements/consumer.txt
 
 COPY src/consumer src/consumer
 
+# Drop root (security review N1), mirroring api/drift.Dockerfile. The consumer
+# only reads Redis/Postgres and serves metrics on 9108 (>1024, so no privileged
+# bind); no writable paths needed beyond its home.
+RUN useradd --create-home --shell /usr/sbin/nologin consumer
+USER consumer
+
 CMD ["python", "-m", "src.consumer"]
