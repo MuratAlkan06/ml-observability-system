@@ -1,0 +1,2 @@
+# Present so Grafana finds the alerting provisioning dir when the whole
+# provisioning tree is bind-mounted; alerting is a v1 non-goal (docs/PLAN.md).

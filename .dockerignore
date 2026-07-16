@@ -1,0 +1,15 @@
+# Keep build contexts small and reproducible (generic; mirrors .gitignore).
+.git/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store
