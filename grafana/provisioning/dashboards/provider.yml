@@ -7,7 +7,9 @@ providers:
     orgId: 1
     folder: ""
     type: file
-    disableDeletion: false
+    # Provisioned dashboards are read-only source of truth; block deletion via
+    # the UI so a Viewer/anonymous session can't remove them (security review N2).
+    disableDeletion: true
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
