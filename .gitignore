@@ -17,9 +17,10 @@ venv/
 .coverage
 htmlcov/
 
-# Environment files
+# Environment files (real secrets ignored; the committed template is not)
 .env
 .env.*
+!.env.example
 
 # IDE / editor
 .idea/
