@@ -89,7 +89,11 @@ services:
     ports:
       - "9109:9109"
     depends_on:
-      - postgres
+      # Wait for Postgres to accept connections (matches the consumer service);
+      # `service_started` alone races the DB and the first cycle logs a spurious
+      # connection-refused error before the 60s retry (S5 E2E finding).
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # --- S4: prometheus, grafana ---
