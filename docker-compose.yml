@@ -38,6 +38,40 @@ services:
     restart: unless-stopped
 
   # --- S2: postgres, consumer ---
+  # NOTE: `consumer` depends on the S1-owned `redis` service, which does not
+  # exist until S1 merges; `docker compose config` fails until then (see header).
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mlobs
+      POSTGRES_PASSWORD: mlobs
+      POSTGRES_DB: mlobs
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlobs -d mlobs"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: docker/consumer.Dockerfile
+    environment:
+      MLOBS_REDIS_URL: redis://redis:6379/0
+      MLOBS_PG_DSN: postgresql://mlobs:mlobs@postgres:5432/mlobs
+      MLOBS_METRICS_PORT: "9108"
+    ports:
+      - "9108:9108"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
 
   # --- S3: drift ---
 
