@@ -11,6 +11,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # transformers and tokenizers are exact-pinned and COUPLED (docs/PLAN.md §1
+    # erratum): transformers 5.13.1 caps tokenizers<=0.23.0, so any lone bump is
+    # uninstallable — Dependabot PR #13 (tokenizers 0.22.2 -> 0.23.1) failed the
+    # DockerBuild job for exactly this reason. Bump the pair manually, together.
+    ignore:
+      - dependency-name: "transformers"
+      - dependency-name: "tokenizers"
 
   - package-ecosystem: "github-actions"
     directory: "/"
