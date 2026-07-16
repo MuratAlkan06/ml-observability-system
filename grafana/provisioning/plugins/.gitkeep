@@ -1,0 +1,2 @@
+# Present so Grafana finds the plugin provisioning dir when the whole
+# provisioning tree is bind-mounted; no plugins are provisioned in v1.

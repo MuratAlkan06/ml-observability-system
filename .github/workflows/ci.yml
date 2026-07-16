@@ -35,6 +35,16 @@ jobs:
           cache: pip
           cache-dependency-path: requirements/dev.txt
       - run: pip install -r requirements/dev.txt
+      # Install light service deps for the unit suite, excluding the heavy ML
+      # wheels (torch/transformers/tokenizers) — tests mock the model. Loops over
+      # every requirements/*.txt so sibling slices' files are picked up too.
+      - name: Install light service deps (exclude heavy ML wheels)
+        run: |
+          for f in requirements/*.txt; do
+            [ "$f" = "requirements/dev.txt" ] && continue
+            grep -vE '^\s*(#|$)' "$f" | grep -viE '^(torch|transformers|tokenizers)\b' > /tmp/reqs.txt || true
+            [ -s /tmp/reqs.txt ] && pip install -r /tmp/reqs.txt
+          done
       - run: pytest
 
   Drift-Integration-Tests:
@@ -56,3 +66,16 @@ jobs:
       - run: pytest tests/drift -v -rs
         env:
           REQUIRE_DRIFT_INTEGRATION: "1"
+  DockerBuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build api image
+        run: docker build -f docker/api.Dockerfile -t mlobs-api:ci .
+      - name: Assert image size < 2GB
+        run: |
+          bytes=$(docker image inspect mlobs-api:ci --format '{{.Size}}')
+          echo "api image size: $bytes bytes"
+          test "$bytes" -lt 2147483648
+      - name: pip check inside image
+        run: docker run --rm mlobs-api:ci pip check

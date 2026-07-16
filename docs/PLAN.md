@@ -8,7 +8,7 @@
 1. **Inference service:** FastAPI + self-hosted DistilBERT (SST-2 sentiment). `POST /predict`, `GET /health`, `GET /metrics` (prometheus-client), structured logging, typed config.
 2. **Event pipeline:** API `XADD`s prediction events to **Redis Streams** → consumer service (consumer group, at-least-once) → **PostgreSQL** predictions table.
 3. **Drift detection:** frozen reference baseline vs sliding production window; **Chi-squared** (prediction-class + token-length distributions) + **KL divergence** (confidence distribution); drift scores exported to Prometheus; **Slack webhook alert** on threshold breach.
-4. **Traffic simulator with drift injection** (`--inject-drift` swaps input domain corpus) — the demo engine; without it the platform demonstrates nothing.
+4. **Traffic simulator with drift injection** (`--mode drift` swaps input domain corpus) — the demo engine; without it the platform demonstrates nothing.
 5. **Grafana dashboards** provisioned as JSON in-repo: latency p50/p95, throughput, prediction/confidence distributions, drift scores.
 6. **Engineering hygiene:** pytest suite, GitHub Actions CI (lint + tests + docker build), Docker Compose full stack, load-test numbers (hey/locust) recorded in README, mermaid architecture diagram, demo GIF, polished README.
 7. **Deploy:** single AWS **EC2 t3.medium** via Docker Compose (stop instance when not demoing); set GitHub repo `homepage` field to demo/README anchor.
@@ -49,7 +49,7 @@ uvicorn[standard]~=0.51.0
 pydantic~=2.13.4
 pydantic-settings~=2.14.2
 transformers==5.13.1          # EXACT: v5 ships breaking changes in minor releases; requires torch>=2.4
-tokenizers==0.23.0            # EXACT: transformers 5.13.1 caps <=0.23.0; PyPI latest 0.23.1 VIOLATES it
+tokenizers==0.22.2            # EXACT: transformers 5.13.1 caps <=0.23.0; 0.23.0 final was never published, 0.23.1 violates the cap
 torch==2.13.0                 # install from CPU index (below)
 prometheus-client~=0.25.0
 redis~=8.0.1
@@ -72,10 +72,12 @@ httpx~=0.28.1
 ruff~=0.15.21
 ```
 
+> **Erratum (2026-07-14, S1):** `tokenizers==0.23.0` was never published to PyPI (only 0.23.0rc0/0.23.1 exist); transformers 5.13.1 caps `<=0.23.0`, so the highest installable final is `0.22.2`. Pin corrected; coupling rule unchanged.
+
 - **torch CPU install (frozen):** api Dockerfile MUST run `pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu` first (default Linux wheel bundles CUDA — blows RAM/disk budget).
 - **No scipy/numpy:** drift math implemented in pure Python against hard-coded critical values (§5) — saves ~60MB in slim image; interview talking point.
 - **transformers v5 notes:** pass `dtype=torch.float32` explicitly (deterministic CPU); `TextClassificationPipeline` remains supported in v5.
-- **The two exact pins (`transformers==5.13.1`, `tokenizers==0.23.0`) are coupled — bump only together.**
+- **The two exact pins (`transformers==5.13.1`, `tokenizers==0.22.2`) are coupled — bump only together.**
 - **Docker images:** `python:3.12-slim`, `postgres:16-alpine`, `redis:7.4-alpine` (≥7 required for XINFO GROUPS lag + XAUTOCLAIM), `prom/prometheus:v3.5.0` (LTS), `grafana/grafana:12.1.0`.
 - **Model pin:** HF `distilbert-base-uncased-finetuned-sst-2-english`; resolve current commit SHA once at implementation time, hard-code as default `MODEL_REVISION`, bake snapshot into api image (`HF_HOME=/opt/hf-cache`), no runtime downloads. Public string `MODEL_VERSION = "distilbert-sst2-v1"` (frozen) appears in responses, events, DB rows.
 
