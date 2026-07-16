@@ -1,7 +1,7 @@
 # Inference service (api) deps — docs/PLAN.md §1 (PyPI-verified, cp312 wheels).
 # torch is installed FIRST from the CPU index in docker/api.Dockerfile; the pin
 # below is then already satisfied (the default Linux wheel bundles CUDA).
-fastapi~=0.139.0
+fastapi~=0.139.2
 uvicorn[standard]~=0.51.0
 pydantic~=2.13.4
 pydantic-settings~=2.14.2
