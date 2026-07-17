@@ -1,4 +1,4 @@
 # Dev / CI tooling — shared across all slices (see docs/PLAN.md §1).
 pytest~=9.1.1
 httpx~=0.28.1
-ruff~=0.15.21
+ruff~=0.15.22
