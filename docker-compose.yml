@@ -23,6 +23,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+    # v1.1 D8: cap the torch container so shadow-scorer + api + postgres/redis
+    # fit the t3.medium 4GB budget with >=1GB headroom.
+    mem_limit: 1536m
     restart: unless-stopped
 
   redis:
@@ -98,6 +101,31 @@ services:
       # connection-refused error before the 60s retry (S5 E2E finding).
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  # --- v1.1-A: shadow-scorer ---
+  # Second-model comparison on live traffic. Joins mlobs:predictions with its own
+  # consumer group (start id "$"), re-scores text with the candidate model, writes
+  # shadow_predictions. Runs by default (demo-first); the latency A/B "off" switch
+  # is `docker compose stop shadow-scorer`.
+  shadow-scorer:
+    build:
+      context: .
+      dockerfile: docker/shadow_scorer.Dockerfile
+    environment:
+      MLOBS_SHADOW_REDIS_URL: redis://redis:6379/0
+      # Password threaded from .env, matching the consumer/drift DSNs.
+      MLOBS_SHADOW_PG_DSN: postgresql://mlobs:${POSTGRES_PASSWORD}@postgres:5432/mlobs
+      MLOBS_SHADOW_METRICS_PORT: "9110"
+    # No host publish: Prometheus scrapes `shadow-scorer:9110` over the compose
+    # network. Nothing off-box needs this port.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # v1.1 D8: only the two torch containers get a mem_limit (api 1536m above).
+    mem_limit: 768m
     restart: unless-stopped
 
   # --- S4: prometheus, grafana ---

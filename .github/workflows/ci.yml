@@ -79,3 +79,21 @@ jobs:
           test "$bytes" -lt 2147483648
       - name: pip check inside image
         run: docker run --rm mlobs-api:ci pip check
+
+  ShadowBuild:
+    name: Shadow scorer image build
+    # v1.1 Slice A: build the shadow image (bakes the candidate model + runs the
+    # label-map sanity assertion), assert size < 2GB, pip check inside — mirrors
+    # the DockerBuild job above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build shadow-scorer image
+        run: docker build -f docker/shadow_scorer.Dockerfile -t mlobs-shadow:ci .
+      - name: Assert image size < 2GB
+        run: |
+          bytes=$(docker image inspect mlobs-shadow:ci --format '{{.Size}}')
+          echo "shadow image size: $bytes bytes"
+          test "$bytes" -lt 2147483648
+      - name: pip check inside image
+        run: docker run --rm mlobs-shadow:ci pip check
