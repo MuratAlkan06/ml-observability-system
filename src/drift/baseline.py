@@ -14,7 +14,6 @@ from pathlib import Path
 from .constants import (
     BASELINE_SCHEMA_VERSION,
     CONFIDENCE_BIN_EDGES,
-    MODEL_VERSION,
     PROB_SUM_TOLERANCE,
     TOKEN_LEN_BIN_EDGES,
 )
@@ -74,20 +73,22 @@ def _check_probs(name: str, probs: object, length: int, *, positive: bool) -> No
         )
 
 
-def validate_baseline(doc: dict) -> None:
+def validate_baseline(doc: dict, model_version: str) -> None:
     """Hard-fail if ``doc`` violates the frozen baseline schema (PLAN §5).
 
-    Enforces: schema_version 1, frozen model_version, probs lists summing to
-    1.0 within 1e-9, smoothed lists strictly positive, and bin edges exactly
-    equal to the frozen edges.
+    Enforces: schema_version 1, the CONFIGURED ``model_version`` (v1.1 D5: a
+    parameter, not an imported constant, so the shadow baseline validates
+    against ``minilm-sst2-v1``), probs lists summing to 1.0 within 1e-9,
+    smoothed lists strictly positive, and bin edges exactly equal to the frozen
+    edges.
     """
     if doc.get("schema_version") != BASELINE_SCHEMA_VERSION:
         raise BaselineValidationError(
             f"schema_version must be {BASELINE_SCHEMA_VERSION} (got {doc.get('schema_version')!r})"
         )
-    if doc.get("model_version") != MODEL_VERSION:
+    if doc.get("model_version") != model_version:
         raise BaselineValidationError(
-            f"model_version must be {MODEL_VERSION!r} (got {doc.get('model_version')!r})"
+            f"model_version must be {model_version!r} (got {doc.get('model_version')!r})"
         )
     if not isinstance(doc.get("created_at"), str) or not doc["created_at"]:
         raise BaselineValidationError("created_at must be a non-empty ISO-8601 string")
@@ -114,11 +115,15 @@ def validate_baseline(doc: dict) -> None:
     )
 
 
-def load_baseline(path: Path | str) -> Baseline:
-    """Load and validate the committed baseline.json (read-only mount in Docker)."""
+def load_baseline(path: Path | str, model_version: str) -> Baseline:
+    """Load and validate a committed baseline.json (read-only mount in Docker).
+
+    ``model_version`` is the configured identity the artifact must declare
+    (v1.1 D5), so the shadow job loads ``baseline-minilm.json``.
+    """
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
-    validate_baseline(doc)
+    validate_baseline(doc, model_version)
     return Baseline(
         schema_version=doc["schema_version"],
         model_version=doc["model_version"],

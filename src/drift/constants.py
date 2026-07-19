@@ -4,8 +4,12 @@ Every value here is frozen by docs/PLAN.md; do not make any of them
 configurable. Stdlib-only module.
 """
 
-# Model identity (PLAN §1) — window query filter and baseline validation.
-MODEL_VERSION = "distilbert-sst2-v1"
+# Source-table whitelist (v1.1 D5). The model identity (MODEL_VERSION) and the
+# SOURCE_TABLE it reads are now runtime config (see config.py) so one image can
+# serve both the primary and the shadow drift jobs. Table identifiers cannot be
+# SQL-parameterized, so SOURCE_TABLE is validated against this FROZEN set and
+# then interpolated into the window query. The set itself is not configurable.
+SOURCE_TABLES = ("predictions", "shadow_predictions")
 
 # Window & cadence (PLAN §5): latest-500 count-based window, evaluated every
 # 60s; fewer than 200 rows => skip (no drift_runs row).

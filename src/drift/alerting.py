@@ -35,13 +35,13 @@ def _default_post(url: str, payload: dict) -> None:
 
 
 def format_alert_text(
-    test: str, stat: float, threshold: float, result: DriftResult
+    model_version: str, test: str, stat: float, threshold: float, result: DriftResult
 ) -> str:
-    """Frozen payload text (PLAN §5):
-    ``[mlobs] DRIFT: <test> stat=<v> threshold=<v> window_n=<n> window=[<start>..<end>]``
+    """Frozen payload text (PLAN §5, v1.1 D5 model_version prefix):
+    ``[mlobs][<model_version>] DRIFT: <test> stat=<v> threshold=<v> window_n=<n> window=[<start>..<end>]``
     """
     return (
-        f"[mlobs] DRIFT: {test} stat={stat:.4f} threshold={threshold:g}"
+        f"[mlobs][{model_version}] DRIFT: {test} stat={stat:.4f} threshold={threshold:g}"
         f" window_n={result.sample_count}"
         f" window=[{result.window_start_ts.isoformat()}..{result.window_end_ts.isoformat()}]"
     )
@@ -63,11 +63,13 @@ class SlackAlerter:
         self,
         webhook_url: str,
         *,
+        model_version: str,
         cooldown_seconds: float = ALERT_COOLDOWN_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         post: Callable[[str, dict], None] = _default_post,
     ) -> None:
         self._webhook_url = webhook_url
+        self._model_version = model_version
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
         self._post = post
@@ -92,7 +94,7 @@ class SlackAlerter:
             if last is not None and now - last < self._cooldown_seconds:
                 logger.debug("alert for %s suppressed by cooldown", test)
                 continue
-            text = format_alert_text(test, stat, threshold, result)
+            text = format_alert_text(self._model_version, test, stat, threshold, result)
             try:
                 self._post(self._webhook_url, {"text": text})
             except Exception as exc:
