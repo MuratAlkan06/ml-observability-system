@@ -128,6 +128,33 @@ services:
     mem_limit: 768m
     restart: unless-stopped
 
+  # --- v1.1-B: drift-shadow ---
+  # Second drift job (v1.1 D5): the SAME image as `drift`, pointed at the shadow
+  # model's rows (SOURCE_TABLE=shadow_predictions) and its own baseline. Window,
+  # guard, cadence, thresholds and bins stay frozen; only identity differs.
+  # Prometheus scrapes it as job `drift_shadow`; drift_runs rows and Slack text
+  # carry MODEL_VERSION=minilm-sst2-v1. No torch dep, so no mem_limit.
+  drift-shadow:
+    build:
+      context: .
+      dockerfile: docker/drift.Dockerfile
+    environment:
+      # Match the postgres credentials from S2's marker; password from .env.
+      DATABASE_URL: postgresql://mlobs:${POSTGRES_PASSWORD}@postgres:5432/mlobs
+      MODEL_VERSION: minilm-sst2-v1
+      SOURCE_TABLE: shadow_predictions
+      BASELINE_PATH: /baseline/baseline-minilm.json
+      # Empty value disables alerting; evaluation + drift_runs writes continue.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./baseline:/baseline:ro
+    # No host publish: Prometheus scrapes `drift-shadow:9109` over the compose
+    # network. Nothing off-box needs this port.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- S4: prometheus, grafana ---
 
   prometheus:

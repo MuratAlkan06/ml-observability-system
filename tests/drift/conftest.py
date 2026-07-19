@@ -27,8 +27,10 @@ if str(REPO_ROOT) not in sys.path:
 
 REQUIRE_INTEGRATION = os.environ.get("REQUIRE_DRIFT_INTEGRATION") == "1"
 
-# Verbatim copy of the PLAN §4 DDL for the two tables the drift job touches
-# (sql/init.sql belongs to S2 and is deliberately not read here).
+# Copy of sql/init.sql (kept in sync with the worktree's canonical schema) for
+# the tables the drift job touches. v1.1 D5/Slice A additions present: the
+# drift_runs.model_version column + default, and the shadow_predictions table
+# the shadow drift job reads.
 PLAN_S4_DDL = """
 CREATE TABLE predictions (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -47,6 +49,7 @@ CREATE INDEX idx_predictions_ts ON predictions (ts DESC);
 CREATE TABLE drift_runs (
     id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     run_at             TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    model_version      TEXT             NOT NULL DEFAULT 'distilbert-sst2-v1',
     window_start_ts    TIMESTAMPTZ      NOT NULL,
     window_end_ts      TIMESTAMPTZ      NOT NULL,
     sample_count       INTEGER          NOT NULL CHECK (sample_count > 0),
@@ -61,6 +64,21 @@ CREATE TABLE drift_runs (
     bins               JSONB            NULL
 );
 CREATE INDEX idx_drift_runs_run_at ON drift_runs (run_at DESC);
+
+CREATE TABLE shadow_predictions (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    request_id         UUID             NOT NULL UNIQUE,
+    ts                 TIMESTAMPTZ      NOT NULL,
+    inserted_at        TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    model_version      TEXT             NOT NULL,
+    label              TEXT             NOT NULL CHECK (label IN ('positive', 'negative')),
+    confidence         DOUBLE PRECISION NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    token_count        SMALLINT         NOT NULL CHECK (token_count BETWEEN 3 AND 256),
+    latency_ms         DOUBLE PRECISION NOT NULL CHECK (latency_ms >= 0.0),
+    primary_label      TEXT             NOT NULL CHECK (primary_label IN ('positive', 'negative')),
+    primary_confidence DOUBLE PRECISION NOT NULL CHECK (primary_confidence >= 0.0 AND primary_confidence <= 1.0)
+);
+CREATE INDEX idx_shadow_predictions_ts ON shadow_predictions (ts DESC);
 """
 
 
@@ -132,6 +150,6 @@ def pg_conn(pg_dsn):
     import psycopg
 
     with psycopg.connect(pg_dsn) as conn:
-        conn.execute("TRUNCATE predictions, drift_runs RESTART IDENTITY")
+        conn.execute("TRUNCATE predictions, drift_runs, shadow_predictions RESTART IDENTITY")
         conn.commit()
         yield conn

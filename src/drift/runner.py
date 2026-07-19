@@ -24,14 +24,17 @@ from .evaluate import evaluate_window
 logger = logging.getLogger(__name__)
 
 
-def run_once(conn, baseline: Baseline, alerter: SlackAlerter) -> str:
+def run_once(
+    conn, baseline: Baseline, alerter: SlackAlerter, settings: DriftSettings
+) -> str:
     """One evaluation cycle against an open connection; returns the outcome label.
 
-    Skipped runs (< 200 rows) write NO drift_runs row; evaluated runs write
-    exactly one row, with alert_sent=true iff >= 1 Slack message actually
-    posted for the run.
+    Reads ``settings.source_table`` filtered on ``settings.model_version``
+    (v1.1 D5). Skipped runs (< 200 rows) write NO drift_runs row; evaluated runs
+    write exactly one row carrying ``model_version``, with alert_sent=true iff
+    >= 1 Slack message actually posted for the run.
     """
-    rows = db.fetch_window(conn)
+    rows = db.fetch_window(conn, settings.source_table, settings.model_version)
     metrics.WINDOW_SAMPLE_COUNT.set(len(rows))
 
     if len(rows) < MIN_WINDOW_SAMPLES:
@@ -46,7 +49,9 @@ def run_once(conn, baseline: Baseline, alerter: SlackAlerter) -> str:
     sent = alerter.send_alerts(result)
     for test in sent:
         metrics.ALERTS_SENT_TOTAL.labels(test=test).inc()
-    db.insert_drift_run(conn, result, alert_sent=bool(sent))
+    db.insert_drift_run(
+        conn, result, alert_sent=bool(sent), model_version=settings.model_version
+    )
 
     metrics.CLASS_CHI2_STAT.set(result.class_chi2_stat)
     metrics.LENGTH_CHI2_STAT.set(result.length_chi2_stat)
@@ -73,16 +78,19 @@ def run_once(conn, baseline: Baseline, alerter: SlackAlerter) -> str:
 def run_forever(settings: DriftSettings | None = None) -> None:
     """Service entrypoint: load baseline, expose metrics on :9109, loop every 60s."""
     settings = settings or DriftSettings()
-    baseline = load_baseline(settings.baseline_path)
+    baseline = load_baseline(settings.baseline_path, settings.model_version)
     logger.info(
-        "loaded baseline %s (sample_count=%d, created_at=%s)",
+        "loaded baseline %s for model_version=%s source_table=%s "
+        "(sample_count=%d, created_at=%s)",
         settings.baseline_path,
+        settings.model_version,
+        settings.source_table,
         baseline.sample_count,
         baseline.created_at,
     )
     if not settings.slack_webhook_url:
         logger.info("SLACK_WEBHOOK_URL empty: alerting disabled, evaluation continues")
-    alerter = SlackAlerter(settings.slack_webhook_url)
+    alerter = SlackAlerter(settings.slack_webhook_url, model_version=settings.model_version)
 
     start_http_server(METRICS_PORT)
     logger.info("drift metrics exposed on :%d", METRICS_PORT)
@@ -90,7 +98,7 @@ def run_forever(settings: DriftSettings | None = None) -> None:
     while True:
         try:
             with db.connect(settings.database_url) as conn:
-                run_once(conn, baseline, alerter)
+                run_once(conn, baseline, alerter, settings)
         except Exception:
             logger.exception("drift evaluation cycle failed")
             metrics.RUNS_TOTAL.labels(outcome=metrics.OUTCOME_ERROR).inc()
