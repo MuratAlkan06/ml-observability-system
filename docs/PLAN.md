@@ -238,3 +238,122 @@ Convention: prefix `mlobs_`, base units + unit suffixes (`_seconds`, `_ratio`, `
 | e2e | drift mode fires all 3 tests < 5 min; Slack posts; drift_runs rows | compose up + simulator --mode drift | S5 |
 | obs | all §6 names present in Prometheus | curl :9090 label values \| grep mlobs_ | S5 |
 | lint | ruff clean | ruff check src tests | all |
+
+# v1.1 Design Specification (FROZEN)
+
+> v1.1 stretch item 1 — **shadow/canary second-model comparison on live traffic**.
+> Transcribed here so docs/PLAN.md stays the single source of truth. The v1 spec
+> above is unchanged and remains frozen; this section governs v1.1 work only.
+
+## v1.1 scope
+
+Score a candidate model against identical live traffic, compare agreement /
+confidence deltas / latency / per-model drift on dashboards, and support a
+written "promote or hold?" decision — with **zero changes to the primary
+prediction path**. The prediction event on `mlobs:predictions` already carries
+the raw text plus the primary model's label/confidence/latency, so a shadow
+scorer joining the stream with its own consumer group gets scoring input *and*
+the primary half of every comparison in one message.
+
+**OUT (v1.1):** canary routing (deferred, gated on shadow evidence), automated
+promotion, A/B significance testing, MLflow, k8s, >2 models, retraining,
+retention jobs, Alembic.
+
+## Architecture decisions (ADR summary — frozen)
+
+- **D1 Topology:** new container `shadow-scorer` joins `mlobs:predictions` with
+  consumer group `shadow_scorer` (start id `$` — score from deploy forward, no
+  backfill), re-scores `text` with the candidate model. Shadow crash/lag never
+  touches the primary path; lag is observable and drains at ~7–8× catch-up.
+- **D2 Model risks (retired in Slice A):** candidate has no meaningful
+  `id2label` → freeze map `LABEL_0→negative`, `LABEL_1→positive`; the build-time
+  bake asserts two sanity probes (one clearly positive, one clearly negative
+  sentence) so a wrong map fails the Docker build. Only `.bin` weights on the Hub
+  + transformers 5.13.1 → if the pickle load is refused, the bake converts once
+  at build time to safetensors (`torch.load(weights_only=True)` → `load_state_dict`
+  → `save_pretrained`); the runtime never touches pickle.
+- **Tokenizer rule (frozen):** the shadow computes `token_count` with its OWN
+  tokenizer (never the event's), max_length=256, specials counted, clamp [3,256].
+- **D3 Storage:** new table `shadow_predictions` (`request_id UUID NOT NULL
+  UNIQUE` exactly-once backstop; ts = original event ts; model_version;
+  label/confidence/token_count/latency_ms with the same CHECKs as `predictions`;
+  **denormalized `primary_label` + `primary_confidence`** from the event → join-free
+  agreement SQL, no race vs the pg_writer commit, deliberately no FK).
+- **Migration stance:** no Alembic; `sql/init.sql` stays canonical for fresh
+  volumes **plus** one idempotent delta `sql/migrations/002_shadow.sql`
+  (`CREATE TABLE IF NOT EXISTS` + `drift_runs.model_version TEXT NOT NULL DEFAULT
+  'distilbert-sst2-v1'`). Migration "001" is implicitly the v1 `sql/init.sql`.
+- **D4 Metrics/dashboards:** shadow scorer exports on **:9110**, prefix
+  `mlobs_shadow_`: `comparisons_total{primary_label,shadow_label}` (4-cell
+  confusion matrix; agreement derived in PromQL), `confidence_delta` H
+  (d = p_pos(shadow) − p_pos(primary); buckets −0.4,−0.2,−0.1,−0.05,−0.02,0.02,
+  0.05,0.1,0.2,0.4), `inference_duration_seconds` H (same buckets as api),
+  `predictions_total{label}`, `confidence_ratio` H (same 0.50–1.00 bins), plus
+  consumer-style health: `events_scored_total`, `rows_inserted_total`,
+  `duplicates_skipped_total`, `events_dropped_total`, `stream_lag_entries`,
+  `pending_entries`. New third dashboard "mlobs — Model Comparison" (Slice C);
+  the two existing dashboards get one mechanical edit: pin drift panels to
+  `job="drift"`.
+- **D5 Multi-model drift:** refactor `src/drift/` identity-only — `MODEL_VERSION`
+  moves from `constants.py` to `DriftSettings` (env, default `distilbert-sst2-v1`),
+  new `SOURCE_TABLE` setting whitelisted to `{predictions, shadow_predictions}`,
+  `validate_baseline` checks the configured version, Slack text prefixed
+  `[mlobs][<model_version>]`, `drift_runs` insert includes model_version. Compose
+  adds `drift-shadow` (same image; `MODEL_VERSION=minilm-sst2-v1`,
+  `SOURCE_TABLE=shadow_predictions`, `BASELINE_PATH=/baseline/baseline-minilm.json`).
+  Prometheus jobs `drift` vs `drift_shadow`; metric names unchanged. Window /
+  guard / cadence / thresholds / bins stay frozen.
+- **D6 Image/module ownership:** new `src/shadow_scorer/` (own
+  config/model/scorer/parsing/metrics — consciously duplicates the ~90-line model
+  wrapper; **no shared src/ rule preserved**), `docker/shadow_scorer.Dockerfile`
+  (api pattern: CPU torch first, build-time bake + label-map assert, offline env,
+  non-root), `requirements/shadow_scorer.txt` (same coupled torch/transformers/
+  tokenizers pins as api).
+- **D8 Resources:** steady-state ≈2.4–2.8GB of 4GB (≥1GB headroom). Shadow torch
+  threads = 1 (frozen). Compose `mem_limit`: `api` 1536m, `shadow-scorer` 768m
+  (only the two torch containers).
+
+## v1.1 frozen constants (new components)
+
+| Constant | Value |
+|---|---|
+| Shadow group / start / consumer | `shadow_scorer` / `$` (MKSTREAM, swallow BUSYGROUP) / `shadow_scorer-<hostname>` |
+| Read batch / poison | `COUNT 20 BLOCK 5000` / drop after 5 deliveries |
+| Shadow model / revision / version | `philschmid/MiniLM-L6-H384-uncased-sst2` @ `0c0ecdc39368f87291727ec084111e89e30b45b2` / `minilm-sst2-v1` |
+| Label map | `LABEL_0→negative`, `LABEL_1→positive` (bake-asserted) |
+| Shadow tokenizer | own tokenizer, max_length=256, specials counted, token_count ∈ [3,256] |
+| Shadow torch threads | 1 |
+| Table | `shadow_predictions` + `idx_shadow_predictions_ts (ts DESC)`; no FK |
+| Migrations | `sql/init.sql` + idempotent `sql/migrations/002_shadow.sql` |
+| Shadow metrics | port 9110, prefix `mlobs_shadow_` |
+| Confidence delta | d = p_pos(shadow) − p_pos(primary), buckets above |
+| Prometheus jobs | `shadow_scorer → shadow-scorer:9110`, `drift_shadow → drift-shadow:9109` |
+| Drift env (new) | `MODEL_VERSION` (default `distilbert-sst2-v1`), `SOURCE_TABLE` (default `predictions`) |
+| Shadow baseline | `baseline/baseline-minilm.json` (schema_version 1, 872-row TSV, shadow tokenizer) |
+| Mem limits | api 1536m, shadow-scorer 768m |
+
+## v1.1 slices (sequenced A → B → C; disjoint dirs)
+
+- **Slice A — shadow scorer service.** `src/shadow_scorer/**`,
+  `docker/shadow_scorer.Dockerfile`, `requirements/shadow_scorer.txt`, all of
+  `sql/` (init.sql + `migrations/002_shadow.sql` incl. the drift_runs column — one
+  owner for sql/), compose `shadow-scorer` service + both mem_limits,
+  `tests/shadow_scorer/**`, CI shadow-image build/size job, this PLAN.md section.
+  *Acceptance:* docker build succeeds with the label-map sanity assertion passing
+  (retires the `.bin`/label risks); unit tests — parsing, idempotent insert (same
+  event twice → 1 row), poison drop, confidence-delta math; ruff clean.
+- **Slice B — multi-model drift.** `src/drift/**` (identity → settings,
+  SOURCE_TABLE whitelist, baseline validation, Slack prefix, drift_runs
+  model_version), `scripts/build_baseline.py` flags, `baseline/baseline-minilm.json`,
+  compose `drift-shadow` service, `tests/drift/**` updates. *Acceptance:*
+  default-env drift behavior byte-identical; primary baseline rebuild bit-identical;
+  shadow-configured drift evaluates `shadow_predictions`; Slack text carries
+  model_version.
+- **Slice C — comparison observability + rollout + release.**
+  `prometheus/prometheus.yml` (2 new jobs), `grafana/dashboards/model_comparison.json`
+  + `job="drift"` pin in the 2 existing dashboards, README (shadow story,
+  promotion criteria with a no-ground-truth caveat, refreshed load/RAM numbers),
+  EC2 rollout (one-time psql migration + redeploy + load-test re-run). *Acceptance:*
+  live e2e matrix (comparison dashboard, both-model drift, /predict p95 delta ≤10%
+  shadow on vs off, kill-test drains to zero duplicate rows, disagreement
+  inspectable by request_id). Close-out: tag `v1.1.0`.
