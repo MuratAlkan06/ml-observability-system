@@ -49,16 +49,23 @@ class RecordingPost:
             raise RuntimeError("simulated slack outage")
 
 
-def make_alerter(post, clock, url="https://hooks.slack.example/T0/B0/x"):
-    return SlackAlerter(url, clock=clock, post=post)
+def make_alerter(post, clock, url="https://hooks.slack.example/T0/B0/x", model_version="distilbert-sst2-v1"):
+    return SlackAlerter(url, model_version=model_version, clock=clock, post=post)
 
 
 def test_payload_text_matches_frozen_format():
-    text = format_alert_text("class", 25.0, 6.635, make_result(class_drift=True))
+    text = format_alert_text("distilbert-sst2-v1", "class", 25.0, 6.635, make_result(class_drift=True))
     assert text == (
-        "[mlobs] DRIFT: class stat=25.0000 threshold=6.635 window_n=500"
+        "[mlobs][distilbert-sst2-v1] DRIFT: class stat=25.0000 threshold=6.635 window_n=500"
         " window=[2026-07-14T12:00:00+00:00..2026-07-14T12:05:00+00:00]"
     )
+
+
+def test_payload_text_carries_shadow_model_version():
+    # v1.1 D5: the prefix is [mlobs][<model_version>] so Slack (and the dashboard)
+    # can tell primary from shadow drift.
+    text = format_alert_text("minilm-sst2-v1", "confidence", 0.9, 0.1, make_result(confidence_drift=True))
+    assert text.startswith("[mlobs][minilm-sst2-v1] DRIFT: confidence ")
 
 
 def test_one_message_per_newly_firing_test():
@@ -70,8 +77,8 @@ def test_one_message_per_newly_firing_test():
     assert sent == ["class", "token_length", "confidence"]
     assert len(post.calls) == 3
     assert all(set(payload) == {"text"} for _, payload in post.calls)
-    assert post.calls[1][1]["text"].startswith("[mlobs] DRIFT: token_length stat=200.0000 threshold=13.277")
-    assert post.calls[2][1]["text"].startswith("[mlobs] DRIFT: confidence stat=0.9000 threshold=0.1")
+    assert post.calls[1][1]["text"].startswith("[mlobs][distilbert-sst2-v1] DRIFT: token_length stat=200.0000 threshold=13.277")
+    assert post.calls[2][1]["text"].startswith("[mlobs][distilbert-sst2-v1] DRIFT: confidence stat=0.9000 threshold=0.1")
 
 
 def test_non_firing_tests_never_posted():

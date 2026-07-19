@@ -36,10 +36,15 @@ from prometheus_client import REGISTRY  # noqa: E402
 from src.drift import runner  # noqa: E402
 from src.drift.alerting import SlackAlerter  # noqa: E402
 from src.drift.baseline import load_baseline  # noqa: E402
-from src.drift.constants import MODEL_VERSION  # noqa: E402
+from src.drift.config import DriftSettings  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_TS = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+# v1.1 D5: identity is config now (not a constant). These mirror the frozen
+# defaults / the shadow drift job env.
+MODEL_VERSION = "distilbert-sst2-v1"
+SHADOW_MODEL_VERSION = "minilm-sst2-v1"
 
 INSERT_PREDICTION = """
 INSERT INTO predictions
@@ -47,11 +52,23 @@ INSERT INTO predictions
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 """
 
+INSERT_SHADOW_PREDICTION = """
+INSERT INTO shadow_predictions
+    (request_id, ts, model_version, label, confidence, token_count, latency_ms,
+     primary_label, primary_confidence)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+def primary_settings():
+    """Default-identity drift settings (primary drift container behavior)."""
+    return DriftSettings(model_version=MODEL_VERSION, source_table="predictions")
+
 
 @pytest.fixture(scope="module")
 def baseline():
     """The committed real baseline — integration runs end-to-end against it."""
-    return load_baseline(REPO_ROOT / "baseline" / "baseline.json")
+    return load_baseline(REPO_ROOT / "baseline" / "baseline.json", MODEL_VERSION)
 
 
 class RecordingPost:
@@ -119,7 +136,12 @@ def test_below_guard_skips_and_writes_no_row(pg_conn, baseline):
     post = RecordingPost()
     skipped_before = metric("mlobs_drift_runs_total", {"outcome": "skipped_insufficient_samples"})
 
-    outcome = runner.run_once(pg_conn, baseline, SlackAlerter("https://hooks.example/x", post=post))
+    outcome = runner.run_once(
+        pg_conn,
+        baseline,
+        SlackAlerter("https://hooks.example/x", model_version=MODEL_VERSION, post=post),
+        primary_settings(),
+    )
 
     assert outcome == "skipped_insufficient_samples"
     assert drift_run_rows(pg_conn) == []
@@ -137,7 +159,12 @@ def test_drifted_window_evaluates_writes_row_and_alerts(pg_conn, baseline):
         for test in ("class", "token_length", "confidence")
     }
 
-    outcome = runner.run_once(pg_conn, baseline, SlackAlerter("https://hooks.example/x", post=post))
+    outcome = runner.run_once(
+        pg_conn,
+        baseline,
+        SlackAlerter("https://hooks.example/x", model_version=MODEL_VERSION, post=post),
+        primary_settings(),
+    )
 
     assert outcome == "evaluated"
     rows = drift_run_rows(pg_conn)
@@ -162,7 +189,10 @@ def test_drifted_window_evaluates_writes_row_and_alerts(pg_conn, baseline):
     # One Slack message per newly-firing test, frozen payload shape.
     assert len(post.calls) == 3
     texts = [payload["text"] for _, payload in post.calls]
-    assert all(text.startswith("[mlobs] DRIFT: ") and "window_n=500" in text for text in texts)
+    assert all(
+        text.startswith("[mlobs][distilbert-sst2-v1] DRIFT: ") and "window_n=500" in text
+        for text in texts
+    )
 
     assert metric("mlobs_drift_runs_total", {"outcome": "evaluated"}) == evaluated_before + 1
     for test in ("class", "token_length", "confidence"):
@@ -179,7 +209,12 @@ def test_empty_webhook_writes_row_without_alert_attempt(pg_conn, baseline):
     seed_predictions(pg_conn, 500)
     post = RecordingPost()
 
-    outcome = runner.run_once(pg_conn, baseline, SlackAlerter("", post=post))
+    outcome = runner.run_once(
+        pg_conn,
+        baseline,
+        SlackAlerter("", model_version=MODEL_VERSION, post=post),
+        primary_settings(),
+    )
 
     assert outcome == "evaluated"
     assert post.calls == []  # alerting disabled: zero HTTP attempts
@@ -223,7 +258,12 @@ def test_matching_window_evaluates_without_drift(pg_conn, baseline):
     pg_conn.commit()
 
     post = RecordingPost()
-    outcome = runner.run_once(pg_conn, baseline, SlackAlerter("https://hooks.example/x", post=post))
+    outcome = runner.run_once(
+        pg_conn,
+        baseline,
+        SlackAlerter("https://hooks.example/x", model_version=MODEL_VERSION, post=post),
+        primary_settings(),
+    )
 
     assert outcome == "evaluated"
     stored = drift_run_rows(pg_conn)
@@ -233,3 +273,68 @@ def test_matching_window_evaluates_without_drift(pg_conn, baseline):
     assert alert_sent is False
     assert post.calls == []
     assert math.isfinite(stored[0][5])  # KL finite: smoothing keeps q_i > 0
+
+
+def seed_shadow_predictions(conn, n, *, model_version, start_ts=BASE_TS):
+    """Seed n shadow_predictions rows drifted vs any reasonable SST-2 baseline
+    (all-negative, top token-length bin, low-confidence bin)."""
+    rows = [
+        (
+            str(uuid.uuid4()),
+            start_ts + timedelta(seconds=i),
+            model_version,
+            "negative",
+            0.56,
+            100,
+            9.87,
+            "positive",  # denormalized primary half of the comparison
+            0.95,
+        )
+        for i in range(n)
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(INSERT_SHADOW_PREDICTION, rows)
+    conn.commit()
+    return rows
+
+
+def test_shadow_source_evaluates_shadow_predictions(pg_conn):
+    # v1.1 D5: SOURCE_TABLE=shadow_predictions + MODEL_VERSION=minilm-sst2-v1.
+    # The shadow drift job reads its OWN table/model and stamps drift_runs with
+    # its identity. Prove isolation: 500 primary rows in `predictions` must be
+    # invisible to the shadow window (wrong source_table), so only the 300
+    # shadow rows are evaluated.
+    shadow_baseline = load_baseline(
+        REPO_ROOT / "baseline" / "baseline-minilm.json", SHADOW_MODEL_VERSION
+    )
+    seed_predictions(pg_conn, 500)  # primary table — must be ignored by shadow job
+    seed_shadow_predictions(pg_conn, 300, model_version=SHADOW_MODEL_VERSION)
+    seed_shadow_predictions(  # foreign shadow model — filtered by model_version
+        pg_conn, 400, model_version="other-shadow-v9", start_ts=BASE_TS + timedelta(hours=2)
+    )
+
+    settings = DriftSettings(model_version=SHADOW_MODEL_VERSION, source_table="shadow_predictions")
+    post = RecordingPost()
+    outcome = runner.run_once(
+        pg_conn,
+        shadow_baseline,
+        SlackAlerter("https://hooks.example/x", model_version=SHADOW_MODEL_VERSION, post=post),
+        settings,
+    )
+
+    assert outcome == "evaluated"
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT model_version, sample_count, drift_detected FROM drift_runs ORDER BY id")
+        stored = cur.fetchall()
+    assert len(stored) == 1
+    row_model_version, sample_count, drift_detected = stored[0]
+    assert row_model_version == SHADOW_MODEL_VERSION  # drift_runs carries shadow identity
+    assert sample_count == 300  # only the matching shadow rows, primary table ignored
+    assert drift_detected is True
+
+    # Slack text carries the shadow model_version prefix (v1.1 D5).
+    assert post.calls
+    assert all(
+        payload["text"].startswith("[mlobs][minilm-sst2-v1] DRIFT: ")
+        for _, payload in post.calls
+    )
