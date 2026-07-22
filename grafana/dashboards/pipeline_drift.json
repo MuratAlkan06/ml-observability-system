@@ -333,7 +333,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mlobs_drift_window_sample_count",
+          "expr": "mlobs_drift_window_sample_count{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -409,7 +409,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mlobs_drift_class_chi2_stat",
+          "expr": "mlobs_drift_class_chi2_stat{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -492,7 +492,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mlobs_drift_length_chi2_stat",
+          "expr": "mlobs_drift_length_chi2_stat{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -575,7 +575,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mlobs_drift_confidence_kl_nats",
+          "expr": "mlobs_drift_confidence_kl_nats{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -658,7 +658,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mlobs_drift_detected",
+          "expr": "mlobs_drift_detected{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -736,7 +736,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(mlobs_drift_runs_total[$__rate_interval])) by (outcome)",
+          "expr": "sum(rate(mlobs_drift_runs_total{job=\"drift\"}[$__rate_interval])) by (outcome)",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -812,7 +812,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - mlobs_drift_last_run_timestamp_seconds",
+          "expr": "time() - mlobs_drift_last_run_timestamp_seconds{job=\"drift\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -873,7 +873,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(mlobs_drift_alerts_sent_total[$__rate_interval])) by (test)",
+          "expr": "sum(rate(mlobs_drift_alerts_sent_total{job=\"drift\"}[$__rate_interval])) by (test)",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
