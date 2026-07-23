@@ -133,14 +133,48 @@ hey -z 60s -c 1 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:800
 
 ### v1.1 load test (shadow on/off)
 
-> **Pending EC2 certification.** The headline v1.1 claim — that re-scoring every prediction with
-> the shadow model adds **zero measurable latency to the primary `/predict` path** — is certified
-> by re-running the `hey` methodology above on the deployed t3.medium with the shadow scorer **on**
-> vs. **off** (`docker compose stop shadow-scorer`) and comparing p95. By design the shadow scorer
-> reads `/predict`'s output *asynchronously* off the Redis stream, so it cannot sit in the request
-> path; this run confirms that empirically under load. The certified numbers land here after the
-> EC2 session; a local indicative run is captured in the slice's e2e evidence and is explicitly
-> *not* the certified figure.
+Certified **on the deployed EC2 t3.medium** (2 vCPU / 4 GB, single uvicorn worker) with
+[`hey`](https://github.com/rakyll/hey) driving `POST /predict` on a fixed ~15-token review
+sentence at the **5 rps demo rate**, warm steady state, over matched **120-second** windows —
+shadow scorer **on** vs. **off** (`docker compose stop shadow-scorer`):
+
+> **Re-scoring every prediction with the shadow model adds no measurable latency to the primary
+> `/predict` path — p95 delta −1.0% at the 5 rps operating point, inside the ≤10% bar.**
+
+| Shadow | Throughput | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| **on** | 5.00 rps | 55.1 ms | 105.6 ms | 191.2 ms |
+| **off** | 5.00 rps | 54.0 ms | 106.7 ms | 235.3 ms |
+
+The p95 delta is **−1.0%** — within run-to-run noise and comfortably inside the **≤10%** criterion.
+By design the shadow scorer reads `/predict`'s output *asynchronously* off the Redis stream, so it
+cannot sit in the request path; this confirms it empirically under load.
+
+**Methodology note:** short 60 s windows proved noise-dominated — two identical shadow-off runs
+differed by ~14% at p95 — so the **120 s matched windows above are the figure of record**.
+
+**Saturation reference** (c=2, 60 s — *not* the operating point): **12.2 rps** shadow-on vs.
+**17.2 rps** shadow-off. At saturation the single-worker CPU ceiling is shared with shadow
+inference; at the 5 rps demo operating point there is no measurable impact.
+
+**Failure isolation, re-confirmed on EC2:** stopping the shadow scorer for two 2-minute windows
+under load left `/predict` unaffected; on restart the consumer-group backlog drained to **lag 0 in
+< 40 s**, with **0 duplicate** `shadow_predictions` (`count == count(DISTINCT request_id)`). The
+one-time migration `sql/migrations/002_shadow.sql` was applied on the live volume, and a second
+application verified as a clean no-op (idempotent).
+
+Reproduce (15 s warm-up, then the 120 s measured run at 5 rps; toggle the scorer between windows):
+
+```bash
+PAYLOAD='{"text":"..."}'   # a fixed ~15-token review sentence
+# shadow ON
+docker compose start shadow-scorer
+hey -z 15s  -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
+hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
+# shadow OFF
+docker compose stop shadow-scorer
+hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
+```
 
 ## How drift detection works
 
@@ -262,7 +296,7 @@ Built in waves of independently reviewable slices.
   baselines and `[mlobs][<model_version>]` Slack prefixes
 - [x] **S8 · Comparison observability** — *mlobs — Model Comparison* dashboard, promotion-decision
   criteria with the no-ground-truth caveat, docs
-- [ ] **EC2 re-certification** — redeploy + shadow-on/off `hey` load test to certify zero
+- [x] **EC2 re-certification** — redeploy + shadow-on/off `hey` load test to certify zero
   primary-path latency impact under load, then tag `v1.1.0`
 
 ## Frozen specification
