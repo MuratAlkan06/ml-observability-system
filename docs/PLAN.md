@@ -74,6 +74,8 @@ ruff~=0.15.21
 
 > **Erratum (2026-07-14, S1):** `tokenizers==0.23.0` was never published to PyPI (only 0.23.0rc0/0.23.1 exist); transformers 5.13.1 caps `<=0.23.0`, so the highest installable final is `0.22.2`. Pin corrected; coupling rule unchanged.
 
+> **Erratum (2026-07-23):** `fastapi~=0.139.0` and `ruff~=0.15.21` above reflect the 2026-07-14 verification snapshot; both have since moved to `0.139.2` and `0.15.22` respectively via merged Dependabot PRs, within the original `~=` band. requirements/api.txt and requirements/dev.txt are the authoritative, dependabot-maintained pins; this table is not updated in place.
+
 - **torch CPU install (frozen):** api Dockerfile MUST run `pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu` first (default Linux wheel bundles CUDA — blows RAM/disk budget).
 - **No scipy/numpy:** drift math implemented in pure Python against hard-coded critical values (§5) — saves ~60MB in slim image; interview talking point.
 - **transformers v5 notes:** pass `dtype=torch.float32` explicitly (deterministic CPU); `TextClassificationPipeline` remains supported in v5.
