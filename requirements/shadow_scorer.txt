@@ -7,5 +7,5 @@ tokenizers==0.22.2            # EXACT: transformers 5.13.1 caps <=0.23.0; 0.23.0
 torch==2.13.0                 # install from CPU index (Dockerfile)
 redis~=8.0.1
 psycopg[binary]~=3.3.4
-prometheus-client~=0.25.0
+prometheus-client~=0.26.0
 pydantic-settings~=2.14.2
