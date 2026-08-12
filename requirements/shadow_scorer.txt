@@ -5,7 +5,7 @@
 transformers==5.13.1          # EXACT: v5 ships breaking changes in minor releases; requires torch>=2.4
 tokenizers==0.22.2            # EXACT: transformers 5.13.1 caps <=0.23.0; 0.23.0 final was never published, 0.23.1 violates the cap
 torch==2.13.0                 # install from CPU index (Dockerfile)
-redis~=8.0.1
+redis~=8.1.0
 psycopg[binary]~=3.3.4
 prometheus-client~=0.25.0
 pydantic-settings~=2.14.2
