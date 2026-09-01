@@ -17,8 +17,8 @@ Never conflate them. There is no `model_id` in this codebase; introducing one is
 
 Supporting rules:
 
-- Scalars carry units: `_ms`, `_seconds`, `_nats`, `_ratio`, `_entries`. Constants take the full suffix — `EVAL_INTERVAL_SECONDS`, not `_S`. (`RECOVER_INTERVAL_S`-style names in `src/consumer/consumer.py` are grandfathered: fix on touch, own commit.)
-- Prometheus: metric prefix `mlobs_<service>_`; counters are declared without `_total` (the client appends it); every label set is pre-initialized at import so all series exist from the first scrape; label values come from frozen enums (`test ∈ {class, token_length, confidence}`; `outcome ∈ {evaluated, skipped_insufficient_samples, error}`).
+- Scalars carry units: `_ms`, `_seconds`, `_nats`, `_ratio`, `_entries`. Constants take the full suffix — `EVAL_INTERVAL_SECONDS`, not `_S`. (`RECOVER_INTERVAL_S`-style names in `src/consumer/consumer.py` and `src/shadow_scorer/scorer.py` are grandfathered: fix on touch, own commit.)
+- Prometheus: metric prefix `mlobs_<service>_`; counters are declared without `_total` (the client appends it) — counters in `src/consumer/metrics.py` and `src/drift/metrics.py` declare the suffix explicitly and are grandfathered (the client normalizes both forms to the same exposed series); new counters use the unsuffixed form; every label set is pre-initialized at import so all series exist from the first scrape; label values come from frozen enums (`test ∈ {class, token_length, confidence}`; `outcome ∈ {evaluated, skipped_insufficient_samples, error}`).
 - No `src/common`, zero cross-service imports. A needed copy is duplicated consciously with a comment naming the original (pattern: `src/shadow_scorer/parsing.py`). The event contract lives in `src/consumer/parsing.py`, `src/shadow_scorer/parsing.py`, and the DDL in `tests/drift/conftest.py`; touch one → re-verify all three against `sql/init.sql` in the same commit.
 - New env vars take the `MLOBS_<SERVICE>_` prefix (pattern: `MLOBS_SHADOW_MODEL_VERSION`). Existing unprefixed vars are grandfathered until a dedicated migration slice; add no new ones.
 
