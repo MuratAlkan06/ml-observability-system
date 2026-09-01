@@ -11,7 +11,7 @@ Bind contributors to tailored engineering principles, then close the cloud/DevOp
 | Slice | Scope | Status |
 |---|---|---|
 | P0 (#36) | `PRINCIPLES.md` + this contract + CI `DocsGate` + README link. Docs/CI only. | in flight |
-| P1 | Terraform codifying the EC2 shadow-test environment: S3 remote state with locking, clean module structure, `terraform validate` + `plan` in CI. | queued |
+| P1 (#40) | Terraform codifying the EC2 shadow-test environment: S3 remote state with locking, a single flat root rather than a module tree (D12), `terraform validate` + `plan` in CI. | in flight (PR #41) |
 | P2 | Compose→k3s migration on the existing EC2 host per stretch-ladder rung 2, including the ladder's required written why/when doc, plus GitHub Actions OIDC deploy pipeline (no long-lived AWS keys). Owner ruling 2026-09-01: k3s — honors the frozen ladder, no deviation entry needed. | queued |
 | P3 (stretch) | Kubernetes manifests/Helm evidence; ephemeral EKS run documented apply → evidence → destroy. | queued |
 

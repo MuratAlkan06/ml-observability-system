@@ -259,6 +259,18 @@ latency clear the bar above. Shadow scoring is the safe, zero-user-impact precon
 rollout; canary routing, automated promotion, and A/B significance testing are deliberately
 deferred.
 
+## Deployment
+
+The EC2 numbers above were measured on a single t3.medium in us-west-2 (Ubuntu 24.04, Docker
+Compose, IMDSv2 required, only `:8000` and `:3000` exposed). That host is now codified in
+[`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
+of its rules through `import` blocks rather than recreating them, keeps state in S3, and runs
+`validate` on every pull request plus a read-only `plan` authenticated by GitHub OIDC — this
+repository holds no long-lived AWS credentials. `infra/README.md` carries the one-time bootstrap
+runbook, the running-versus-stopped cost note (≈ $3/month at the start-for-a-demo, stop-afterwards
+usage pattern), and an explicit list of what the slice does not prove — notably that the host is
+*described* by code, not yet rebuilt from it.
+
 ## Stack
 
 | Layer | Technology |
