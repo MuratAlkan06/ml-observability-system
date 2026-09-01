@@ -19,6 +19,17 @@ updates:
       - dependency-name: "transformers"
       - dependency-name: "tokenizers"
 
+  # infra/ec2 pins the AWS provider to a minor band (~> 6.33) and records exact
+  # build hashes in .terraform.lock.hcl, so this ecosystem is what keeps the
+  # lock moving. A 6.x bump lands as a reviewable PR that TerraformValidate
+  # checks; a 7.x major cannot arrive this way and needs a deliberate edit to
+  # versions.tf. Dependabot PRs are skipped by TerraformPlan, whose token
+  # cannot assume the AWS role.
+  - package-ecosystem: "terraform"
+    directory: "/infra/ec2"
+    schedule:
+      interval: "weekly"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
