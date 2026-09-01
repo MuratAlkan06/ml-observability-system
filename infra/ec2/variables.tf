@@ -55,4 +55,15 @@ variable "ssh_ingress_cidr" {
   EOT
   type        = string
   sensitive   = true
+
+  # Fail closed on a malformed value rather than apply one. The masking that
+  # keeps this out of the public Actions log is GitHub's, not Terraform's, and
+  # it is literal: a secret stored as `A.B.C.D` or `A.B.C.D/24` does not match
+  # the `A.B.C.D/32` the EC2 API reads back, so the CIDR would print in clear
+  # in the plan output. A bare IP is also silently widened by AWS to a /32,
+  # so the mistake produces working infrastructure and a leaked address.
+  validation {
+    condition     = can(cidrnetmask(var.ssh_ingress_cidr)) && endswith(var.ssh_ingress_cidr, "/32")
+    error_message = "ssh_ingress_cidr must be a single host CIDR in exact wire form A.B.C.D/32; GitHub secret masking depends on the literal form matching what the EC2 API returns."
+  }
 }

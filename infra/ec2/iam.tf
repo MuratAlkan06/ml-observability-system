@@ -56,12 +56,23 @@ resource "aws_iam_role" "tf_plan" {
 # Permissions are a hand-written customer policy, not the AWS-managed
 # ReadOnlyAccess: ReadOnlyAccess grants read across every service in the
 # account — Secrets Manager metadata, S3 object listings, DynamoDB scans — none
-# of which a plan of this root needs. This policy is the exact read surface of
-# the resources declared here, and nothing else.
+# of which a plan of this root needs. What this policy narrows is the set of
+# services reachable at all: EC2, one state object, and this root's own IAM
+# objects. Within EC2 it is not a per-resource grant, and the statement below
+# says so plainly rather than implying a tighter boundary than IAM can express.
 data "aws_iam_policy_document" "tf_plan" {
-  # data.aws_vpc, data.aws_subnet, the instance, the security group, its rules
-  # and the root volume. EC2 Describe* is not resource-scopable, so the
-  # resource is "*" — bounded instead by the action list being read-only.
+  # What the plan actually reads is data.aws_vpc, data.aws_subnet, the
+  # instance, the security group, its rules and the root volume. `ec2:Describe*`
+  # cannot say that: EC2 Describe actions do not support resource-level
+  # permissions, so IAM ignores the resource element and "*" is the only form
+  # that works. What this grants is therefore read-only, account-wide EC2
+  # metadata — roughly 200 actions, among them DescribeInstanceAttribute, which
+  # returns userData for any instance in account 601548053958, not just ours.
+  #
+  # Accepted because the account currently holds exactly one workload: this
+  # demo. Revisit when a second one lands — the fix then is an enumerated
+  # action list plus a condition key, not a resource ARN, which Describe would
+  # go on ignoring.
   statement {
     sid       = "DescribeEc2"
     effect    = "Allow"
