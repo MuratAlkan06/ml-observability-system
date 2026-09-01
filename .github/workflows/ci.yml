@@ -116,7 +116,7 @@ jobs:
       - name: No banned overclaim vocabulary
         run: |
           status=0
-          hits=$(grep -rniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/) || status=$?
+          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/) || status=$?
           if [ "$status" -eq 0 ]; then
             echo "::error::banned overclaim vocabulary (PRINCIPLES.md §6):"
             echo "$hits"
@@ -146,7 +146,7 @@ jobs:
       - name: No model_id in src
         run: |
           status=0
-          hits=$(grep -rnP '\bmodel_id\b' src) || status=$?
+          hits=$(grep -rInP '\bmodel_id\b' src) || status=$?
           if [ "$status" -eq 0 ]; then
             echo "::error::model_id is not a thing here — use model_name / model_revision / model_version (PRINCIPLES.md §1 Law 1):"
             echo "$hits"
