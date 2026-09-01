@@ -97,3 +97,90 @@ jobs:
           test "$bytes" -lt 2147483648
       - name: pip check inside image
         run: docker run --rm mlobs-shadow:ci pip check
+
+  DocsGate:
+    name: Docs & naming gate
+    # Phase 2 P0: mechanical enforcement of PRINCIPLES.md — banned overclaim
+    # vocabulary (§6), the exactly-once *effect* wording (§6), the model_id ban
+    # (§1 Law 1), the README link (§9), and no AI-attribution trailers in the
+    # PR's commit messages (§6). PRINCIPLES.md itself and this workflow file are
+    # outside the swept paths by design: both quote the banned strings.
+    # Every sweep checks grep's exit status explicitly — a bare `! grep` would
+    # read a grep error (status 2) as "no match" and pass silently.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: No banned overclaim vocabulary
+        run: |
+          status=0
+          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/) || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::banned overclaim vocabulary (PRINCIPLES.md §6):"
+            echo "$hits"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::grep exited with status $status"
+            exit 1
+          fi
+          echo "ok: no banned overclaim vocabulary"
+
+      - name: README says exactly-once effect, never bare exactly-once
+        run: |
+          status=0
+          hits=$(grep -niP 'exactly-once(?![ -]?effect)' README.md) || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::bare 'exactly-once' in README.md — only the exactly-once effect is true (PRINCIPLES.md §6):"
+            echo "$hits"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::grep exited with status $status"
+            exit 1
+          fi
+          echo "ok: no bare exactly-once claim"
+
+      - name: No model_id in src
+        run: |
+          status=0
+          hits=$(grep -rInP '\bmodel_id\b' src) || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::model_id is not a thing here — use model_name / model_revision / model_version (PRINCIPLES.md §1 Law 1):"
+            echo "$hits"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::grep exited with status $status"
+            exit 1
+          fi
+          echo "ok: no model_id"
+
+      - name: README links PRINCIPLES.md
+        run: |
+          if ! grep -q 'PRINCIPLES.md' README.md; then
+            echo "::error::README.md must link PRINCIPLES.md (PRINCIPLES.md §9)"
+            exit 1
+          fi
+          echo "ok: README links PRINCIPLES.md"
+
+      - name: No AI-attribution trailers in PR commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git log --format='%B' "origin/${BASE_REF}..HEAD" > "$RUNNER_TEMP/commit-messages.txt"
+          status=0
+          hits=$(grep -niE 'co-authored-by:.*(claude|gpt|copilot|gemini)|generated with[^a-z0-9]*(claude|chatgpt|copilot)' "$RUNNER_TEMP/commit-messages.txt") || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::AI-attribution trailer in a commit message on this PR (PRINCIPLES.md §6):"
+            echo "$hits"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::grep exited with status $status"
+            exit 1
+          fi
+          echo "ok: no AI-attribution trailers"

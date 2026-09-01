@@ -17,6 +17,9 @@ drift can be compared side by side to support a data-driven promote-or-hold deci
 impact on the primary prediction path. It is a compact, end-to-end demonstration of the
 observability that real ML systems need but rarely ship with.
 
+Engineering rules binding every contributor — human or agent — live in
+[PRINCIPLES.md](PRINCIPLES.md).
+
 ## Architecture
 
 ```mermaid
@@ -286,8 +289,8 @@ Built in waves of independently reviewable slices.
 **Wave 3**
 - [x] **S5 · End-to-end + load test** — full integration demo (above) and local load test
 - [x] **S5 · Deploy** — single-node EC2 t3.medium (Docker Compose, Ubuntu 24.04); only `:8000`
-  and `:3000` exposed, IMDSv2 enforced. Live-verified on the instance: exactly-once pipeline at
-  ~4.7k predictions and all three drift tests firing real Slack alerts.
+  and `:3000` exposed, IMDSv2 enforced. Live-verified on the instance: exactly-once effect in the
+  pipeline at ~4.7k predictions and all three drift tests firing real Slack alerts.
 
 **v1.1 — Shadow / candidate comparison**
 - [x] **S6 · Shadow scorer** — MiniLM-L6 candidate re-scores live traffic off a second consumer
