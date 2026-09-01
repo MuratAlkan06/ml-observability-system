@@ -220,11 +220,19 @@ jobs:
     # would fail at assume-role for reasons unrelated to the change under test.
     # TerraformValidate still covers those cases.
     #
+    # The Dependabot half of that gate reads `pull_request.user.login`, not
+    # `github.actor`, because `github.actor` is whoever caused the current run
+    # and not who opened the pull request. Clicking "Re-run jobs" on a
+    # Dependabot PR sets it to the human who clicked, the `!=` then passes, and
+    # the job un-skips into an assume-role failure on a branch whose token was
+    # never going to work. `pull_request.user.login` is a property of the pull
+    # request itself, so it stays `dependabot[bot]` across every re-run.
+    #
     # Actions are SHA-pinned in this job specifically. It is the only job that
     # holds an AWS session, so a hijacked mutable tag here would be an account
     # problem rather than a CI problem; elsewhere in this file tag pins plus
     # Dependabot remain the right trade.
-    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     # Naming any permission here replaces the whole inherited set, so
     # contents: read must be restated alongside id-token: write — without it
@@ -246,7 +254,56 @@ jobs:
       # The SSH CIDR reaches the plan as a secret so that GitHub masks it in
       # this public log: Terraform's own `sensitive` marking does not cover the
       # security group's API-read `ingress` attribute. See infra/README.md.
+      # Masking is the second line of defence here, not the first — the plan
+      # body goes to a file that is never echoed.
+      #
+      # `-detailed-exitcode` returns 0 for no changes, 1 for a failed plan and 2
+      # for a plan with changes. Only 2 is ambiguous, and its meaning depends on
+      # the event. On a pull request a non-empty plan is the change under review,
+      # so it is reported and passes. On a push to main the config has already
+      # been merged, so the same exit code means the config and the account have
+      # diverged — that is drift, and catching it is why this job runs on main
+      # at all, so there it fails.
       - name: terraform plan
-        run: terraform -chdir=infra/ec2 plan -input=false -lock=false
+        run: |
+          # `|| code=$?` rather than `; code=$?`: the default shell is `bash -e`,
+          # under which a bare failing command aborts the step before its status
+          # can be captured, and the summary below would never run.
+          code=0
+          terraform -chdir=infra/ec2 plan -input=false -lock=false -no-color \
+            -detailed-exitcode -out=tf.tfplan > plan.txt 2>&1 || code=$?
+          # plan.txt is never printed: aws_security_group.app's API-read `ingress`
+          # attribute carries the SSH CIDR and is not sensitive-marked (empirically
+          # confirmed: a plan with a dummy variable value still printed the real CIDR).
+          rc=0
+          case "$code" in
+            0)
+              echo "ok: plan is a no-op"
+              ;;
+            1)
+              echo "::error::plan failed (exit 1)"
+              rc=1
+              ;;
+            2)
+              if [ "$EVENT_NAME" = "push" ]; then
+                echo "::error::config/reality drift detected on main — addresses and actions only; re-run locally for values"
+                rc=1
+              else
+                echo "::notice::plan has changes (expected for infra PRs) — addresses and actions only"
+              fi
+              terraform -chdir=infra/ec2 show -json tf.tfplan \
+                | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.address) \(.change.actions|join(","))"' || true
+              ;;
+            *)
+              echo "::error::terraform plan returned unexpected exit code $code"
+              rc=1
+              ;;
+          esac
+          exit "$rc"
         env:
+          # Interpolated into the environment rather than into the script body:
+          # an expression expanded inline becomes shell source, so a value
+          # containing quotes would change the script's meaning rather than a
+          # variable's value.
+          EVENT_NAME: ${{ github.event_name }}
           TF_VAR_ssh_ingress_cidr: ${{ secrets.SSH_INGRESS_CIDR }}
