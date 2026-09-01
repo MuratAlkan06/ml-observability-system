@@ -23,13 +23,20 @@ htmlcov/
 !.env.example
 
 # Terraform local working state (infra/) — provider cache, any state that ends
-# up on disk, saved plans, and the tfvars file carrying the SSH ingress CIDR.
+# up on disk, saved plans, and every tfvars variant carrying the SSH ingress
+# CIDR. The pattern is `*.tfvars`, not `terraform.tfvars`: Terraform also loads
+# `*.auto.tfvars` and `*.tfvars.json` automatically, and a `-var-file` accepts
+# any name at all, so pinning one filename ignores the file the operator was
+# told to create and none of the ones they might create instead. An explicit
+# negation keeps a committed `.tfvars.example` template possible.
 # The lock file .terraform.lock.hcl is NOT ignored: it is committed on purpose
 # so CI and local runs resolve identical provider builds.
 .terraform/
 *.tfstate*
 *.tfplan
-terraform.tfvars
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
 
 # IDE / editor
 .idea/
