@@ -22,6 +22,15 @@ htmlcov/
 .env.*
 !.env.example
 
+# Terraform local working state (infra/) — provider cache, any state that ends
+# up on disk, saved plans, and the tfvars file carrying the SSH ingress CIDR.
+# The lock file .terraform.lock.hcl is NOT ignored: it is committed on purpose
+# so CI and local runs resolve identical provider builds.
+.terraform/
+*.tfstate*
+*.tfplan
+terraform.tfvars
+
 # IDE / editor
 .idea/
 .vscode/
