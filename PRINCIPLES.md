@@ -9,7 +9,7 @@ These rules bind every contributor to this repository, human or agent. The repo 
 - `model_revision` — the pinned HF commit SHA.
 - `model_version` — the public frozen string echoed in responses, stream events, and DB rows (`distilbert-sst2-v1`, `minilm-sst2-v1`).
 
-Never conflate them. There is no `model_id` in this codebase; introducing one is a defect (CI-enforced).
+Never conflate them. There is no `model_id` under `src/`; introducing one is a defect (CI-enforced). The `model_id` parameter in `scripts/build_baseline.py` holds a `model_name` and is grandfathered — rename on touch, own commit.
 
 **Law 2 — the model pair is `primary` / `shadow`.** Columns and metric labels use `primary_*` / `shadow_*`; "candidate" is acceptable in prose. The champion/challenger vocabulary is banned (CI-enforced). Metrics separate models by Prometheus `job` label (`job="drift"` vs `job="drift_shadow"`), never by a metric label; only the comparison matrix uses `{primary_label, shadow_label}`.
 
@@ -51,7 +51,7 @@ At-least-once in, exactly-once effect out: `XREADGROUP` → validate → one tra
 ## 6. Honesty and documentation
 
 - A performance number exists only with its methodology — host, tool + version, warm-up, measurement window, reproduce block (the README `hey` sections are the template). EC2 numbers and local M4 numbers never mix.
-- Overclaim vocabulary is banned in `README.md`, `docs/`, `src/`, `tests/`: "champion"/"challenger", "distributed", "production-ready", "production-grade". In the README, bare "exactly-once" without "effect" is banned — only the exactly-once *effect* is true. CI enforces both sweeps (this file and the workflow file are excluded; frozen PLAN text and in-code docstrings are review-enforced). Do not test the gate.
+- Overclaim vocabulary is banned in `README.md`, `docs/`, `src/`, `tests/`: "champion"/"challenger", "distributed", "production-ready", "production-grade". In the README, bare "exactly-once" without "effect" is banned — only the exactly-once *effect* is true. CI enforces both sweeps (this file and the workflow file are excluded from the sweeps; the bare-exactly-once rule is CI-enforced in the README only — for that phrasing, frozen PLAN text and in-code docstrings are review-enforced). Do not test the gate.
 - Known approximations and tradeoffs are first-class content (token-length chi² binning; restart re-alert; no-ground-truth agreement caveat). New ones follow suit.
 - The decision log is `docs/PLAN.md`: append-only errata (`> **Erratum (<date>, <slice>):** …`) and D-numbered decisions cited from code (`v1.1 D5`). Non-obvious decisions get a D-number in the same commit.
 - Docs ride in the slice: behavior and its description change in one diff.
