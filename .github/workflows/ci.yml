@@ -113,10 +113,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # infra/ joined the swept paths in Phase 2 P1: an IaC directory is exactly
+      # where "production-grade" creeps into a comment, and the runbook there
+      # makes cost and capability claims a stranger will check.
       - name: No banned overclaim vocabulary
         run: |
           status=0
-          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/) || status=$?
+          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/ infra/) || status=$?
           if [ "$status" -eq 0 ]; then
             echo "::error::banned overclaim vocabulary (PRINCIPLES.md §6):"
             echo "$hits"
