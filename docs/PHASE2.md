@@ -12,7 +12,7 @@ Bind contributors to tailored engineering principles, then close the cloud/DevOp
 |---|---|---|
 | P0 (#36) | `PRINCIPLES.md` + this contract + CI `DocsGate` + README link. Docs/CI only. | in flight |
 | P1 | Terraform codifying the EC2 shadow-test environment: S3 remote state with locking, clean module structure, `terraform validate` + `plan` in CI. | queued |
-| P2 | Managed deployment + GitHub Actions OIDC deploy (no long-lived AWS keys). Target open: ECS Fargate vs the stretch ladder's k3s — owner ruling pending; deviating from the ladder records a D-number. | blocked on ruling |
+| P2 | Compose→k3s migration on the existing EC2 host per stretch-ladder rung 2, including the ladder's required written why/when doc, plus GitHub Actions OIDC deploy pipeline (no long-lived AWS keys). Owner ruling 2026-09-01: k3s — honors the frozen ladder, no deviation entry needed. | queued |
 | P3 (stretch) | Kubernetes manifests/Helm evidence; ephemeral EKS run documented apply → evidence → destroy. | queued |
 
 ## Out of scope
@@ -36,4 +36,4 @@ Independent verification per slice; skeptical release gate at phase close. Evide
 
 ## Open questions
 
-1. P2 deployment target (ECS Fargate vs k3s) — owner ruling pending.
+None. (P2 target resolved 2026-09-01: k3s — see slice table.)
