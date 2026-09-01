@@ -44,7 +44,15 @@ Stated plainly, because the gap matters more than the coverage:
   that is out of scope here.
 - **It does not encrypt the root volume.** The as-found volume is unencrypted,
   and turning encryption on would force a replacement of the certified disk.
-  Recorded as a known gap rather than fixed by a drive-by change.
+  Recorded as a known gap rather than fixed by a drive-by change. The
+  account-level half of the remediation is separate and touches nothing that
+  exists: `aws ec2 enable-ebs-encryption-by-default --region us-west-2` makes
+  every *future* volume in the region encrypted at creation, so the gap stops
+  growing while the certified disk stays exactly as measured. It is a regional
+  account setting, not Terraform state, which is why it is written here rather
+  than added to this root. Retiring the existing unencrypted volume needs a
+  snapshot, an encrypted copy and a stop/detach/attach swap — deferred to P3,
+  once the numbers that volume carries are no longer the ones being cited.
 - **It does not narrow the public ingress.** Ports 8000 and 3000 are open to
   `0.0.0.0/0` as found, which is why the host only runs during a demo window.
 
@@ -74,10 +82,30 @@ terraform -chdir=infra/ec2 init -backend=false
 terraform -chdir=infra/ec2 validate
 ```
 
+### Provider bumps and the lock file
+
+Dependabot watches `infra/ec2` for provider updates. `.terraform.lock.hcl`
+records hashes for two platforms on purpose — `linux_amd64` for CI runners and
+`darwin_arm64` for the operator's laptop — and Terraform only adds hashes for
+the platform it happens to be running on. A lock regenerated on the laptop
+therefore carries no Linux hashes, and CI's `init` then fails a checksum check
+rather than a version check. The error names the provider and the missing hash,
+not the missing platform, so it reads like a supply-chain alarm when it is a
+one-line omission.
+
+Check the first Dependabot bump's diff for both platform blocks before merging.
+If either is absent, regenerate the lock with both named explicitly and push
+that onto the bump branch:
+
+```bash
+terraform -chdir=infra/ec2 providers lock \
+  -platform=linux_amd64 -platform=darwin_arm64
+```
+
 ## Handling of the SSH ingress CIDR
 
 `var.ssh_ingress_cidr` is the operator's home IP. It is `sensitive = true`, has
-no default, and appears in no committed file. Two things worth knowing:
+no default, and appears in no committed file. Three things worth knowing:
 
 1. **Terraform's `sensitive` marking is not sufficient on its own.** It hides
    values *derived from* the variable, but `aws_security_group`'s computed
@@ -89,6 +117,13 @@ no default, and appears in no committed file. Two things worth knowing:
    appears on the wire — `A.B.C.D/32`, no spaces, no quotes — and Actions
    replaces every literal occurrence in the log with `***`. A mismatched form
    (bare IP without `/32`, or a trailing newline) silently defeats the masking.
+   `var.ssh_ingress_cidr` now carries a validation block rejecting anything but
+   `A.B.C.D/32`, so a mismatched secret fails the plan instead of publishing the
+   value it was supposed to hide.
+3. **CI no longer prints the plan body.** The `TerraformPlan` job writes the
+   plan to a file it never echoes, and on a non-no-op emits only resource
+   addresses and actions, so masking is the second line of defence rather than
+   the only one.
 
 The value also lands in remote state in clear text. That is why the state bucket
 is private, versioned and encrypted, and why the bootstrap ends with a state
@@ -133,13 +168,58 @@ aws s3api put-public-access-block \
 `us-west-2` requires the explicit `LocationConstraint`; omitting it creates the
 bucket in `us-east-1` and the backend then fails with a redirect error.
 
-Verify all three settings took effect — a bucket holding an IP address in clear
-text is worth reading back rather than assuming:
+Two more settings, both about the same fact — this bucket holds the operator's
+home address in clear text, and versioning means it holds it more than once.
+
+```bash
+# Refuse plaintext transport. BlockPublicAccess stops anonymous callers; it
+# says nothing about the transport an authorised one uses.
+aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyInsecureTransport",
+    "Effect": "Deny",
+    "Principal": "*",
+    "Action": "s3:*",
+    "Resource": ["arn:aws:s3:::$BUCKET", "arn:aws:s3:::$BUCKET/*"],
+    "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+  }]
+}
+EOF
+)"
+
+# Age out superseded state versions.
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+  --lifecycle-configuration '{
+    "Rules": [{
+      "ID": "expire-noncurrent-state",
+      "Status": "Enabled",
+      "Filter": {"Prefix": ""},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 90},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+    }]
+  }'
+```
+
+The lifecycle rule is not housekeeping. Versioning is enabled so a corrupted
+state can be rolled back, but every apply writes a new object version and the
+CIDR is in all of them — so the number of retained copies of that address grows
+without bound, and each one is a separate delete if the value ever has to be
+scrubbed. Ninety days keeps rollback available across a demo cycle and puts a
+ceiling on the history. The `Deny` above applies to the operator too: run the
+state commands over HTTPS, which the AWS CLI does by default.
+
+Verify every setting took effect — a bucket holding an IP address in clear text
+is worth reading back rather than assuming:
 
 ```bash
 aws s3api get-bucket-versioning   --bucket "$BUCKET"   # Status: Enabled
 aws s3api get-bucket-encryption   --bucket "$BUCKET"   # SSEAlgorithm: AES256
 aws s3api get-public-access-block --bucket "$BUCKET"   # all four flags true
+aws s3api get-bucket-policy       --bucket "$BUCKET"   # DenyInsecureTransport
+aws s3api get-bucket-lifecycle-configuration \
+  --bucket "$BUCKET"                                   # NoncurrentDays: 90
 ```
 
 ### 2. Actions secret
@@ -183,9 +263,53 @@ Plan: 6 to import, 3 to add, 6 to change, 0 to destroy.
   or a replacement here, stop and reconcile the configuration with reality
   instead of applying.
 
-If `apply` fails with `EntityAlreadyExists` on the OIDC provider, the account
-already federates GitHub. Do not delete it — other roles may trust it. Add an
-import block instead and re-run:
+#### Before the apply: read back the OIDC provider's audiences
+
+Do this first, every time, even when you expect the provider not to exist. It
+is the one step here whose failure mode is silent:
+
+```bash
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn \
+    arn:aws:iam::601548053958:oidc-provider/token.actions.githubusercontent.com \
+  --query 'ClientIDList'
+```
+
+- **`NoSuchEntity`** — nothing federates GitHub in this account yet. Proceed;
+  the apply creates the provider with the one audience `iam.tf` declares.
+- **A list of audiences** — the provider already exists and is shared. Copy
+  **every** value the command returns into `client_id_list` in `iam.tf`,
+  including any you do not recognise, keeping `sts.amazonaws.com` among them.
+
+An OIDC provider is a single account-wide object, not one per role, and
+`client_id_list` is declared as the whole list rather than as a membership
+assertion. Import a shared provider while `iam.tf` names only
+`sts.amazonaws.com` and Terraform will converge the real object down to that
+one value, revoking every audience it does not mention. Roles belonging to
+other workflows then fail `AssumeRoleWithWebIdentity` on an audience mismatch,
+which surfaces far from here and long after. Terraform reports the change as an
+ordinary in-place update, so nothing about the plan summary flags it.
+
+That makes the plan line for this resource worth reading directly. Additions
+are fine:
+
+```
+~ resource "aws_iam_openid_connect_provider" "github" {
+    ~ client_id_list = [
+        + "sts.amazonaws.com",
+      ]
+  }
+```
+
+**If any line under `client_id_list` begins with `-`, stop.** That is an
+audience being removed from a shared object. Add it to `client_id_list` in
+`iam.tf` and re-plan until no `-` line remains under that attribute. Only then
+apply.
+
+If `apply` fails with `EntityAlreadyExists` on the OIDC provider, that is the
+same condition reported by the API rather than by the read-back above — the
+account already federates GitHub. Do not delete it; other roles may trust it.
+Add an import block, redo the audience check, and re-run:
 
 ```terraform
 import {
@@ -200,16 +324,38 @@ The apply writes the SSH CIDR into remote state. Confirm nothing *else*
 sensitive went with it:
 
 ```bash
-terraform -chdir=infra/ec2 state pull > /tmp/mlobs-state.json
+# The pulled state holds the CIDR in clear text, so it does not go to a
+# predictable world-readable path. `umask` must precede the redirect: the shell
+# creates the file with the mode in force when it opens it, and tightening
+# permissions afterwards leaves a window where it was readable.
+umask 077
+work=$(mktemp -d)
+terraform -chdir=infra/ec2 state pull > "$work/state.json"
 
 # Expected: only the known SSH /32, in the SG rule and the SG's ingress list.
-grep -oE '"(cidr_ipv4|cidr_blocks|ssh_ingress_cidr)":[^,]*' /tmp/mlobs-state.json
+# The array alternative is the point: `cidr_blocks` is a JSON list, so an
+# extraction that stops at the first comma prints one element and hides the
+# rest — which is precisely where an unexpected second range would sit.
+grep -oE '"(cidr_ipv4|cidr_blocks|ssh_ingress_cidr)": *(\[[^]]*\]|"[^"]*"|null)' \
+  "$work/state.json"
 
-# Expected: no output at all.
-grep -niE 'password|passwd|secret|token|private_key|BEGIN [A-Z ]*PRIVATE KEY|aws_access_key|webhook' /tmp/mlobs-state.json
+# Expected: no output.
+# The exclusion is what makes that expectation reachable. The OIDC provider's
+# URL, its ARN and both trust-policy condition keys all contain the literal
+# "token", so the unfiltered pattern always matched: the step as written could
+# never pass, and a check nobody can pass is a check nobody runs. Filtering the
+# one known-benign string restores "no output" as a real result.
+grep -niE 'password|passwd|secret|token|private_key|BEGIN [A-Z ]*PRIVATE KEY|aws_access_key|webhook' \
+  "$work/state.json" \
+  | grep -v 'token\.actions\.githubusercontent\.com'
 
-rm -P /tmp/mlobs-state.json
+rm -rf "$work"
 ```
+
+`rm -rf`, not `rm -P`: `-P` is a BSD flag absent from GNU coreutils, so the
+original line fails outright on Linux, and on APFS or any SSD its overwrite is
+not a meaningful erase anyway. The protection that does hold is the private
+`mktemp -d` directory plus the `umask` above.
 
 ### 5. Evidence: a plan that reports nothing to do
 
