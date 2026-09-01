@@ -17,6 +17,9 @@ drift can be compared side by side to support a data-driven promote-or-hold deci
 impact on the primary prediction path. It is a compact, end-to-end demonstration of the
 observability that real ML systems need but rarely ship with.
 
+Engineering rules binding every contributor — human or agent — live in
+[PRINCIPLES.md](PRINCIPLES.md).
+
 ## Architecture
 
 ```mermaid
