@@ -344,10 +344,16 @@ grep -oE '"(cidr_ipv4|cidr_blocks|ssh_ingress_cidr)": *(\[[^]]*\]|"[^"]*"|null)'
 # URL, its ARN and both trust-policy condition keys all contain the literal
 # "token", so the unfiltered pattern always matched: the step as written could
 # never pass, and a check nobody can pass is a check nobody runs. Filtering the
-# one known-benign string restores "no output" as a real result.
+# known-benign strings restores "no output" as a real result.
+# The second exclusion is the same defect found again at the live import
+# (2026-09-04): an imported aws_instance always carries the attribute *key
+# names* get_password_data, password_data and metadata_options.http_tokens,
+# which match "password" and "token" as key names alone. Their values on this
+# host are benign — false, "" and "required" — verified during that run.
 grep -niE 'password|passwd|secret|token|private_key|BEGIN [A-Z ]*PRIVATE KEY|aws_access_key|webhook' \
   "$work/state.json" \
-  | grep -v 'token\.actions\.githubusercontent\.com'
+  | grep -v 'token\.actions\.githubusercontent\.com' \
+  | grep -vE '"(get_password_data|password_data|http_tokens)":'
 
 rm -rf "$work"
 ```
