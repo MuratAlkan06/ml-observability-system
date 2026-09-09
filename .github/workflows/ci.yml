@@ -113,10 +113,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # infra/ joined the swept paths in Phase 2 P1: an IaC directory is exactly
+      # where "production-grade" creeps into a comment, and the runbook there
+      # makes cost and capability claims a stranger will check.
       - name: No banned overclaim vocabulary
         run: |
           status=0
-          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/) || status=$?
+          hits=$(grep -rIniE 'champion|challenger|\bdistributed\b|production-ready|production-grade' README.md docs/ src/ tests/ infra/) || status=$?
           if [ "$status" -eq 0 ]; then
             echo "::error::banned overclaim vocabulary (PRINCIPLES.md §6):"
             echo "$hits"
@@ -184,3 +187,123 @@ jobs:
             exit 1
           fi
           echo "ok: no AI-attribution trailers"
+
+  TerraformValidate:
+    name: Terraform validate
+    # Phase 2 P1: credential-less checks on the infra/ec2 root — formatting,
+    # provider resolution against the committed .terraform.lock.hcl, and
+    # configuration validity. `init -backend=false` skips the S3 backend
+    # entirely, so this job needs no AWS access and therefore runs everywhere
+    # TerraformPlan cannot: fork pull requests and Dependabot branches included.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.14.0"
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+      - name: terraform init (no backend)
+        run: terraform -chdir=infra/ec2 init -backend=false
+      - name: terraform validate
+        run: terraform -chdir=infra/ec2 validate
+
+  TerraformPlan:
+    name: Terraform plan
+    # Phase 2 P1: the real plan against S3 remote state, authenticated by
+    # GitHub OIDC — this repository holds no long-lived AWS keys. The role is
+    # read-only and the plan runs with -lock=false, so the job can neither
+    # write state nor leave a lock behind.
+    #
+    # Gated to same-repo events: a fork's token, and Dependabot's, cannot mint
+    # an OIDC identity matching the two subjects the role trusts, so the job
+    # would fail at assume-role for reasons unrelated to the change under test.
+    # TerraformValidate still covers those cases.
+    #
+    # The Dependabot half of that gate reads `pull_request.user.login`, not
+    # `github.actor`, because `github.actor` is whoever caused the current run
+    # and not who opened the pull request. Clicking "Re-run jobs" on a
+    # Dependabot PR sets it to the human who clicked, the `!=` then passes, and
+    # the job un-skips into an assume-role failure on a branch whose token was
+    # never going to work. `pull_request.user.login` is a property of the pull
+    # request itself, so it stays `dependabot[bot]` across every re-run.
+    #
+    # Actions are SHA-pinned in this job specifically. It is the only job that
+    # holds an AWS session, so a hijacked mutable tag here would be an account
+    # problem rather than a CI problem; elsewhere in this file tag pins plus
+    # Dependabot remain the right trade.
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    # Naming any permission here replaces the whole inherited set, so
+    # contents: read must be restated alongside id-token: write — without it
+    # actions/checkout cannot read the repository.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "~1.14.0"
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::601548053958:role/mlobs-tf-plan
+          aws-region: us-west-2
+      - name: terraform init
+        run: terraform -chdir=infra/ec2 init -input=false
+      # The SSH CIDR reaches the plan as a secret so that GitHub masks it in
+      # this public log: Terraform's own `sensitive` marking does not cover the
+      # security group's API-read `ingress` attribute. See infra/README.md.
+      # Masking is the second line of defence here, not the first — the plan
+      # body goes to a file that is never echoed.
+      #
+      # `-detailed-exitcode` returns 0 for no changes, 1 for a failed plan and 2
+      # for a plan with changes. Only 2 is ambiguous, and its meaning depends on
+      # the event. On a pull request a non-empty plan is the change under review,
+      # so it is reported and passes. On a push to main the config has already
+      # been merged, so the same exit code means the config and the account have
+      # diverged — that is drift, and catching it is why this job runs on main
+      # at all, so there it fails.
+      - name: terraform plan
+        run: |
+          # `|| code=$?` rather than `; code=$?`: the default shell is `bash -e`,
+          # under which a bare failing command aborts the step before its status
+          # can be captured, and the summary below would never run.
+          code=0
+          terraform -chdir=infra/ec2 plan -input=false -lock=false -no-color \
+            -detailed-exitcode -out=tf.tfplan > plan.txt 2>&1 || code=$?
+          # plan.txt is never printed: aws_security_group.app's API-read `ingress`
+          # attribute carries the SSH CIDR and is not sensitive-marked (empirically
+          # confirmed: a plan with a dummy variable value still printed the real CIDR).
+          rc=0
+          case "$code" in
+            0)
+              echo "ok: plan is a no-op"
+              ;;
+            1)
+              echo "::error::plan failed (exit 1)"
+              rc=1
+              ;;
+            2)
+              if [ "$EVENT_NAME" = "push" ]; then
+                echo "::error::config/reality drift detected on main — addresses and actions only; re-run locally for values"
+                rc=1
+              else
+                echo "::notice::plan has changes (expected for infra PRs) — addresses and actions only"
+              fi
+              terraform -chdir=infra/ec2 show -json tf.tfplan \
+                | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.address) \(.change.actions|join(","))"' || true
+              ;;
+            *)
+              echo "::error::terraform plan returned unexpected exit code $code"
+              rc=1
+              ;;
+          esac
+          exit "$rc"
+        env:
+          # Interpolated into the environment rather than into the script body:
+          # an expression expanded inline becomes shell source, so a value
+          # containing quotes would change the script's meaning rather than a
+          # variable's value.
+          EVENT_NAME: ${{ github.event_name }}
+          TF_VAR_ssh_ingress_cidr: ${{ secrets.SSH_INGRESS_CIDR }}

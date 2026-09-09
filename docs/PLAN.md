@@ -359,3 +359,100 @@ retention jobs, Alembic.
   live e2e matrix (comparison dashboard, both-model drift, /predict p95 delta ≤10%
   shadow on vs off, kill-test drains to zero duplicate rows, disagreement
   inspectable by request_id). Close-out: tag `v1.1.0`.
+
+# Phase 2 P1 — ADR summary (D9–D16)
+
+> Decisions taken while codifying the already-running EC2 shadow-test host as
+> Terraform (Phase 2 slice P1, `infra/`). The v1 and v1.1 specifications above
+> are frozen and untouched; this block appends only. **D7 is absent on
+> purpose** — the number was never issued, and the gap is not backfilled.
+
+- **D9 Remote state and version bands:** state in S3
+  (`mlobs-tfstate-601548053958`, key `ec2/terraform.tfstate`, us-west-2) with
+  `use_lockfile = true`; Terraform `~> 1.14.0`, AWS provider `~> 6.33`.
+  *Rejected:* local state, and a DynamoDB lock table. *Why:* local state cannot
+  be read by CI and dies with the laptop; DynamoDB locking is deprecated
+  upstream and would add a second billed resource for a single-writer root, so
+  the lock is an S3 object instead. The provider is held to a MINOR band so
+  Dependabot can offer 6.x bumps as reviewable PRs while a 7.x major — a
+  breaking-schema event for imported resources — needs a deliberate edit.
+  Backend blocks cannot interpolate, so the account id is a literal; account
+  and resource ids are accepted exposure for this repo, the SSH CIDR is not.
+- **D10 Import in place, never recreate:** `import` blocks bind the instance,
+  the security group and each of its four rules to their real ids; every
+  attribute transcribes what `describe-*` returned on 2026-09-01. The AMI is a
+  literal `var.ami_id`, the default VPC and subnet are read-only data sources,
+  and outputs are limited to `instance_id` and `sg_id`. *Rejected:* a clean
+  destroy-and-recreate from code; `data "aws_ami"` most-recent lookup; managing
+  the default VPC; outputting `public_ip`/`public_dns`. *Why:* this instance
+  carries the certified `hey` numbers in README.md — recreating it invalidates
+  every EC2 figure the repo publishes. An AMI lookup re-resolves on each plan
+  and `ami` forces replacement, so the next Canonical publish would silently
+  turn a read-only CI plan into a queued destroy of that host. The address
+  attributes change on every stop/start and would be stale as soon as written
+  down. Consequence, stated rather than hidden: this slice proves the host is
+  *described* by code, not that it can be *rebuilt* from code — that evidence
+  is deferred to P3's ephemeral apply/destroy run.
+- **D11 Bootstrap is a runbook, not automation:** the state bucket, the OIDC
+  provider, the plan role and the initial import apply are performed once by the
+  owner from `infra/README.md`. *Rejected:* a second Terraform root that
+  provisions the first root's backend. *Why:* Terraform cannot create its own
+  state bucket, and a bootstrap root only moves the chicken-and-egg one level
+  down while adding a second state to own — four documented CLI calls are the
+  smaller answer. The runbook ends in evidence, not assertions: a
+  `terraform state pull` secret sweep, and `plan -detailed-exitcode` returning
+  0 with the instance **both stopped and running**, since attributes such as
+  `public_ip` and `instance_state` only populate in one of those.
+- **D12 One flat root, no module layer:** `infra/ec2/*.tf` split by concern
+  (versions, backend, providers, network, compute, iam, variables, outputs,
+  imports). *Rejected:* a `modules/` + `envs/` tree. *Why:* there is exactly one
+  instantiation of this configuration and no second consumer to parameterise
+  for, so a module boundary would add indirection and buy no reuse. It becomes
+  worth revisiting when a second environment exists.
+- **D13 CI: validate everywhere, plan under OIDC:** `TerraformValidate` is
+  credential-less (`fmt -check -recursive`, `init -backend=false`, `validate`)
+  and therefore also covers fork and Dependabot branches; `TerraformPlan` runs
+  only for same-repo events, assumes `mlobs-tf-plan` through GitHub OIDC, and
+  plans with `-lock=false`. The role's trust policy pins `aud` and enumerates
+  `sub` to exactly the `pull_request` and `ref:refs/heads/main` subjects; its
+  permissions are a hand-written policy covering `ec2:Describe*`, read of the
+  state object, and read of the two IAM resources this root manages. *Rejected:*
+  a long-lived IAM user access key in Actions secrets; the AWS-managed
+  `ReadOnlyAccess`; a `repo:owner/name:*` wildcard subject; write access to the
+  `.tflock` object. *Why:* no static AWS credential exists to leak or rotate; a
+  wildcard subject would let any workflow in the repository assume the role;
+  `ReadOnlyAccess` grants read across every service in the account rather than
+  the read surface of this root; and with no lock-write grant the job
+  structurally cannot corrupt state or strand a lock. Actions are SHA-pinned in
+  the plan job only — it is the one job holding an AWS session.
+- **D14 Defaults transcribe reality; two default tags:** `var.region`
+  `us-west-2`, `var.instance_type` `t3.medium`, `var.ami_id`, `var.key_pair_name`
+  and `var.availability_zone` all default to the as-found values, and the
+  provider stamps `project=mlobs`, `managed-by=terraform`. *Rejected:* defaults
+  chosen for tidiness rather than fidelity; renaming resources to a convention.
+  *Why:* when every default matches the account, "a plan reports nothing to do"
+  becomes the acceptance assertion. Nothing as-found conflicts with the two
+  default tags, so reality is kept and the tags ride on top; the first apply
+  adds them in place — verified locally as `6 to import, 3 to add, 6 to change,
+  0 to destroy`.
+- **D15 No secret material in version control:** `var.ssh_ingress_cidr` is
+  `sensitive`, has no default, and arrives from a gitignored `terraform.tfvars`
+  locally and the `SSH_INGRESS_CIDR` Actions secret in CI. *Rejected:* a
+  committed default, even of a placeholder that invites editing in place.
+  *Why:* the value is the operator's home address. Recorded honestly, because it
+  is easy to over-trust: Terraform's `sensitive` marking hides values *derived
+  from* the variable but **not** `aws_security_group`'s API-read `ingress`
+  attribute, which prints in clear text whenever the group appears in a diff.
+  What actually protects the public Actions log is GitHub's secret masking, so
+  the secret must be stored in the exact wire form `A.B.C.D/32`. The value also
+  lands in remote state in clear text — hence a private, versioned, encrypted
+  bucket and a state sweep as the closing bootstrap step.
+- **D16 Layout and repo plumbing:** `infra/README.md` plus the `infra/ec2/`
+  files above; `.gitignore` gains `.terraform/`, `*.tfstate*`, `*.tfplan` and
+  `terraform.tfvars` while `.terraform.lock.hcl` is deliberately committed;
+  the DocsGate overclaim sweep extends to `infra/`; Dependabot gains the
+  `terraform` ecosystem at `/infra/ec2`, weekly. *Rejected:* ignoring the lock
+  file; leaving `infra/` outside the vocabulary gate. *Why:* the lock file is
+  what makes CI and a laptop resolve identical provider builds (hashes are
+  recorded for `linux_amd64` and `darwin_arm64`), and an IaC directory with a
+  cost note is exactly where unchecked claims accumulate.
