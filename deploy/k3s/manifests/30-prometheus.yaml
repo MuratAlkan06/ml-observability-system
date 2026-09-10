@@ -42,8 +42,10 @@ spec:
       labels:
         app: prometheus
       annotations:
-        # apply.sh replaces PLACEHOLDER with the sha256 of prometheus.yml before
-        # this file reaches the cluster. Editing a ConfigMap does not restart
+        # apply.sh substitutes the sha256 of prometheus.yml for the placeholder
+        # below before this file reaches the cluster. (The token is spelled out
+        # only on the annotation line, so rendering does not rewrite this
+        # paragraph too.) Editing a ConfigMap does not restart
         # anything, and this one is mounted with subPath, which does not even
         # get the in-place kubelet refresh a whole-directory mount would — so
         # without a pod-template change a config edit would apply silently
