@@ -597,7 +597,13 @@ jobs:
     # that DO start it — every pull_request, and a workflow_dispatch on an
     # arbitrary branch. Publishing is a write to a public registry, so it is
     # worth being unable to reach it by accident rather than merely unlikely to.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    #
+    # Gated on the k3d rehearsal: a main push must not publish images whose
+    # deploy rehearsal failed. The explicit `if` here replaces GitHub's implicit
+    # success() check, so K3sSmoke's result must be tested directly — a bare
+    # `needs:` alone would not stop the publish after a failed rehearsal.
+    needs: K3sSmoke
+    if: needs.K3sSmoke.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Naming any permission replaces the whole inherited set, so contents: read
     # is restated alongside packages: write — without it checkout cannot read the
