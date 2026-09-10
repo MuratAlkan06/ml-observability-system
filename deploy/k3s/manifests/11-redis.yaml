@@ -1,0 +1,62 @@
+# Redis — the prediction event stream (docs/PLAN.md §3).
+#
+# Compose source of truth: the `redis` service in docker-compose.yml.
+# Deliberately ephemeral (D20): `--appendonly no` means Compose never persisted
+# it either, and the consumer's XAUTOCLAIM recovery assumes redelivery, not a
+# durable stream.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: mlobs
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: mlobs
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          # Compose `command:` overrides the image CMD, which is `args` here —
+          # the image's docker-entrypoint.sh stays as the ENTRYPOINT.
+          args: ["redis-server", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          # No hostPort. Compose published 127.0.0.1:6379 for local debugging on
+          # the box; under k3s that is `kubectl port-forward svc/redis 6379:6379`
+          # (deploy/k3s/README.md), which needs no listening socket at all.
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: 32Mi

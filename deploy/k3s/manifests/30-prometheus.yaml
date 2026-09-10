@@ -1,0 +1,95 @@
+# Prometheus — docs/PLAN.md §6.
+#
+# Compose source of truth: the `prometheus` service in docker-compose.yml.
+#
+# The scrape config is mounted verbatim from prometheus/prometheus.yml (D21).
+# Not a copy, not a rewrite: apply.sh builds the ConfigMap from the canonical
+# repo file, and the Service names in this directory were chosen to match the
+# Compose DNS names it already contains (`api:8000`, `shadow-scorer:9110`,
+# `drift-shadow:9109`). One scrape config serves both runtimes, so there is no
+# second file to drift out of sync.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: mlobs
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: mlobs
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+      annotations:
+        # apply.sh replaces PLACEHOLDER with the sha256 of prometheus.yml before
+        # this file reaches the cluster. Editing a ConfigMap does not restart
+        # anything, and this one is mounted with subPath, which does not even
+        # get the in-place kubelet refresh a whole-directory mount would — so
+        # without a pod-template change a config edit would apply silently
+        # nowhere. Stamping the hash makes the pod template differ exactly when
+        # the config differs, and identical when it does not, so a repeated
+        # apply is a genuine no-op.
+        mlobs/config-hash: PLACEHOLDER
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.5.0
+          ports:
+            - name: http
+              containerPort: 9090
+          # No hostPort. Compose published 127.0.0.1:9090 for local debugging;
+          # under k3s that is `kubectl port-forward svc/prometheus 9090:9090`.
+          # Grafana queries it in-cluster at http://prometheus:9090 either way,
+          # which is what grafana/provisioning/datasources/prometheus.yml says.
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # The TSDB lives on the container filesystem and dies with the pod
+          # (D20). Prometheus here is a demo scrape target store, not a metrics
+          # archive; keeping it ephemeral leaves exactly one PVC in the stack.
+          resources:
+            requests:
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
