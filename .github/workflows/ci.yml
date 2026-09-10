@@ -583,3 +583,81 @@ jobs:
       - name: Delete cluster
         if: always()
         run: k3d cluster delete "$CLUSTER_NAME" || true
+
+  GhcrPublish:
+    name: Publish images to GHCR
+    # Phase 2 P2a: the registry half of the deploy story (D18). Pushes the
+    # service images to GHCR under two tags — the immutable commit SHA, which is
+    # what a deploy actually pins, and a moving `main` that names the current
+    # tip for a human reading `docker pull`.
+    #
+    # Main pushes only, doubly. The workflow's `on: push:` is already filtered to
+    # `branches: [main]`, so a push to any other branch never starts this
+    # workflow at all; the condition below then rules out the two other events
+    # that DO start it — every pull_request, and a workflow_dispatch on an
+    # arbitrary branch. Publishing is a write to a public registry, so it is
+    # worth being unable to reach it by accident rather than merely unlikely to.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Naming any permission replaces the whole inherited set, so contents: read
+    # is restated alongside packages: write — without it checkout cannot read the
+    # repository. `packages: write` is the only elevation, and it is scoped to
+    # this job rather than the workflow.
+    permissions:
+      contents: read
+      packages: write
+    # Its own group, and deliberately without cancel-in-progress: the
+    # workflow-wide group cancels on a newer push, and a publish cancelled
+    # part-way could leave the moving `main` tag pointing at neither the old nor
+    # the new build. Per-service so the three run in parallel.
+    concurrency:
+      group: ghcr-publish-${{ matrix.service }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      # Three images, not four. shadow-scorer is absent on purpose: the model it
+      # bakes is published on Hugging Face with no upstream licence stated, so
+      # republishing those weights inside a container image on a public registry
+      # is a redistribution this repository declines to make (owner ruling
+      # 2026-09-10, D18). The posture is that the weights stay where their
+      # author put them, fetched verbatim at build time; the image itself moves
+      # as a private S3 tarball in P2c, with a local build plus scp as the
+      # interim in P2b.
+      matrix:
+        include:
+          - service: api
+            dockerfile: docker/api.Dockerfile
+          - service: consumer
+            dockerfile: docker/consumer.Dockerfile
+          - service: drift
+            dockerfile: docker/drift.Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        # GITHUB_TOKEN, not a personal access token: it is minted per run,
+        # expires with it, and carries exactly the packages: write granted
+        # above. No third-party action is involved in handling it, and it
+        # reaches docker over stdin rather than as an argument or a flag value.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          echo "ok: logged in to ghcr.io"
+
+      - name: Build and push
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE: ghcr.io/muratalkan06/mlobs-${{ matrix.service }}
+          SHA_TAG: ${{ github.sha }}
+        run: |
+          docker build -f "$DOCKERFILE" -t "${IMAGE}:${SHA_TAG}" -t "${IMAGE}:main" .
+          docker push "${IMAGE}:${SHA_TAG}"
+          docker push "${IMAGE}:main"
+          echo "ok: pushed ${IMAGE}:${SHA_TAG}"
+          echo "ok: pushed ${IMAGE}:main"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
