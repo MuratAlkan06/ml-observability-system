@@ -74,6 +74,12 @@ sha256_of() {
 command -v kubectl >/dev/null 2>&1 || die "kubectl not found on PATH"
 [ -f "$ENV_FILE" ] || die "env file not found: ${ENV_FILE}"
 
+# One scratch directory for everything this run generates, removed on any exit.
+# Nothing secret is written into it: the env file is handed to kubectl by path
+# and never copied.
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
 # --- 1. namespace ------------------------------------------------------------
 
 # Applied on its own and first: the Secret and ConfigMaps below are created
@@ -103,20 +109,29 @@ else
   # Compose wrote this default as `${GF_ADMIN_USER:-mlobsadmin}`. A manifest has
   # no shell-style default, so the default is materialised into the Secret here
   # and the manifest's secretKeyRef stays required.
-  secret_args+=(--from-literal=GF_ADMIN_USER=mlobsadmin)
+  #
+  # A second --from-env-file rather than --from-literal: kubectl rejects
+  # `--from-env-file` combined with `--from-file` or `--from-literal` outright,
+  # but the flag itself repeats. The generated file holds a username and no
+  # secret, so writing it out costs nothing.
+  printf 'GF_ADMIN_USER=mlobsadmin\n' > "${work_dir}/gf-admin-user.env"
+  secret_args+=(--from-env-file="${work_dir}/gf-admin-user.env")
 fi
 
 # `create --dry-run=client -o yaml | apply -f -` is the idempotent-create idiom:
 # `create` alone fails on the second run, and `apply` alone cannot read an env
 # file. The YAML in the middle of that pipe holds every secret value in base64,
-# so it goes straight into the next process and nowhere else; stdout and stderr
-# of both halves are discarded because kubectl quotes the offending input in its
-# error messages.
+# so it goes straight into the next process and nowhere else.
+#
+# BOTH halves are silenced, stderr included. `create` is the half that parses the
+# env file, so it is the half that quotes a line back at you when the parse
+# fails — silencing only `apply` would leave the leak open on exactly the path
+# most likely to hit it.
 if ! kubectl create secret generic mlobs-secrets \
       --namespace "$NAMESPACE" "${secret_args[@]}" \
-      --dry-run=client -o yaml \
+      --dry-run=client -o yaml 2>/dev/null \
     | kubectl apply --namespace "$NAMESPACE" -f - >/dev/null 2>&1; then
-  die "failed to apply secret mlobs-secrets (kubectl output suppressed: it quotes secret material)"
+  die "failed to apply secret mlobs-secrets. kubectl output is suppressed because it quotes lines from the env file; to see it, re-run: kubectl create secret generic mlobs-secrets --namespace ${NAMESPACE} --from-env-file=<your env file> --dry-run=client -o yaml >/dev/null"
 fi
 echo "ok: secret applied"
 
@@ -184,8 +199,11 @@ apply_configmap drift-baseline "${baseline_args[@]}"
 # and therefore no rollout at all.
 config_hash="$(sha256_of "${REPO_ROOT}/prometheus/prometheus.yml")"
 
-render_dir="$(mktemp -d)"
-trap 'rm -rf "$render_dir"' EXIT
+# Inside the scratch directory created in step 0, so it is covered by the same
+# EXIT trap. A second `trap ... EXIT` here would REPLACE that one, not add to
+# it, and the generated env file would survive the run.
+render_dir="${work_dir}/manifests"
+mkdir -p "$render_dir"
 
 for manifest in "${SCRIPT_DIR}"/manifests/*.yaml; do
   sed -e "s|IMAGE_PREFIX|${IMAGE_PREFIX}|g" \
