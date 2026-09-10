@@ -1,0 +1,107 @@
+# Stream consumer — docs/PLAN.md §3, §7.
+#
+# Compose source of truth: the `consumer` service in docker-compose.yml.
+#
+# StatefulSet rather than Deployment (D22). The consumer names itself
+# `consumer-<hostname>` inside its Redis consumer group, so its identity is its
+# pod name. A Deployment mints a fresh random suffix on every rollout, which
+# would strand the previous name's pending-entries list until XAUTOCLAIM swept
+# it; a StatefulSet pins the pod to `consumer-0` forever and the restarted
+# process reclaims its own pending entries directly.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer
+  namespace: mlobs
+  labels:
+    app: consumer
+spec:
+  type: ClusterIP
+  selector:
+    app: consumer
+  ports:
+    - name: metrics
+      port: 9108
+      targetPort: 9108
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consumer
+  namespace: mlobs
+  labels:
+    app: consumer
+spec:
+  # The Service above. A StatefulSet requires the field; pointing it at the
+  # same ClusterIP Service that Prometheus scrapes keeps the object count down
+  # and costs nothing here, since nothing dials individual pods by ordinal.
+  serviceName: consumer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      # Compose gated this on `postgres: service_healthy` and `redis:
+      # service_started`. Both are reproduced as blocking initContainers — the
+      # weaker Redis condition is not worth preserving, because "the container
+      # exists" was never the thing the consumer needed.
+      initContainers:
+        - name: pg-ready
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h postgres -U mlobs; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+        - name: redis-ready
+          image: redis:7.4-alpine
+          command: ["sh", "-c", "until redis-cli -h redis ping; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+      containers:
+        - name: consumer
+          image: IMAGE_PREFIX/mlobs-consumer:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9108
+          # POSTGRES_PASSWORD is declared before the DSN that consumes it: the
+          # kubelet expands `$(VAR)` only against variables defined EARLIER in
+          # this list. Building the DSN here rather than baking a default into
+          # the image is what removes the `localhost` fallback DSN from the
+          # runtime picture entirely (D23) — a misconfigured pod fails to start
+          # instead of quietly talking to nothing.
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: POSTGRES_PASSWORD
+            - name: MLOBS_REDIS_URL
+              value: redis://redis:6379/0
+            # Same caveat as Compose: the password is interpolated into a URL,
+            # so it must not contain characters that need percent-encoding.
+            - name: MLOBS_PG_DSN
+              value: postgresql://mlobs:$(POSTGRES_PASSWORD)@postgres:5432/mlobs
+            - name: MLOBS_METRICS_PORT
+              value: "9108"
+          # The metrics server is the first thing __main__ starts, before the
+          # Redis and Postgres connections, so a listening 9108 is an honest
+          # "the process is alive" signal. There is no readiness probe: nothing
+          # routes traffic to this pod, and marking it not-ready would only stop
+          # Prometheus scraping the metrics that say what is wrong.
+          livenessProbe:
+            tcpSocket:
+              port: 9108
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 64Mi

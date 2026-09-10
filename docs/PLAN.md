@@ -456,3 +456,192 @@ retention jobs, Alembic.
   what makes CI and a laptop resolve identical provider builds (hashes are
   recorded for `linux_amd64` and `darwin_arm64`), and an IaC directory with a
   cost note is exactly where unchecked claims accumulate.
+
+# Phase 2 P2 — ADR summary (D17–D27)
+
+> Decisions taken while moving the stack from Docker Compose to k3s on the same
+> EC2 host (Phase 2 slice P2, `deploy/k3s/`). The v1 and v1.1 specifications
+> above are frozen and untouched; this block appends only. Slice P2a lands the
+> manifests, the deploy scripts and the CI rehearsal; P2b the on-host cutover
+> and its runbook; P2c the deploy pipeline. Decisions covering later slices are
+> recorded here because they were taken together and constrain what P2a builds.
+
+- **D17 Plain manifests, no templating layer:** `deploy/k3s/manifests/*.yaml`
+  applied with `kubectl apply -f`, with two shell scripts around them —
+  `apply.sh` to render and deploy, `smoke.sh` to check. The only substitutions
+  are an image prefix, an image tag and a config hash, done with `sed` into a
+  temporary directory. *Rejected:* Helm; Kustomize. *Why:* there is one
+  instantiation of this stack and no second environment to parameterise for, so
+  a chart would buy indirection and no reuse — the same argument as D12 for
+  Terraform modules. It also keeps the manifests readable as evidence: a
+  stranger comparing them against `docker-compose.yml` reads YAML, not a
+  template language. Helm evidence is a stated P3 goal and belongs there, where
+  an ephemeral EKS cluster gives it something to prove.
+- **D18 GHCR for the three licensed images; the shadow image is not
+  published:** `api`, `consumer` and `drift` are built and pushed by CI on
+  every push to `main` as `ghcr.io/muratalkan06/mlobs-<svc>` under two tags —
+  the immutable commit SHA, which a deploy pins, and a moving `main`. The
+  shadow scorer is **excluded**: the candidate model it bakes is published on
+  Hugging Face with no upstream licence stated, so republishing those weights
+  inside a container image on a public registry is a redistribution this
+  repository will not make (owner ruling 2026-09-10). Its image is delivered as
+  a private S3 tarball in P2c, with a local build plus `scp` as the P2b interim
+  runbook. *Rejected:* publishing all four and hoping; vendoring the weights
+  behind a licence assertion the repository is not in a position to make;
+  Docker Hub. *Why:* the posture that survives scrutiny is that the weights stay
+  where their author put them — publicly hosted, fetched verbatim at build
+  time — and image redistribution is avoided entirely rather than argued about.
+  GHCR needs no account beyond the one this repository already has and takes a
+  per-run `GITHUB_TOKEN` rather than a long-lived credential.
+- **D19 k3s pinned, batteries removed, host ports kept:** k3s
+  `v1.36.4+k3s1` (container tag `rancher/k3s:v1.36.4-k3s1`) with `traefik`,
+  `servicelb` and `metrics-server` disabled. The api and Grafana pods keep
+  `hostPort` 8000 and 3000; the EC2 security group is not touched. *Rejected:*
+  an Ingress; a LoadBalancer Service; `NodePort` in the 30000–32767 range;
+  letting k3s pick its own version. *Why:* the security group already admits
+  exactly the two ports the README tells a reader to open, and every
+  alternative changes them — a NodePort moves the port a stranger has to type,
+  and a LoadBalancer on a single node is servicelb re-implementing a hostPort
+  through an extra hop. The three disabled add-ons cost RAM on a 4GB box for
+  capabilities the manifests never reference. The version is pinned for the
+  same reason the AMI is (D10): an unpinned control plane re-resolves and the
+  host stops being the thing that was tested.
+- **D20 One PVC, everything else ephemeral:** Postgres gets a `local-path` PVC
+  (5Gi) mounted at `/var/lib/postgresql/data` with `subPath: pgdata`.
+  Prometheus, Grafana and Redis run entirely on the container filesystem.
+  *Rejected:* PVCs for the Prometheus TSDB and the Grafana sqlite database;
+  Longhorn or any replicated volume. *Why:* Redis was already `--appendonly no`
+  under Compose and the consumer's recovery path assumes redelivery, not
+  durability; Grafana's dashboards and datasource are provisioned read-only
+  from the repository on every start, so the only thing its database holds is
+  ad-hoc UI state; and the Prometheus retention worth keeping is nil on a demo
+  box. One PVC is also one thing to delete for a schema change (PRINCIPLES.md
+  §4: schema changes are never hand-patched onto a live volume). A replicated
+  volume on a single node is a word, not a property. *Consequence:* README
+  prose describing Compose volumes is now partly wrong for the k3s runtime; the
+  erratum correcting it rides P2b with the rest of the cutover documentation,
+  rather than being written before the runtime it describes exists.
+- **D21 One scrape config, mounted verbatim:** `prometheus/prometheus.yml` is
+  turned into a ConfigMap by `apply.sh` at deploy time and mounted unchanged —
+  no copy under `deploy/`. The Services are therefore named exactly as the
+  Compose DNS names the file already contains (`api`, `consumer`, `drift`,
+  `shadow-scorer`, `drift-shadow`), and the whole stack lives in one namespace
+  so those short names resolve. The Prometheus pod template carries an
+  `mlobs/config-hash` annotation holding the sha256 of that file. *Rejected:* a
+  k3s-specific copy of the scrape config; `<svc>.<ns>.svc.cluster.local`
+  targets; Prometheus service discovery via the Kubernetes API. *Why:* two
+  copies of a scrape config are two files that will disagree, and the disagreement
+  shows up as a silently missing target. Service discovery would be the right
+  answer for a cluster with churn and is the wrong answer for five static
+  targets whose names are frozen in Appendix A. The annotation exists because
+  editing a ConfigMap restarts nothing — and this one is mounted with `subPath`,
+  which does not even get the kubelet's in-place refresh — so without it a
+  config change would apply nowhere; stamping the hash makes the pod template
+  differ exactly when the config differs, so a repeated deploy is a real no-op.
+- **D22 Workload kinds follow identity, probes follow meaning:** `consumer` and
+  `shadow-scorer` are StatefulSets, because each registers in a Redis consumer
+  group under its own hostname and a stable pod name is therefore a stable
+  identity across rollouts. `api`, `grafana` and `postgres` use
+  `strategy: Recreate`. The api's three probes read one `/health` three ways: a
+  startup probe covering the model load, a readiness probe that treats 200
+  `degraded` as ready, and a `tcpSocket` liveness probe. Compose
+  `depends_on: service_healthy` becomes blocking initContainers. The v1.1 D8
+  memory limits are transcribed verbatim (`api` 1536Mi, `shadow-scorer` 768Mi);
+  every workload also carries a memory request. *Rejected:* Deployments for the
+  stream consumers; RollingUpdate on the hostPort workloads; `/health` as the
+  liveness probe; limits on the non-torch services. *Why:* a Deployment mints a
+  new random pod suffix on every rollout, stranding the previous name's pending
+  entries until XAUTOCLAIM sweeps them — and the shadow group starts at `$`,
+  which makes a lost identity unrecoverable rather than merely slow. A
+  RollingUpdate behind a hostPort deadlocks: the incoming pod cannot bind a port
+  the outgoing pod still holds, and the outgoing pod is not removed until the
+  incoming one is ready. `/health` as liveness would restart the api because
+  *Redis* is unwell (`degraded` is a 200 by design, and a restart cannot fix
+  another service) or loop it forever on a model that will not load. Requests
+  are what let the scheduler refuse to overcommit a 4GB node; limits beyond D8's
+  two are guesses that would turn a memory spike into an OOM kill.
+- **D23 One Secret from the host `.env`, under an output-hygiene contract:**
+  `apply.sh` builds `mlobs-secrets` from the same gitignored `.env` Compose
+  used, via `kubectl create secret --from-env-file --dry-run=client -o yaml |
+  kubectl apply -f -`. Three rules hold in that script and are written down in
+  it: xtrace is explicitly disabled rather than merely unused; no secret value
+  is ever read into a shell variable, passed as an argument or interpolated into
+  a string (required keys are checked by `grep -q`, which reports only whether a
+  pattern matched); and every command that could echo secret material has its
+  output discarded, with failures reported as fixed lines containing no input.
+  Postgres DSNs are assembled in the pod from a `secretKeyRef` `POSTGRES_PASSWORD`
+  through Kubernetes' `$(VAR)` dependent expansion. Compose's
+  `${GF_ADMIN_USER:-mlobsadmin}` default is materialised into the Secret by
+  `apply.sh`, since a manifest has no shell-style default. *Rejected:* committed
+  SealedSecrets or SOPS; a full DSN stored as a Secret key; External Secrets
+  Manager. *Why:* the credential already lives in one gitignored file on one
+  host, and a sealing tool would add a key to manage and a second place for the
+  truth to live — it becomes the right answer when there is a second
+  environment. Building the DSN in the pod rather than storing it whole removes
+  the `localhost` fallback DSN from the runtime picture: a service with a broken
+  reference fails to start instead of quietly connecting to nothing, which is
+  the failure class that cost a debugging session under Compose. The hygiene
+  rules are written as rules because each is easy to undo by accident, and this
+  repository's logs are public.
+- **D24 Deploy is SSM under OIDC, through a document that cannot run arbitrary
+  commands:** the deploy job assumes a role by GitHub OIDC and calls
+  `ssm:SendCommand` against a custom SSM document whose only parameter is a
+  commit SHA, pattern-validated to 40 hex characters. The role's trust is gated
+  on a GitHub `environment` (`ec2-deploy`) with a required reviewer; the job
+  first checks the SHA is an ancestor of `main` and that the three images exist
+  in GHCR. The role is not granted `ec2:StartInstances`. *Rejected:* SSH from
+  Actions with a stored private key; `AWS-RunShellScript` with a
+  workflow-supplied command string; a self-hosted runner on the box; letting the
+  pipeline start a stopped instance. *Why:* an SSH key in Actions secrets is a
+  long-lived credential to leak and rotate, which is the thing P1 removed.
+  `AWS-RunShellScript` grants remote code execution to anyone who can trigger
+  the workflow, so the document is a fixed script with one validated argument
+  instead. The ancestor check stops a deploy of an arbitrary branch, the image
+  preflights turn a missing tag into a failed check rather than a half-deployed
+  host, and withholding `StartInstances` keeps the cost story honest: the box is
+  started deliberately by its owner, never by a merge.
+- **D25 Rollback is a redeploy of the previous SHA, with the database handled
+  first:** roll back by re-running the deploy against the previous commit SHA;
+  `kubectl rollout undo` is the faster path when the previous ReplicaSet is
+  still present. `smoke.sh` is the single check for both CI and the host, so a
+  green rollback means what a green deploy means. **A `pg_dump` is taken before
+  cutover and restored after a rollback** (owner ruling 2026-09-10). Compose is
+  retained on the box as a fallback runtime for the duration of P2, and the
+  abort runbook takes an EBS snapshot before any destructive step. *Rejected:*
+  rollback by rebuilding an image from an older tree; deleting the Compose
+  stack at cutover; treating `rollout undo` as sufficient on its own. *Why:*
+  per-SHA tags exist precisely so that rolling back is deploying something that
+  already built and already passed; rebuilding reintroduces the risk that a
+  dependency resolved differently. `rollout undo` cannot help once the
+  ReplicaSet has been pruned, so it is the shortcut and not the procedure. The
+  database is the part a rollback cannot re-derive: the same volume is reused
+  across runtimes, so a schema or data change made under k3s outlives the
+  rollback unless it is dumped first. Keeping Compose installed costs disk and
+  buys a runtime that is known to work while the new one is still being trusted.
+- **D26 The cutover is gated on a measured rehearsal, not an estimate:** P2b
+  runs the stack under k3s on the real `t3.medium` and records the result. Pass
+  is `MemAvailable` at or above 400MB and zero OOM kills during a sustained
+  5 rps load with the shadow scorer running. A fail moves the host to
+  `t3.large` by changing `var.instance_type` in the P1 Terraform root.
+  *Rejected:* accepting the k3s overhead as "small enough"; sizing up
+  pre-emptively; dropping the shadow scorer to make the numbers fit. *Why:* k3s
+  adds a control plane the Compose measurements never included, and D8's budget
+  had roughly 1GB of headroom on 4GB — enough that the question is real and not
+  enough that it can be waved through. Sizing up first would hide whether the
+  migration cost anything, which is the one number this slice can honestly
+  report. Fixing it through the Terraform root rather than the console keeps P1's
+  claim true: the instance is described by code.
+- **D27 Compose-era numbers are relabelled, not deleted; re-measurement is its
+  own slice:** the existing `hey` figures in README.md are annotated as
+  historical, naming the runtime and the `t3.medium` instance type they were
+  taken on. The k3s re-measurement is appended in P2b under the same
+  methodology. Retiring `docker-compose.yml` is deferred to P3. *Rejected:*
+  deleting the old numbers; quietly reusing them for the k3s runtime; retiring
+  Compose at cutover. *Why:* PRINCIPLES.md §6 makes a performance number
+  inseparable from its methodology, and the runtime is part of the methodology —
+  reusing a Compose figure for k3s would be exactly the divergence between
+  stated claim and built reality this repository exists to avoid. Deleting the
+  figures instead would throw away a real measurement and the before-and-after
+  comparison that makes the migration legible. Compose stays until the k3s path
+  has been the live one long enough to have earned it (D25's fallback), and
+  removing it is a change with its own risk and therefore its own slice.

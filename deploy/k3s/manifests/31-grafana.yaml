@@ -1,0 +1,116 @@
+# Grafana — docs/PLAN.md §6.
+#
+# Compose source of truth: the `grafana` service in docker-compose.yml.
+#
+# The second and last hostPort workload (D19): 3000 is the port the README tells
+# a reader to open, and traefik/servicelb are disabled on this host.
+#
+# No Service object, deliberately. Nothing inside the cluster dials Grafana —
+# the traffic is one-way, Grafana to `prometheus:9090` — and the only client is
+# a browser on the host, which arrives through the hostPort. A ClusterIP with no
+# in-cluster consumer would be an object to maintain and nothing to show for it.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: mlobs
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  # Same hostPort deadlock as the api Deployment: a RollingUpdate would wait
+  # forever for :3000 to be free.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.1.0
+          ports:
+            - name: http
+              containerPort: 3000
+              hostPort: 3000
+          env:
+            # Anonymous read-only access: single-node demo with no auth
+            # (docs/PLAN.md §0 non-goals); the login screen only gets in the way.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Viewer"
+            # Admin lockdown (security review B1). Under Compose the username
+            # had a `:-mlobsadmin` shell default and the password a `:?` that
+            # refused to start. Neither construct exists in a manifest, so both
+            # are Secret keys and apply.sh owns the two behaviours: it asserts
+            # GF_ADMIN_PASSWORD is set, and injects GF_ADMIN_USER=mlobsadmin
+            # into the Secret when the .env leaves it out. The reference below
+            # is therefore required in both cases — a missing key here means
+            # apply.sh has a bug, and failing to start is the right answer.
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: GF_ADMIN_USER
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: GF_ADMIN_PASSWORD
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+          # Compose bind-mounted ./grafana/provisioning as one tree. A ConfigMap
+          # is flat and cannot carry subdirectories, so the two provisioning
+          # subdirectories that hold files become two ConfigMaps mounted at their
+          # own paths. The image's own /etc/grafana/provisioning/{plugins,
+          # alerting,...} directories stay untouched underneath — which is what
+          # the repo's empty .gitkeep-only plugins/ and alerting/ folders were
+          # standing in for anyway.
+          volumeMounts:
+            - name: provisioning-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: provisioning-dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # /var/lib/grafana itself stays on the container filesystem, so the
+          # sqlite database of ad-hoc UI state is ephemeral (D20). Nothing of
+          # value lives there: dashboards and the datasource are provisioned
+          # read-only from the repo on every start.
+          resources:
+            requests:
+              memory: 128Mi
+      volumes:
+        - name: provisioning-datasources
+          configMap:
+            name: grafana-provisioning-datasources
+        - name: provisioning-dashboards
+          configMap:
+            name: grafana-provisioning-dashboards
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards

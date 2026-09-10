@@ -1,0 +1,100 @@
+# Shadow drift job — v1.1 D5.
+#
+# Compose source of truth: the `drift-shadow` service in docker-compose.yml.
+#
+# The SAME image as `drift`, pointed at the shadow model's rows and its own
+# baseline. Window, guard, cadence, thresholds and bins stay frozen; only
+# identity differs. Prometheus separates the two by `job` label, never by a
+# metric label (PRINCIPLES.md §1 Law 2) — which is exactly why this is a second
+# pod on its own metrics port rather than a second replica of `drift`: two
+# replicas would share one Service and one scrape target, and the two models'
+# series would collide.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drift-shadow
+  namespace: mlobs
+  labels:
+    app: drift-shadow
+spec:
+  type: ClusterIP
+  selector:
+    app: drift-shadow
+  ports:
+    - name: metrics
+      port: 9109
+      targetPort: 9109
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drift-shadow
+  namespace: mlobs
+  labels:
+    app: drift-shadow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drift-shadow
+  template:
+    metadata:
+      labels:
+        app: drift-shadow
+    spec:
+      initContainers:
+        - name: pg-ready
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h postgres -U mlobs; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+      containers:
+        - name: drift
+          image: IMAGE_PREFIX/mlobs-drift:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9109
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://mlobs:$(POSTGRES_PASSWORD)@postgres:5432/mlobs
+            # The three env vars that are this job's entire difference from
+            # `drift`. SOURCE_TABLE is whitelisted in DriftSettings; a typo here
+            # fails the pod at startup rather than reaching SQL.
+            - name: MODEL_VERSION
+              value: minilm-sst2-v1
+            - name: SOURCE_TABLE
+              value: shadow_predictions
+            - name: BASELINE_PATH
+              value: /baseline/baseline-minilm.json
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: 9109
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 64Mi
+      volumes:
+        - name: baseline
+          configMap:
+            name: drift-baseline

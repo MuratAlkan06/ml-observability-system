@@ -1,0 +1,104 @@
+# Primary drift job — docs/PLAN.md §5.
+#
+# Compose source of truth: the `drift` service in docker-compose.yml.
+#
+# A Deployment, not a StatefulSet: the drift runner holds no consumer-group
+# identity and no local state — it wakes on a timer, reads a window out of
+# Postgres, and writes a drift_runs row.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drift
+  namespace: mlobs
+  labels:
+    app: drift
+spec:
+  type: ClusterIP
+  selector:
+    app: drift
+  ports:
+    - name: metrics
+      port: 9109
+      targetPort: 9109
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drift
+  namespace: mlobs
+  labels:
+    app: drift
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drift
+  template:
+    metadata:
+      labels:
+        app: drift
+    spec:
+      # Compose added this gate after the S5 E2E finding: `service_started`
+      # alone races the DB and the first cycle logs a spurious
+      # connection-refused before the 60s retry.
+      initContainers:
+        - name: pg-ready
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h postgres -U mlobs; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+      containers:
+        - name: drift
+          image: IMAGE_PREFIX/mlobs-drift:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9109
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: POSTGRES_PASSWORD
+            # Must be declared after POSTGRES_PASSWORD for `$(...)` to expand.
+            # DriftSettings.database_url defaults to a localhost DSN that is
+            # correct for a laptop and wrong for every deployment; setting it
+            # explicitly here means the default is never the one in force (D23).
+            - name: DATABASE_URL
+              value: postgresql://mlobs:$(POSTGRES_PASSWORD)@postgres:5432/mlobs
+            - name: BASELINE_PATH
+              value: /baseline/baseline.json
+            # Empty disables alerting; evaluation and drift_runs writes continue
+            # (PLAN §0/§5). `optional: true` covers the .env that omits the key
+            # entirely — the env var is then unset and DriftSettings' own ""
+            # default takes over, which is the same disabled state.
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
+          volumeMounts:
+            - name: baseline
+              mountPath: /baseline
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: 9109
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 64Mi
+      volumes:
+        # Compose bind-mounted ./baseline read-only. The ConfigMap carries the
+        # two committed baseline JSONs only — not baseline/sst2_validation.tsv,
+        # which is build-time input for scripts/build_baseline.py and has no
+        # business in a running container.
+        - name: baseline
+          configMap:
+            name: drift-baseline

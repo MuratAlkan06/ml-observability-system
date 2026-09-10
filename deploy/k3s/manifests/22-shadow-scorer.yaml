@@ -1,0 +1,97 @@
+# Shadow scorer — v1.1 Slice A (D3/D4).
+#
+# Compose source of truth: the `shadow-scorer` service in docker-compose.yml.
+#
+# StatefulSet for the same reason as the consumer (D22): the scorer registers as
+# `shadow_scorer-<hostname>` in its own consumer group, so a stable pod name is
+# a stable identity. Its group starts at "$", which makes a lost identity worse
+# than the consumer's — anything queued against the old name is never replayed
+# from the stream head.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shadow-scorer
+  namespace: mlobs
+  labels:
+    app: shadow-scorer
+spec:
+  type: ClusterIP
+  selector:
+    app: shadow-scorer
+  ports:
+    - name: metrics
+      port: 9110
+      targetPort: 9110
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shadow-scorer
+  namespace: mlobs
+  labels:
+    app: shadow-scorer
+spec:
+  serviceName: shadow-scorer
+  # Scaling this to 0 is the sanctioned "off" switch for the latency A/B, the
+  # k3s equivalent of `docker compose stop shadow-scorer` (deploy/k3s/README.md).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shadow-scorer
+  template:
+    metadata:
+      labels:
+        app: shadow-scorer
+    spec:
+      initContainers:
+        - name: pg-ready
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h postgres -U mlobs; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+        - name: redis-ready
+          image: redis:7.4-alpine
+          command: ["sh", "-c", "until redis-cli -h redis ping; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+      containers:
+        - name: shadow-scorer
+          image: IMAGE_PREFIX/mlobs-shadow-scorer:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9110
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlobs-secrets
+                  key: POSTGRES_PASSWORD
+            - name: MLOBS_SHADOW_REDIS_URL
+              value: redis://redis:6379/0
+            - name: MLOBS_SHADOW_PG_DSN
+              value: postgresql://mlobs:$(POSTGRES_PASSWORD)@postgres:5432/mlobs
+            - name: MLOBS_SHADOW_METRICS_PORT
+              value: "9110"
+          # Safe as a liveness probe despite the slow model load: __main__ calls
+          # start_http_server BEFORE load_model, so :9110 is listening while the
+          # candidate model is still warming.
+          livenessProbe:
+            tcpSocket:
+              port: 9110
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # v1.1 D8, transcribed from Compose `mem_limit: 768m`. The request is
+          # deliberately well under the limit: the steady-state footprint is the
+          # loaded MiniLM plus one batch, and reserving the whole ceiling would
+          # crowd the api pod off a 4GB node for no reason.
+          resources:
+            requests:
+              memory: 512Mi
+            limits:
+              memory: 768Mi
