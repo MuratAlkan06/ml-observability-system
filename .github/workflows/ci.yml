@@ -248,7 +248,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: "~1.14.0"
+          # An exact patch, deliberately, in this job only. A range lets the
+          # action pick whichever 1.14.x is newest at run time, so the binary
+          # that runs with the AWS session could change with no commit here —
+          # the one input the SHA pins above leave floating. Bumps are manual.
+          # TerraformValidate, which holds no credentials, keeps the range.
+          terraform_version: "1.14.9"
+          # The action's default wrapper maps terraform's exit 2 (changes
+          # pending) to 0, which silently defeated the case dispatch below
+          # from P1 until P2c (see the D13 erratum in docs/PLAN.md).
+          terraform_wrapper: false
       - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: arn:aws:iam::601548053958:role/mlobs-tf-plan
@@ -667,3 +676,93 @@ jobs:
       - name: Log out of GHCR
         if: always()
         run: docker logout ghcr.io
+
+  ShadowPublish:
+    name: Publish shadow image to S3
+    # Phase 2 P2c: the image GhcrPublish leaves out (D18, D28). The model the
+    # shadow scorer bakes is published on Hugging Face with no upstream licence
+    # stated, so the image never goes to a public registry (owner ruling
+    # 2026-09-10). It is saved as a tarball and uploaded to a private S3 bucket
+    # instead — encrypted, public access blocked, and readable, among this
+    # repository's roles, only by the host's instance role (the deploy role
+    # can list the keys, not read them) — so nothing this job does makes the
+    # image, or the weights inside it, publicly retrievable.
+    #
+    # Gated as GhcrPublish is: main pushes only, and only after the k3d
+    # rehearsal succeeded. On GitHub's semantics a bare `needs: K3sSmoke`
+    # would already hold this job back after a failed rehearsal — a job whose
+    # needs failed is skipped — and an `if:` with no status function is ANDed
+    # with an implicit success(). The result is still tested explicitly: the
+    # condition then states everything it requires in the one place it is
+    # read, and it keeps doing so if a later edit adds always() or another
+    # status function here, which would drop the implicit success().
+    #
+    # SHA-pinned actions, as in TerraformPlan: this job holds an AWS session.
+    # It is mlobs-artifact-publish's, whose only grant is s3:PutObject under
+    # shadow/ in the artifacts bucket (infra/ec2/deploy.tf).
+    #
+    # The environment is how that role is reached: the role trusts only the
+    # OIDC subject of the `shadow-publish` environment, not the main-branch
+    # subject every job on main is issued, and the environment admits only
+    # runs on main. The environment has no reviewer, so publishing never
+    # waits. It must exist, with its branch rule, before the role does
+    # (infra/README.md, "Deploy pipeline"): GitHub creates a referenced
+    # environment that does not exist, with no rules at all.
+    #
+    # No job-level concurrency group, unlike GhcrPublish. That group protects
+    # the moving `main` tag; every key written here is a commit SHA, written
+    # once, so two runs never touch the same object. A group would only let a
+    # newer pending run replace an older one and leave that commit with no
+    # tarball to deploy. A run cancelled mid-upload leaves no object at all —
+    # S3 publishes an upload whole or not — and the deploy preflight says so.
+    needs: K3sSmoke
+    if: needs.K3sSmoke.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: shadow-publish
+    # Naming any permission replaces the inherited set, so contents: read is
+    # restated beside id-token: write, the OIDC token request.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ghcr.io/muratalkan06/mlobs-shadow-scorer
+      SHA_TAG: ${{ github.sha }}
+      ARTIFACTS_BUCKET: mlobs-artifacts-601548053958
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build needs the files, not git access: no token is left in
+          # .git/config for a later step to find.
+          persist-credentials: false
+
+      - name: Build shadow-scorer image
+        # Named for GHCR although it is never pushed there. `docker save`
+        # records this name in the tarball, `k3s ctr images import` restores it
+        # on the host, and it is exactly the ref the shadow-scorer manifest
+        # renders at IMAGE_TAG=<sha> under apply.sh's default IMAGE_PREFIX.
+        # imagePullPolicy: IfNotPresent then finds it locally, so the kubelet
+        # never asks GHCR for an image GHCR does not have.
+        run: docker build -f docker/shadow_scorer.Dockerfile -t "${IMAGE}:${SHA_TAG}" .
+
+      - name: Save image tarball
+        # pipefail is explicit because a `run:` with no `shell:` is `bash -e`
+        # without it, and a failed `docker save` would otherwise hand gzip an
+        # empty stream and upload a valid, empty archive.
+        run: |
+          set -o pipefail
+          docker save "${IMAGE}:${SHA_TAG}" | gzip > "${RUNNER_TEMP}/shadow.tar.gz"
+          bytes=$(stat -c %s "${RUNNER_TEMP}/shadow.tar.gz")
+          echo "ok: saved ${IMAGE}:${SHA_TAG} (${bytes} bytes gzipped)"
+
+      # Credentials are requested only now, after the build: the Dockerfile's
+      # package installs run while this job holds no AWS session at all.
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::601548053958:role/mlobs-artifact-publish
+          aws-region: us-west-2
+
+      - name: Upload to S3
+        run: |
+          key="shadow/${SHA_TAG}.tar.gz"
+          aws s3 cp --no-progress "${RUNNER_TEMP}/shadow.tar.gz" "s3://${ARTIFACTS_BUCKET}/${key}"
+          echo "ok: uploaded s3://${ARTIFACTS_BUCKET}/${key}"

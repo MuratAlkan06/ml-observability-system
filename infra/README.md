@@ -5,7 +5,8 @@ numbers were certified on. The host was built by hand in July 2026; this
 directory adopts it into Terraform **in place** — nothing is recreated, and the
 certified instance keeps its id, its volume and its measurements.
 
-Decisions behind everything here are D9–D16 in [`../docs/PLAN.md`](../docs/PLAN.md).
+Decisions behind everything here are D9–D16 in [`../docs/PLAN.md`](../docs/PLAN.md),
+plus D24 and D28–D30 for the [deploy pipeline](#deploy-pipeline).
 
 ## Layout
 
@@ -19,6 +20,7 @@ infra/
     network.tf       default VPC / default subnet, read-only data sources
     compute.tf       instance, security group, one resource per SG rule
     iam.tf           GitHub OIDC provider + scoped read-only plan role
+    deploy.tf        SSM deploy document, deploy/publish/host roles, artifacts bucket
     variables.tf     inputs; ssh_ingress_cidr has no default, on purpose
     outputs.tf       instance_id, sg_id
     imports.tf       import blocks binding each resource to its real id
@@ -403,6 +405,209 @@ anticipate. Add the specific action to the matching statement in `iam.tf` — do
 not substitute the AWS-managed `ReadOnlyAccess` policy, which is far wider than
 this root requires.
 
+## Deploy pipeline
+
+Phase 2 P2c. Every push to `main` publishes what a deploy needs, and a manual,
+reviewer-gated workflow deploys one commit of `main` to the host through AWS
+Systems Manager — no SSH, no inbound port, no stored AWS credential. The
+decisions are D24 and D28–D30 in [`../docs/PLAN.md`](../docs/PLAN.md).
+
+| Piece | Defined in | What it can do |
+| --- | --- | --- |
+| `mlobs-deploy` SSM document | `ec2/deploy.tf` | Run one fixed script as root on the host. Its only input is a 40-hex commit SHA, re-checked on the host against `origin/main`. |
+| `mlobs-deploy` role | `ec2/deploy.tf` | Send that document to this one instance, read the command's result, describe instances, list the keys under `shadow/` (not read them). Trusts only the `ec2-deploy` environment. |
+| `mlobs-artifact-publish` role | `ec2/deploy.tf` | Put objects under `shadow/` in the artifacts bucket. Trusts only the `shadow-publish` environment, which admits only `main`. |
+| `mlobs-host` instance role | `ec2/deploy.tf` | Register the SSM agent (`AmazonSSMManagedInstanceCore`) and read objects under `shadow/`. |
+| `mlobs-artifacts-601548053958` | `ec2/deploy.tf` | Private, SSE-S3, TLS only; `shadow/` objects expire after 60 days. |
+| `ShadowPublish` job | `.github/workflows/ci.yml` | On a push to `main`, after `K3sSmoke` passes, in environment `shadow-publish`: upload `shadow/<sha>.tar.gz`. |
+| `Deploy` workflow | `.github/workflows/deploy.yml` | Manual dispatch, in environment `ec2-deploy`. |
+
+What the pipeline cannot do is the other half of the design: it cannot start
+the instance (no `ec2:StartInstances`), run any command but the document, reach
+any other host, change the document, or deploy a commit that is not on `main`.
+
+### Deploying
+
+1. The commit must be on `main`, and the CI run for its push must have
+   finished: `GhcrPublish` pushed `api`, `consumer` and `drift` as `:<sha>`, and
+   `ShadowPublish` uploaded `shadow/<sha>.tar.gz`. The first deployable commit
+   is the P2c merge itself — nothing before it has a tarball.
+2. Start the host. The pipeline never does.
+3. Dispatch, from the Actions tab (Deploy → Run workflow, branch `main`) or:
+
+   ```bash
+   gh workflow run deploy.yml --ref main                    # the tip of main
+   gh workflow run deploy.yml --ref main -f sha=<40-hex sha>
+   ```
+
+4. Approve the `ec2-deploy` review when the run pauses for it.
+
+The job checks the SHA (40 lowercase hex, an ancestor of `origin/main`),
+assumes `mlobs-deploy`, and runs three preflights — the three GHCR manifests,
+the S3 tarball, the instance `running` — each failing with a message that
+names what is missing. It then sends the document, polls for up to 16 minutes,
+prints the tail of the host's output (the fixed lines `apply.sh` and
+`smoke.sh` emit), and exits with the command's status. On the host the
+document fetches `origin/main`, refuses a SHA that is not on it, refuses if
+any tracked file in the host's checkout has been edited, downloads and imports
+the shadow tarball, checks the SHA out, refuses unless `HEAD` is then exactly
+that SHA, and runs `deploy/k3s/apply.sh` with `IMAGE_TAG=<sha>`. Nothing moves
+the working tree until the tarball is imported, so a failed download leaves the
+host's checkout where it was.
+
+Deploys queue rather than cancel: a cancelled workflow would stop watching the
+SSM command without stopping it.
+
+### Rolling back
+
+Dispatch the workflow again with the previous SHA (D25):
+
+```bash
+git log --first-parent --format='%H %s' -n 5 origin/main
+gh workflow run deploy.yml --ref main -f sha=<previous sha>
+```
+
+A green rollback means what a green deploy means: `smoke.sh` passed on it. Two
+limits. The shadow tarball for a commit expires after 60 days; past that the
+preflight refuses, and the way back is a revert commit on `main`. And the
+pipeline never touches the database, so rolling back across a schema change
+still needs D25's `pg_dump` restore. `kubectl rollout undo` on the host stays
+the faster path while the previous ReplicaSet still exists.
+
+### Owner one-time steps, before merging P2c
+
+Order matters, twice over. The environments come before the apply: both
+GitHub-facing roles P2c adds trust an environment's OIDC subject, and GitHub
+creates a referenced environment that does not exist — with no reviewer and no
+branch rule, a gate with nothing in it. Between an apply and the environments, a
+workflow pushed to any branch could name `ec2-deploy` and be issued the
+subject `mlobs-deploy` trusts. And all of it comes before the merge: once
+`deploy.yml` is on `main` it can be dispatched, and the merge push itself runs
+`TerraformPlan` (which fails on drift) and `ShadowPublish` (which needs its
+environment, its role and its bucket). Everything below therefore happens
+while the P2c pull request is still open.
+
+1. **Create both environments, then read them back.** `ec2-deploy` has the
+   owner as required reviewer; `shadow-publish` has no reviewer, so publishing
+   never waits. Both admit deployments from `main` only.
+
+   ```bash
+   REPO=MuratAlkan06/ml-observability-system
+   OWNER_ID=$(gh api users/MuratAlkan06 --jq .id)
+
+   gh api -X PUT "repos/$REPO/environments/ec2-deploy" --input - <<EOF
+   {
+     "reviewers": [{"type": "User", "id": $OWNER_ID}],
+     "prevent_self_review": false,
+     "can_admins_bypass": false,
+     "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+   }
+   EOF
+
+   gh api -X PUT "repos/$REPO/environments/shadow-publish" --input - <<EOF
+   {
+     "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+   }
+   EOF
+
+   for env in ec2-deploy shadow-publish; do
+     gh api -X POST "repos/$REPO/environments/$env/deployment-branch-policies" \
+       -f name=main -f type=branch
+   done
+   ```
+
+   `prevent_self_review` stays `false` because the owner both dispatches and is
+   the only reviewer; with it on, no deploy could ever be approved.
+   `can_admins_bypass: false` takes away the owner's own bypass of that review,
+   so a deploy is never one click from skipping its gate. The branch rule stops
+   a workflow edited on another branch from entering either environment at all.
+
+   Read back what GitHub stored, rather than trusting the writes:
+
+   ```bash
+   for env in ec2-deploy shadow-publish; do
+     echo "== $env"
+     gh api "repos/$REPO/environments/$env" --jq '{
+       can_admins_bypass,
+       deployment_branch_policy,
+       reviewers: [.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login],
+       prevent_self_review: [.protection_rules[] | select(.type == "required_reviewers") | .prevent_self_review][0]
+     }'
+     gh api "repos/$REPO/environments/$env/deployment-branch-policies" \
+       --jq '[.branch_policies[] | {name, type}]'
+   done
+   ```
+
+   Expected, for both: `deployment_branch_policy` is
+   `{"custom_branch_policies":true,"protected_branches":false}` and the branch
+   policies are exactly `[{"name":"main","type":"branch"}]`. For `ec2-deploy`,
+   additionally: `reviewers` is `["MuratAlkan06"]`, `prevent_self_review` is
+   `false` and `can_admins_bypass` is `false`. For `shadow-publish`,
+   `reviewers` is `[]`. Anything else, fix before step 2.
+
+2. **Apply from the P2c branch.**
+
+   ```bash
+   terraform -chdir=infra/ec2 plan  -input=false
+   terraform -chdir=infra/ec2 apply -input=false
+   ```
+
+   Expected: `Plan: 14 to add, 2 to change, 0 to destroy.` The two changes are
+   `aws_iam_role_policy.tf_plan` (the plan role's read grants for the new
+   objects) and `aws_instance.app` (the instance-profile association).
+   **`aws_instance.app` must show as updated in place. If it shows a
+   replacement, stop** — that is the certified host (D10).
+
+   If an earlier revision of this branch was ever applied, the plan differs:
+   `aws_ssm_document.mlobs_deploy` updates in place, which leaves the earlier
+   script callable as an older document version. Delete every version but the
+   new default, always naming the version (D29) — without
+   `--document-version`, `delete-document` deletes the whole document:
+
+   ```bash
+   aws ssm list-document-versions --region us-west-2 --name mlobs-deploy \
+     --query 'DocumentVersions[].[DocumentVersion,IsDefaultVersion]' --output text
+   aws ssm delete-document --region us-west-2 --name mlobs-deploy --document-version <n>
+   ```
+
+3. **Let the SSM agent pick up the instance profile, and check its version.**
+   With the host running:
+
+   ```bash
+   # on the host
+   sudo snap restart amazon-ssm-agent
+   snap info amazon-ssm-agent | grep '^installed:'   # expect 3.3.4851.0 or later
+
+   # from the operator machine — expect: Online
+   aws ssm describe-instance-information --region us-west-2 \
+     --filters Key=InstanceIds,Values=i-0ed558a5144e76f4d \
+     --query 'InstanceInformationList[0].PingStatus' --output text
+   ```
+
+   3.3.4851.0 is the minimum: it fixes CVE-2026-89049 (AWS security bulletin
+   2026-107), a server-side request forgery in the agent's port forwarding
+   that can reach the instance role's credentials. An older agent is updated
+   with `sudo snap refresh amazon-ssm-agent`. Record the installed version
+   with the D30 evidence.
+
+4. **Check the host has what the document calls.** The document runs as root
+   with `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin`,
+   and both `aws` and `k3s` must resolve on it. Ubuntu's AMI ships no AWS CLI;
+   `sudo snap install aws-cli --classic` provides one at `/snap/bin/aws`. As
+   `ubuntu`, `git -C ~/ml-observability-system fetch origin main` must succeed
+   without a prompt, `~/.kube/config` must exist, and
+   `git -C ~/ml-observability-system status --porcelain --untracked-files=no`
+   must print nothing: the document refuses a host whose tracked files are
+   edited. Untracked files, `.env` among them, do not count.
+
+5. **Re-run `TerraformPlan` on the pull request.** It should now exit 0: the
+   configuration and the account agree, and the plan role can read everything
+   `deploy.tf` created. Then merge.
+
+The live evidence that closes P2c — a canary leak rehearsal before the channel
+first reads the real `.env`, a real deploy, a rollback, a no-op plan on `main`
+— is set out in D30.
+
 ## Cost
 
 us-west-2 on-demand, September 2026 list prices:
@@ -412,6 +617,7 @@ us-west-2 on-demand, September 2026 list prices:
 | t3.medium, running | $0.0416 / hour | ≈ $30.40 |
 | 30 GiB gp3 root volume | $0.08 / GB-month | $2.40 |
 | S3 state bucket | a handful of small objects | < $0.01 |
+| S3 artifacts bucket | $0.023 / GB-month | ≈ 0.5 GB per push to `main`, expired at 60 days: 20 pushes held ≈ $0.23 |
 
 The volume is billed whether the instance runs or not, so a **stopped** host
 costs ≈ **$2.40/month** and a host left running costs ≈ **$32.80/month**.
