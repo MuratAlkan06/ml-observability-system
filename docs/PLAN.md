@@ -664,3 +664,92 @@ retention jobs, Alembic.
 > row counts — predictions 8386 → 8386, shadow_predictions 3628 → 3628,
 > drift_runs 18884 → 18885 (the +1 is a fresh k3s drift cycle). The frozen text
 > is not edited.
+
+## Phase 2 P2c — ADR addendum (D28–D30)
+
+> Decisions taken while building the deploy pipeline D24 describes (Phase 2
+> slice P2c: `infra/ec2/deploy.tf`, the `ShadowPublish` job in
+> `.github/workflows/ci.yml`, and `.github/workflows/deploy.yml`). D17–D27 and
+> the erratum above are untouched; this block appends only.
+
+- **D28 The shadow image travels as a private S3 tarball, read by the host's
+  own role:** on every push to `main`, after `K3sSmoke` passes, `ShadowPublish`
+  builds the shadow-scorer image as
+  `ghcr.io/muratalkan06/mlobs-shadow-scorer:<sha>` — the ref the manifest
+  renders at `IMAGE_TAG=<sha>`, never pushed to any registry — saves it with
+  `docker save | gzip`, and uploads it to
+  `s3://mlobs-artifacts-601548053958/shadow/<sha>.tar.gz` as
+  `mlobs-artifact-publish` (trust: the `refs/heads/main` subject; grant:
+  `s3:PutObject` under `shadow/`, nothing else). The bucket is managed by the P1
+  Terraform root: public access block on, SSE-S3, a TLS-deny bucket policy,
+  versioning off, `shadow/` objects expired after 60 days and abandoned
+  multipart uploads after 7. The deploy document downloads the tarball on the
+  host and imports it with `k3s ctr`. Private S3 is the owner's F7d ruling,
+  consistent with D18's licensing position. **Two additions to the design as
+  frozen at the gate, disclosed here and commented where they are granted:**
+  the host's instance role holds `s3:GetObject` under `shadow/` beside
+  `AmazonSSMManagedInstanceCore`, because the host itself fetches the tarball;
+  and `mlobs-deploy` holds the same grant, because S3 authorises the
+  workflow's `head-object` preflight as `s3:GetObject` — without it that
+  preflight would fail on every run. Both are read-only and prefix-scoped.
+  *Rejected:* the public-registry route D18 already excludes; keeping P2b's
+  interim of a local build copied up with `scp`. *Why:* the weights stay out of
+  every registry, and the tarball moves with no stored credential anywhere —
+  the runner writes it with a per-run OIDC session, and the host reads it with
+  instance-role credentials served over IMDSv2, whose hop limit of 1 keeps them
+  out of the pods' reach. `scp` needs an SSH key held somewhere, which is the
+  long-lived credential P1 removed. *Consequence:* 60 days is also the shadow
+  image's rollback window. A redeploy of an older commit fails the tarball
+  preflight, loudly, and the way back from there is a revert commit on `main`.
+- **D29 The deploy gate is layered, and the workflow file is not one of the
+  layers:** `deploy.yml` is `workflow_dispatch` only and runs in the GitHub
+  environment `ec2-deploy`, which the owner configures with a required reviewer
+  and deployments from `main` only (`infra/README.md`, "Deploy pipeline").
+  `mlobs-deploy` trusts exactly one subject,
+  `repo:MuratAlkan06/ml-observability-system:environment:ec2-deploy`, with
+  `aud` pinned; GitHub issues it only to a job in that environment, and only
+  after approval. The role may `ssm:SendCommand` the `mlobs-deploy` document
+  to the one instance and nothing else. `ssm:GetCommandInvocation` is granted
+  on `*` because the action defines no resource type, and
+  `ec2:DescribeInstances` on `*` because EC2 Describe is not resource-scopable.
+  There is no `ec2:StartInstances`, no `ssm:CancelCommand` and no document
+  write. The document is a fixed script with one parameter, `Sha`, whose
+  `allowedPattern` `^[0-9a-f]{40}$` is enforced by the SSM API and again by the
+  agent; before checking anything out, the script re-runs
+  `git merge-base --is-ancestor` against a freshly fetched `origin/main`. The
+  workflow repeats the pattern and ancestry checks client-side, preflights the
+  three GHCR manifests, the S3 tarball and the instance's `running` state, and
+  runs in its own concurrency group without `cancel-in-progress`. *Rejected:*
+  trusting the `refs/heads/main` subject for the deploy role;
+  `AWS-RunShellScript` (D24); letting the pipeline start a stopped host (D24);
+  cancelling an in-flight deploy for a newer one. *Why:* the main subject is
+  issued to every job that runs on `main`, so trusting it would put root on the
+  host one merged workflow edit away with no human in the loop — the
+  environment subject exists only behind the reviewer. The document rather than
+  the workflow is the boundary because the workflow is text anyone with push
+  access can change; whatever a changed workflow sends, the host runs the same
+  script, and only against a commit that is on `main`. Cancelling the workflow
+  cannot cancel the command on the host, so cancel-and-restart would race two
+  `apply.sh` runs against one cluster.
+- **D30 P2c closes on live evidence, gathered after merge:** the pull request
+  can show only that the pipeline is well-formed. `TerraformPlan` on it is
+  expected to exit 2 with the new resources — a no-op there would be the red
+  flag — and the credentialed jobs do not run on a pull request at all. Phase
+  close requires four artifacts, recorded on issue #49: an end-to-end deploy of
+  a real `main` SHA, green in the Actions log; a rollback, demonstrated by
+  dispatching the previous SHA and `smoke.sh` passing on it; a canary leak
+  rehearsal, clean, performed **before** the channel first reads the real
+  `.env` — the run reads an env file holding unique canary values, and the
+  complete output (SSM stdout and stderr, and the Actions log) is swept for
+  them, zero hits being the pass; and `TerraformPlan` a no-op (exit 0) after
+  the owner's apply. EBS snapshot `snap-0f365806e0eaf9fb6`, retained past P2b
+  as the floor under the first automated deploy (the #49 ruling), is deleted
+  once that deploy is green and its rollback demonstrated, and the deletion is
+  recorded with the evidence. *Rejected:* closing the slice on a green pull
+  request; letting the first automated run touch the real `.env`; deleting the
+  snapshot at P2b close. *Why:* a green pull request proves the pipeline
+  parses, not that it deploys. The real `.env` holds the Postgres and Grafana
+  credentials and the Actions log is public, so the first time this channel
+  reads that file must not also be the first time its output hygiene (D23) is
+  tested. The snapshot is the one rollback floor that does not depend on the
+  pipeline under test.

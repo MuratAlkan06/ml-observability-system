@@ -72,13 +72,18 @@ the jobs configured in `prometheus/prometheus.yml` as up, and Grafana
 `api`, `consumer` and `drift` are published to GHCR by CI (D18). `shadow-scorer`
 is **not**, because the model it bakes carries no upstream licence and this
 repository does not republish those weights. Since `apply.sh` takes one
-`IMAGE_PREFIX` for all four, the shadow image is built locally for
-`linux/amd64`, copied to the host with `scp` (fetched from private S3 once P2c
-lands), and tagged into containerd under the same
-`ghcr.io/muratalkan06/mlobs-shadow-scorer:<tag>` name the manifest expects. The
-manifests set `imagePullPolicy: IfNotPresent`, so an image already present is
-used and the registry is never consulted for it. This interim path was
-exercised live in the P2b cutover — see
+`IMAGE_PREFIX` for all four, the shadow image has to be in containerd already,
+under the same `ghcr.io/muratalkan06/mlobs-shadow-scorer:<tag>` name the
+manifest expects. The manifests set `imagePullPolicy: IfNotPresent`, so an
+image already present is used and the registry is never consulted for it.
+
+As of P2c that step is automated, and the S3 path supersedes `scp` (D28). CI's
+`ShadowPublish` job saves the image on every push to `main` and uploads it to a
+private S3 bucket as `shadow/<sha>.tar.gz`; the SSM deploy document downloads
+it on the host and imports it with `k3s ctr` before running `apply.sh` with
+`IMAGE_TAG=<sha>` — see "Deploy pipeline" in `infra/README.md`. The P2b interim
+it replaces, a local `linux/amd64` build copied up with `scp`, was exercised
+live in the cutover — see
 [Migration record and rehearsal results](#migration-record-and-rehearsal-results-2026-09-27).
 
 ## Compose idiom to k3s equivalent
@@ -260,7 +265,9 @@ for P2c's SSM channel (D24), which needs no inbound SSH.
 
 ## See also
 
-- `docs/PLAN.md` — decisions D17–D27.
+- `docs/PLAN.md` — decisions D17–D27, and D28–D30 for the deploy pipeline.
+- `infra/README.md`, "Deploy pipeline" — dispatching a deploy, the environment
+  gate, rollback.
 - `docs/K3S.md` — why k3s, what changed, when to revisit, and the numbers
   policy (D27).
 - `PRINCIPLES.md` — binding engineering rules.
