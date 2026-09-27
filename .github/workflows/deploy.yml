@@ -1,0 +1,281 @@
+name: Deploy
+
+# Phase 2 P2c (docs/PLAN.md D24, D29): deploy one commit of main to the EC2
+# host through SSM. Manual dispatch only — a merge never deploys — and nothing
+# here can start a stopped instance.
+#
+# The security boundary is not this file. It is the mlobs-deploy SSM document
+# (infra/ec2/deploy.tf): a fixed script whose only input is a 40-hex SHA, which
+# it re-checks against a freshly fetched origin/main on the host. This workflow
+# checks the same things first so that a bad request fails here, in the log,
+# before anything reaches the box.
+#
+# Rollback is this same workflow dispatched with the previous SHA (D25).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-character commit SHA on main to deploy. Empty deploys the current tip of main. To roll back, give the previous SHA."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One deploy at a time, and never cancelled for a newer one. Cancelling this
+# run would stop the watching, not the deploy: the SSM command carries on on the
+# host (mlobs-deploy holds no ssm:CancelCommand), so a newer run started beside
+# it would put two apply.sh against one cluster. Runs queue instead. GitHub
+# keeps one pending run per group, so a third dispatch while one runs and one
+# waits replaces the waiting one — the newest request, which is the one to keep.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  Deploy:
+    name: Deploy to EC2 via SSM
+    runs-on: ubuntu-latest
+    # The gate. The job waits here until the environment's required reviewer
+    # approves it, and only a job in this environment is issued the OIDC
+    # subject `repo:MuratAlkan06/ml-observability-system:environment:ec2-deploy`
+    # — the one subject mlobs-deploy trusts. The environment must exist, with
+    # its reviewer, before this file reaches main: GitHub creates a referenced
+    # environment that does not exist, with no protection rules at all
+    # (infra/README.md, "Deploy pipeline").
+    environment: ec2-deploy
+    # Naming any permission replaces the inherited set, so contents: read is
+    # restated beside id-token: write.
+    permissions:
+      contents: read
+      id-token: write
+    # An outer bound only. The inner ones are the SSM delivery timeout (60 s),
+    # the document's execution timeout (840 s) and the poll below (16 min).
+    timeout-minutes: 30
+    env:
+      INSTANCE_ID: i-0ed558a5144e76f4d
+      DOCUMENT_NAME: mlobs-deploy
+      ARTIFACTS_BUCKET: mlobs-artifacts-601548053958
+      GHCR_OWNER: muratalkan06
+    # Every action is SHA-pinned: this job holds the session that can run the
+    # deploy document as root on the host.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so origin/main is present for the ancestry check.
+          fetch-depth: 0
+
+      - name: Resolve and validate the commit
+        id: target
+        env:
+          # Through the environment, never spliced into the script: an
+          # expression expanded inline becomes shell source.
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$INPUT_SHA" ]; then
+            sha="$(git rev-parse origin/main)"
+            echo "ok: no sha given, resolved the tip of origin/main"
+          else
+            sha="$INPUT_SHA"
+          fi
+          # The pattern is checked before the value is printed anywhere. The
+          # input is free text, and a log line that begins with `::` is a
+          # workflow command; after this check it can only be 40 hex digits.
+          # The document enforces the same pattern (allowedPattern) — this is
+          # the early copy.
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full 40-character lowercase hex commit SHA"
+            exit 1
+          fi
+          # Belt and braces with the document's own check on the host: only a
+          # commit on main deploys. Exit 1 is "not an ancestor"; anything else
+          # (128) is "not a commit this repository has".
+          status=0
+          git merge-base --is-ancestor "$sha" origin/main || status=$?
+          case "$status" in
+            0)
+              echo "ok: ${sha} is on main"
+              ;;
+            1)
+              echo "::error::${sha} is not an ancestor of origin/main — only commits on main deploy"
+              exit 1
+              ;;
+            *)
+              echo "::error::${sha} is not a commit in this repository (git exited ${status})"
+              exit 1
+              ;;
+          esac
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::601548053958:role/mlobs-deploy
+          aws-region: us-west-2
+
+      # Preflights. Each fails fast with a message that names what is missing,
+      # so a missing artifact is a failed check here rather than a half-deployed
+      # host (D24).
+
+      - name: "Preflight: service images on GHCR"
+        # The anonymous registry token flow rather than `docker manifest
+        # inspect`: the images are public, so no login is needed, and a plain
+        # HTTP status separates "no such tag" (404) from every other failure,
+        # where the docker CLI folds them into one error string. The Accept
+        # list covers both OCI and Docker manifest and index types, so the
+        # check does not depend on which one the publishing build pushed.
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          accept='application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json'
+          missing=0
+          for svc in api consumer drift; do
+            repo="${GHCR_OWNER}/mlobs-${svc}"
+            token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty')" || token=""
+            if [ -z "$token" ]; then
+              echo "::error::could not get an anonymous pull token for ghcr.io/${repo}"
+              missing=1
+              continue
+            fi
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: ${accept}" \
+              "https://ghcr.io/v2/${repo}/manifests/${SHA}")" || code="request-failed"
+            case "$code" in
+              200)
+                echo "ok: ghcr.io/${repo}:${SHA}"
+                ;;
+              404)
+                echo "::error::ghcr.io/${repo}:${SHA} not found — GhcrPublish pushes it on the main push for that commit; check that run"
+                missing=1
+                ;;
+              *)
+                echo "::error::ghcr.io/${repo}:${SHA} check returned ${code}"
+                missing=1
+                ;;
+            esac
+          done
+          [ "$missing" -eq 0 ]
+
+      - name: "Preflight: shadow image tarball in S3"
+        # HeadObject is authorised as s3:GetObject and the role holds no
+        # s3:ListBucket, so an absent key answers 403 rather than 404; the
+        # message covers both.
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          key="shadow/${SHA}.tar.gz"
+          if ! aws s3api head-object --bucket "$ARTIFACTS_BUCKET" --key "$key" >/dev/null; then
+            echo "::error::s3://${ARTIFACTS_BUCKET}/${key} is missing or unreadable — ShadowPublish uploads it on the main push for that commit, and tarballs expire after 60 days"
+            exit 1
+          fi
+          echo "ok: s3://${ARTIFACTS_BUCKET}/${key}"
+
+      - name: "Preflight: instance running"
+        # Checked, never fixed: mlobs-deploy holds no ec2:StartInstances (D24).
+        run: |
+          set -euo pipefail
+          state="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text)"
+          if [ "$state" != "running" ]; then
+            echo "::error::instance ${INSTANCE_ID} is ${state}: start the instance first — deploys never start a billed host"
+            exit 1
+          fi
+          echo "ok: instance ${INSTANCE_ID} is running"
+
+      - name: Send the deploy command
+        id: send
+        # --timeout-seconds is the delivery timeout: a command the agent has not
+        # picked up within 60 s is abandoned rather than left to start later on
+        # a host nobody is watching. The execution bound is the document's own.
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          command_id="$(aws ssm send-command \
+            --document-name "$DOCUMENT_NAME" \
+            --instance-ids "$INSTANCE_ID" \
+            --parameters "Sha=${SHA}" \
+            --timeout-seconds 60 \
+            --comment "mlobs deploy ${SHA} (run ${GITHUB_RUN_ID})" \
+            --query 'Command.CommandId' --output text)"
+          echo "command_id=${command_id}" >> "$GITHUB_OUTPUT"
+          echo "ok: sent ${DOCUMENT_NAME} for ${SHA} to ${INSTANCE_ID} as command ${command_id}"
+
+      - name: Wait for the deploy and report
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          set -euo pipefail
+          # 16 minutes: the 60 s delivery timeout plus the document's 840 s
+          # execution timeout, plus a minute of slack. The host always reaches a
+          # terminal status before this gives up.
+          deadline=$((SECONDS + 960))
+          err_file="${RUNNER_TEMP}/get-command-invocation.err"
+          status=""
+          last=""
+          while :; do
+            sleep 10
+            rc=0
+            status="$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+              --query 'Status' --output text 2>"$err_file")" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              # The invocation is registered a moment after send-command
+              # returns; until then the API answers InvocationDoesNotExist.
+              # That is the only error waited out — any other is reported.
+              if grep -q 'InvocationDoesNotExist' "$err_file"; then
+                status="NotYetRegistered"
+              else
+                cat "$err_file" >&2
+                echo "::error::get-command-invocation failed for command ${COMMAND_ID}"
+                exit 1
+              fi
+            fi
+            case "$status" in
+              Success|Failed|Cancelled|TimedOut)
+                break
+                ;;
+            esac
+            if [ "$status" != "$last" ]; then
+              echo "waiting: ${status}"
+              last="$status"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::no terminal status for command ${COMMAND_ID} within 16 minutes (last: ${status}); it may still be running on the host — check Run Command history before dispatching again"
+              exit 1
+            fi
+          done
+
+          invocation="${RUNNER_TEMP}/invocation.json"
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --output json > "$invocation"
+          details="$(jq -r '.StatusDetails' "$invocation")"
+          response_code="$(jq -r '.ResponseCode' "$invocation")"
+
+          # A bounded tail of what the host printed. apply.sh and smoke.sh emit
+          # fixed lines only (D23), and that is the whole log surface. SSM keeps
+          # the first 24,000 characters of stdout and 8,000 of stderr, which a
+          # normal deploy fits in. The host's text is echoed between
+          # stop-commands markers so that nothing in it is read as a workflow
+          # command by this runner.
+          marker="$(openssl rand -hex 16)"
+          echo "::stop-commands::${marker}"
+          echo "--- host stdout (last 80 lines) ---"
+          jq -r '.StandardOutputContent' "$invocation" | tail -n 80
+          echo "--- host stderr (last 40 lines) ---"
+          jq -r '.StandardErrorContent' "$invocation" | tail -n 40
+          echo "::${marker}::"
+
+          if [ "$status" = "Success" ]; then
+            echo "ok: deployed ${SHA} (${details})"
+            exit 0
+          fi
+          echo "::error::deploy of ${SHA} ended ${status} (${details}, exit code ${response_code})"
+          exit 1
