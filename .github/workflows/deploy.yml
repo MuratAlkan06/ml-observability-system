@@ -1,4 +1,8 @@
 name: Deploy
+# Display only: the Actions list shows which commit each run was asked for.
+# A run name is never shell source, so the free-text input can at worst
+# mislabel a run; it is validated in the job's first step.
+run-name: Deploy ${{ inputs.sha || 'tip of main' }}
 
 # Phase 2 P2c (docs/PLAN.md D24, D29): deploy one commit of main to the EC2
 # host through SSM. Manual dispatch only — a merge never deploys — and nothing
@@ -42,8 +46,9 @@ jobs:
     # approves it, and only a job in this environment is issued the OIDC
     # subject `repo:MuratAlkan06/ml-observability-system:environment:ec2-deploy`
     # — the one subject mlobs-deploy trusts. The environment must exist, with
-    # its reviewer, before this file reaches main: GitHub creates a referenced
-    # environment that does not exist, with no protection rules at all
+    # its reviewer and its main-only branch rule, before that role does: GitHub
+    # creates a referenced environment that does not exist, with no protection
+    # rules at all, and a workflow on any branch could reference it
     # (infra/README.md, "Deploy pipeline").
     environment: ec2-deploy
     # Naming any permission replaces the inherited set, so contents: read is
@@ -66,6 +71,9 @@ jobs:
         with:
           # Full history, so origin/main is present for the ancestry check.
           fetch-depth: 0
+          # Every git call after this is local. Leaving no token in
+          # .git/config means no later step can find one there.
+          persist-credentials: false
 
       - name: Resolve and validate the commit
         id: target
@@ -161,16 +169,27 @@ jobs:
           [ "$missing" -eq 0 ]
 
       - name: "Preflight: shadow image tarball in S3"
-        # HeadObject is authorised as s3:GetObject and the role holds no
-        # s3:ListBucket, so an absent key answers 403 rather than 404; the
-        # message covers both.
+        # mlobs-deploy may list shadow/ and nothing more: it can learn that a
+        # key exists, never read the tarball (infra/ec2/deploy.tf). The IAM
+        # condition requires the prefix to be exactly `shadow/`, so the list
+        # is of the whole prefix and the one key is picked out by --query.
+        # `--output json` is load-bearing: with `--output text` the CLI runs
+        # --query once per 1,000-key page, and a key on the second page would
+        # print one count per page instead of one count.
         env:
           SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
           key="shadow/${SHA}.tar.gz"
-          if ! aws s3api head-object --bucket "$ARTIFACTS_BUCKET" --key "$key" >/dev/null; then
-            echo "::error::s3://${ARTIFACTS_BUCKET}/${key} is missing or unreadable — ShadowPublish uploads it on the main push for that commit, and tarballs expire after 60 days"
+          # The key sits inside a JMESPath string literal. SHA passed the
+          # 40-hex check in the first step, so it cannot close the quote.
+          count="$(aws s3api list-objects-v2 --bucket "$ARTIFACTS_BUCKET" --prefix "shadow/" \
+            --query "length(Contents[?Key=='${key}'] || \`[]\`)" --output json)" || {
+            echo "::error::could not list s3://${ARTIFACTS_BUCKET}/shadow/ — the AWS error is above; this is a failed check, not a missing tarball"
+            exit 1
+          }
+          if [ "$count" != "1" ]; then
+            echo "::error::s3://${ARTIFACTS_BUCKET}/${key} does not exist. Either ShadowPublish did not run or did not succeed on the main push for that commit (check that run), or the tarball is past the bucket's 60-day expiry, in which case the way back is a revert commit on main"
             exit 1
           fi
           echo "ok: s3://${ARTIFACTS_BUCKET}/${key}"
