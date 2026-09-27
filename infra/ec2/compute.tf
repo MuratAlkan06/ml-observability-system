@@ -64,6 +64,14 @@ resource "aws_instance" "app" {
   subnet_id              = data.aws_subnet.default.id
   vpc_security_group_ids = [aws_security_group.app.id]
 
+  # Not transcribed: added in P2c (deploy.tf, docs/PLAN.md D29) so the SSM agent
+  # can register and the host can read shadow tarballs. `iam_instance_profile`
+  # is not a ForceNew attribute — the provider associates the profile in place
+  # (AssociateIamInstanceProfile), so the certified host keeps its id, its
+  # volume and its numbers (D10). A plan that shows this instance replaced is
+  # wrong; stop rather than apply it.
+  iam_instance_profile = aws_iam_instance_profile.host.name
+
   # IMDSv2 only — the README's deploy claim depends on this staying "required".
   metadata_options {
     http_endpoint               = "enabled"

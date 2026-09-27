@@ -58,8 +58,10 @@ resource "aws_iam_role" "tf_plan" {
 # account — Secrets Manager metadata, S3 object listings, DynamoDB scans — none
 # of which a plan of this root needs. What this policy narrows is the set of
 # services reachable at all: EC2, one state object, and this root's own IAM
-# objects. Within EC2 it is not a per-resource grant, and the statement below
-# says so plainly rather than implying a tighter boundary than IAM can express.
+# objects — plus, since P2c, the one SSM document and the configuration of the
+# one S3 bucket that deploy.tf manages. Within EC2 it is not a per-resource
+# grant, and the statement below says so plainly rather than implying a
+# tighter boundary than IAM can express.
 data "aws_iam_policy_document" "tf_plan" {
   # What the plan actually reads is data.aws_vpc, data.aws_subnet, the
   # instance, the security group, its rules and the root volume. `ec2:Describe*`
@@ -121,6 +123,93 @@ data "aws_iam_policy_document" "tf_plan" {
     effect    = "Allow"
     actions   = ["iam:GetOpenIDConnectProvider"]
     resources = [aws_iam_openid_connect_provider.github.arn]
+  }
+
+  # --- P2c: read-back of everything deploy.tf creates (docs/PLAN.md D28–D30) --
+  #
+  # Granted in the same change that creates those objects, and that ordering is
+  # the point. The plan on the P2c pull request only has to *create* them, which
+  # reads nothing; every plan after the owner's apply has to *refresh* them, and
+  # would fail on an AccessDenied the moment they exist if these grants arrived
+  # a change later. Each list covers what the locked provider's (6.62.0) read
+  # path calls for that resource type; the few read-only extras beyond that are
+  # named where they appear.
+
+  # The three P2c roles, read the same way ReadOwnRole reads this one. The
+  # extra is ListInstanceProfilesForRole, which the provider calls only while
+  # deleting a role — an apply, never a plan. It is read-only, inert on
+  # refresh, and granted because the P2c design enumerates it.
+  statement {
+    sid    = "ReadDeployPipelineRoles"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+    ]
+    resources = [
+      aws_iam_role.deploy.arn,
+      aws_iam_role.artifact_publish.arn,
+      aws_iam_role.host.arn,
+    ]
+  }
+
+  statement {
+    sid       = "ReadHostInstanceProfile"
+    effect    = "Allow"
+    actions   = ["iam:GetInstanceProfile"]
+    resources = [aws_iam_instance_profile.host.arn]
+  }
+
+  # DescribeDocumentPermission is not optional: the provider reads the
+  # document's sharing permissions on every refresh and fails the read if it
+  # is denied. Tags come back on DescribeDocument today; ListTagsForResource is
+  # granted so a provider change to that path cannot turn a no-op plan red.
+  statement {
+    sid    = "ReadDeployDocument"
+    effect = "Allow"
+    actions = [
+      "ssm:DescribeDocument",
+      "ssm:GetDocument",
+      "ssm:DescribeDocumentPermission",
+      "ssm:ListTagsForResource",
+    ]
+    resources = [aws_ssm_document.mlobs_deploy.arn]
+  }
+
+  # Bucket configuration only, on the bucket ARN only. aws_s3_bucket's read
+  # still queries every legacy sub-resource — ACL, CORS, website, accelerate,
+  # request payment, logging, replication, object lock — and fails on a denied
+  # one, so the list is longer than what deploy.tf configures. s3:ListBucket is
+  # what HeadBucket, the provider's existence and region check, is authorised
+  # as; it lists keys, which are commit SHAs. GetBucketLocation is the extra —
+  # the provider resolves the region through HeadBucket. There is no object
+  # grant: this role cannot read a tarball.
+  statement {
+    sid    = "ReadArtifactsBucketConfig"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:GetBucketPolicy",
+      "s3:GetBucketAcl",
+      "s3:GetBucketCORS",
+      "s3:GetBucketWebsite",
+      "s3:GetBucketVersioning",
+      "s3:GetAccelerateConfiguration",
+      "s3:GetBucketRequestPayment",
+      "s3:GetBucketLogging",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetBucketObjectLockConfiguration",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketTagging",
+      "s3:ListTagsForResource",
+    ]
+    resources = [aws_s3_bucket.artifacts.arn]
   }
 }
 
