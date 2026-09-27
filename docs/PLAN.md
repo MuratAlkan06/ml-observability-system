@@ -645,3 +645,22 @@ retention jobs, Alembic.
   comparison that makes the migration legible. Compose stays until the k3s path
   has been the live one long enough to have earned it (D25's fallback), and
   removing it is a change with its own risk and therefore its own slice.
+
+> **Erratum (2026-09-27, P2b):** The v1 volume prose — §4's "`init.sql` runs
+> only on fresh volume; schema change = `docker compose down -v`", the
+> `docker-compose.yml` comment to rotate the Postgres password "by recreating the
+> volume", and the "live volume" wording that followed — reads as if Postgres
+> data sat on a persistent volume that only `down -v` resets. No such volume
+> existed. `docker-compose.yml` declares no named volumes, so the data directory
+> lived in the anonymous volume Docker creates for the `postgres:16-alpine`
+> image's `VOLUME /var/lib/postgresql/data`. Compose carries an anonymous volume
+> across an `up` that recreates the container, but it has no stable name and a
+> later `up` does not remount it, so a plain `docker compose down` would have
+> started the next `up` from an empty initdb: the demo history was durable
+> across restarts and recreations, but not across a `down`. D20's `local-path`
+> PVC (Postgres only) is what makes the documented durability true. D25's "the
+> same volume is reused across runtimes" did not hold either: the history
+> crossed the cutover by `pg_dump --clean --if-exists` and restore, verified by
+> row counts — predictions 8386 → 8386, shadow_predictions 3628 → 3628,
+> drift_runs 18884 → 18885 (the +1 is a fresh k3s drift cycle). The frozen text
+> is not edited.

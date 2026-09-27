@@ -10,8 +10,9 @@ reinterpreted, and every manifest names the Compose service it came from. It
 also stays installed on the host as a fallback runtime for the duration of
 Phase 2 (D25).
 
-The on-host cutover runbook lands in `docs/K3S.md` with slice P2b. This file
-covers the manifests, the two scripts, and how to rehearse them locally.
+Why the stack moved, what changed and when to revisit are in `docs/K3S.md`.
+This file covers the manifests, the two scripts, how to rehearse them locally,
+and the record of the on-host cutover (P2b).
 
 ## Layout
 
@@ -71,12 +72,14 @@ the jobs configured in `prometheus/prometheus.yml` as up, and Grafana
 `api`, `consumer` and `drift` are published to GHCR by CI (D18). `shadow-scorer`
 is **not**, because the model it bakes carries no upstream licence and this
 repository does not republish those weights. Since `apply.sh` takes one
-`IMAGE_PREFIX` for all four, the shadow image is built on the host (or fetched
-from private S3 in P2c) and tagged into containerd under the same
+`IMAGE_PREFIX` for all four, the shadow image is built locally for
+`linux/amd64`, copied to the host with `scp` (fetched from private S3 once P2c
+lands), and tagged into containerd under the same
 `ghcr.io/muratalkan06/mlobs-shadow-scorer:<tag>` name the manifest expects. The
 manifests set `imagePullPolicy: IfNotPresent`, so an image already present is
-used and the registry is never consulted for it. The P2b runbook spells this
-out.
+used and the registry is never consulted for it. This interim path was
+exercised live in the P2b cutover — see
+[Migration record and rehearsal results](#migration-record-and-rehearsal-results-2026-09-27).
 
 ## Compose idiom to k3s equivalent
 
@@ -175,8 +178,89 @@ kubectl -n mlobs get deployment prometheus \
   -o jsonpath="{.spec.template.metadata.annotations['mlobs/config-hash']}"
 ```
 
+## Migration record and rehearsal results (2026-09-27)
+
+The on-host cutover as executed across two owner sessions, 2026-09-21 and
+2026-09-27. The raw evidence is on issue #48; the reasoning is in
+`docs/K3S.md`.
+
+**Abort floor.** EBS snapshot `snap-0f365806e0eaf9fb6` — 30 GiB, created
+2026-09-21 with the instance stopped, completed 100% — taken before any
+destructive step. Above it sat the D25 path: Compose still installed on the
+host, and a `pg_dump` to restore into whichever runtime came back. The abort
+path was never needed.
+
+**State found.** Compose was degraded: 7/9 containers up, with `prometheus`
+and `grafana` down since the 2026-09-21 instance start. Neither has a restart
+policy in `docker-compose.yml`, so this was the reboot gap observed live —
+Grafana dark for about six days. The instance had also idled for six days after
+an interrupted session, ≈$6 of unplanned compute, recorded here so the cost
+note stays honest. The host repository was fast-forwarded `feb211e` →
+`7a270be` before the cutover.
+
+**Cutover.**
+
+1. Baseline: predictions 8386, shadow_predictions 3628, drift_runs 18884.
+   `pg_dump --clean --if-exists` → 18M at `~/mlobs-backup-2026-09-27.sql`.
+2. `docker compose down`: 10/10 removed; ports verified free.
+3. k3s `v1.36.4+k3s1`: hash-verified install, systemd-enabled,
+   `--disable traefik,servicelb,metrics-server`. Node Ready in 3s.
+4. Shadow image: the interim path from the note above, exercised live — a
+   `linux/amd64` build on the operator machine, copied up with `scp` and
+   imported with `k3s ctr` (487M gzipped). P2c replaces it with the private S3
+   tarball (D18).
+5. `IMAGE_TAG=main ./deploy/k3s/apply.sh`: all ok-lines, nine workloads rolled
+   out, Prometheus targets 5/5 (`api`, `consumer`, `drift`, `drift_shadow`,
+   `shadow_scorer`), smoke passed. `main` is the moving GHCR tag; SHA-pinned
+   deploys arrive with P2c (D24).
+6. Restore: predictions 8386, shadow_predictions 3628, drift_runs 18885 — the
+   +1 is a fresh k3s drift cycle.
+7. Standalone `smoke.sh`: passed.
+
+**k3s idle overhead.** Used memory 648 → 930 MB (≈282 MB) after install,
+before the stack.
+
+**D26 rehearsal: PASS.** 12 minutes at simulator 5 rps with the shadow scorer
+on, ~3.6k requests served. 24/24 samples; MemAvailable 1,917,348–1,961,112 kB,
+minimum ≈1872 MiB against the ≥400 MiB bar — a 4.7× margin. dmesg OOM scan:
+zero events. Top RSS under load:
+
+| Process | RSS |
+|---|---|
+| api | 565M |
+| k3s-server | 529M |
+| shadow | 439M |
+| grafana | 240M |
+| containerd | 186M |
+
+Verdict: **t3.medium retained.** No instance-type change, so
+`var.instance_type` in the P1 root is untouched.
+
+**D27 re-measurement.** `hey` 0.1.5 on-instance, the README methodology
+unchanged: 15 s warm-up then 120 s measured, `-c 1 -q 5`, fixed payload. The
+A/B switch is the scale idiom from the table above, exercised live; the shadow
+scorer was restored to `replicas=1` afterwards.
+
+| Window | req/s | p50 | p95 | p99 |
+|---|---|---|---|---|
+| shadow ON (`replicas=1`) | 4.96 | 62.2 ms | 111.2 ms | 300.6 ms |
+| shadow OFF (`replicas=0`) | 4.95 | 59.8 ms | 101.0 ms | 243.9 ms |
+
+Shadow primary-path cost ≈2.4 ms p50 / ≈10 ms p95. How the p95 figure reads
+against the v1.1 ≤10% criterion is set out in the README's k3s re-measurement
+section.
+
+**Host facts.** ssm-agent is present (snap 3.3.4793.0, latest/stable), which
+confirms the P2c dependency.
+
+**SSH ingress churn.** The SSH `/32` rotated twice during this slice, each time
+through the P1 root: plan `0 add/1 change/0 destroy`, apply, then the Actions
+secret synced. That recurring friction is recorded as the concrete motivation
+for P2c's SSM channel (D24), which needs no inbound SSH.
+
 ## See also
 
 - `docs/PLAN.md` — decisions D17–D27.
-- `docs/K3S.md` — on-host cutover and rollback runbook (arrives with P2b).
+- `docs/K3S.md` — why k3s, what changed, when to revisit, and the numbers
+  policy (D27).
 - `PRINCIPLES.md` — binding engineering rules.

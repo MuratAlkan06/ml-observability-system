@@ -42,7 +42,9 @@ flowchart LR
     prom --> graf["Grafana dashboards"]
 ```
 
-All services run under Docker Compose on a single node. Only the API (`:8000`) and Grafana
+All services run on a single node: under Docker Compose in the quick start below — the layout this
+paragraph describes — and under k3s on the EC2 host since 2026-09-27 (see [Deployment](#deployment)).
+Only the API (`:8000`) and Grafana
 (`:3000`) are published for normal use; Prometheus (`:9090`) is bound to loopback for local
 debugging, and the consumer (`:9108`), drift (`:9109`), and shadow-scorer (`:9110`) metrics
 endpoints — plus the second `drift-shadow` job — are scraped over the internal Compose network and
@@ -101,6 +103,9 @@ Then look at:
 
 ## Load test
 
+*Historical: measured under Docker Compose on the EC2 t3.medium. The runtime is k3s as of
+2026-09-27 — see [k3s re-measurement](#k3s-re-measurement-2026-09-27) and [docs/K3S.md](docs/K3S.md).*
+
 Measured **on the deployed EC2 t3.medium** (2 vCPU, us-west-2, Ubuntu 24.04, Docker Compose,
 single uvicorn worker) with [`hey`](https://github.com/rakyll/hey) `0.1.5` run on-instance over
 loopback — 15 s warm-up to prime the model, then 60 s measured runs of a 26-token
@@ -135,6 +140,9 @@ hey -z 60s -c 1 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:800
 ```
 
 ### v1.1 load test (shadow on/off)
+
+*Historical: measured under Docker Compose on the EC2 t3.medium. The runtime is k3s as of
+2026-09-27 — see [k3s re-measurement](#k3s-re-measurement-2026-09-27) and [docs/K3S.md](docs/K3S.md).*
 
 Certified **on the deployed EC2 t3.medium** (2 vCPU / 4 GB, single uvicorn worker) with
 [`hey`](https://github.com/rakyll/hey) driving `POST /predict` on a fixed ~15-token review
@@ -178,6 +186,26 @@ hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localho
 docker compose stop shadow-scorer
 hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
 ```
+
+### k3s re-measurement (2026-09-27)
+
+Re-measured **on the same EC2 t3.medium** after the cutover to k3s `v1.36.4+k3s1`, with the v1.1
+methodology unchanged: [`hey`](https://github.com/rakyll/hey) `0.1.5` on-instance, 15 s warm-up
+then a **120-second** measured window, `-c 1 -q 5`, fixed payload — shadow scorer on vs. off via
+`kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1|0`:
+
+| Shadow | Throughput | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| **on** (`replicas=1`) | 4.96 req/s | 62.2 ms | 111.2 ms | 300.6 ms |
+| **off** (`replicas=0`) | 4.95 req/s | 59.8 ms | 101.0 ms | 243.9 ms |
+
+The shadow scorer's cost to the primary path under k3s is ≈2.4 ms at p50 and ≈10 ms at p95. At
+p95 that computes to +10.1% (111.2 vs 101.0 ms), just outside the ≤10% criterion the compose-era
+run above met at −1.0%; it comes from one matched pair of 120 s windows and is published as
+measured, not re-certified. The compose-era tables stay as measured (D27, [docs/K3S.md](docs/K3S.md)).
+
+Reproduce: the v1.1 block above, swapping `docker compose start` / `stop shadow-scorer` for
+`kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1` / `--replicas=0`.
 
 ## How drift detection works
 
@@ -261,8 +289,23 @@ deferred.
 
 ## Deployment
 
-The EC2 numbers above were measured on a single t3.medium in us-west-2 (Ubuntu 24.04, Docker
-Compose, IMDSv2 required, only `:8000` and `:3000` exposed). That host is now codified in
+The EC2 numbers above were measured on a single t3.medium in us-west-2 (Ubuntu 24.04, IMDSv2
+required, only `:8000` and `:3000` exposed) — the two compose-era tables under Docker Compose, the
+[k3s re-measurement](#k3s-re-measurement-2026-09-27) under k3s.
+
+Since 2026-09-27 that host runs the stack on k3s `v1.36.4+k3s1` from
+[`deploy/k3s/`](deploy/k3s/README.md): plain manifests, an `apply.sh` that waits on all nine
+rollouts, and a `smoke.sh` shared with the CI rehearsal. k3s is an enabled systemd service that
+brings every workload back with it, so an instance start restores the full stack, Prometheus and
+Grafana included (by construction; no stop/start is in the P2b evidence yet). Under Compose those
+two had no restart policy and stayed down after a start. The demo history crossed the cutover by
+`pg_dump`/restore with row counts matching. Docker Compose is retained for local development
+(the quick start above) and as the documented fallback runtime on the host. Why k3s, what changed
+and when to revisit are in [docs/K3S.md](docs/K3S.md); the cutover record and the memory
+rehearsal that kept the t3.medium are in
+[deploy/k3s/README.md](deploy/k3s/README.md#migration-record-and-rehearsal-results-2026-09-27).
+
+That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
 of its rules through `import` blocks rather than recreating them, keeps state in S3, and runs
 `validate` on every pull request plus a read-only `plan` authenticated by GitHub OIDC — this
@@ -283,7 +326,7 @@ usage pattern), and an explicit list of what the slice does not prove — notabl
 | Drift detection | Pure-Python χ² + KL against a frozen baseline, per model (`drift` / `drift-shadow`) |
 | Metrics | Prometheus |
 | Dashboards | Grafana (anonymous Viewer) |
-| Orchestration | Docker Compose |
+| Orchestration | k3s `v1.36.4+k3s1` on EC2 ([`deploy/k3s/`](deploy/k3s/README.md)); Docker Compose for local dev |
 | Language | Python 3.12 |
 
 ## Roadmap
@@ -302,7 +345,8 @@ Built in waves of independently reviewable slices.
 - [x] **S5 · End-to-end + load test** — full integration demo (above) and local load test
 - [x] **S5 · Deploy** — single-node EC2 t3.medium (Docker Compose, Ubuntu 24.04); only `:8000`
   and `:3000` exposed, IMDSv2 enforced. Live-verified on the instance: exactly-once effect in the
-  pipeline at ~4.7k predictions and all three drift tests firing real Slack alerts.
+  pipeline at ~4.7k predictions and all three drift tests firing real Slack alerts. *That history
+  was carried through the 2026-09-27 k3s cutover: 8386 predictions before it, 8386 restored after.*
 
 **v1.1 — Shadow / candidate comparison**
 - [x] **S6 · Shadow scorer** — MiniLM-L6 candidate re-scores live traffic off a second consumer
