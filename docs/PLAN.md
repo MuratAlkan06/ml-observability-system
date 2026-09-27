@@ -753,3 +753,13 @@ retention jobs, Alembic.
   reads that file must not also be the first time its output hygiene (D23) is
   tested. The snapshot is the one rollback floor that does not depend on the
   pipeline under test.
+> **Erratum (2026-09-27, P2c):** D13's drift-detection claim — every CI plan doubling as
+> config-vs-reality drift detection — was unenforced from the P1 merge until P2c. The
+> `hashicorp/setup-terraform` action installs a wrapper by default, and the wrapper maps
+> Terraform's exit 2 (changes pending) to exit 0, so the `TerraformPlan` job's case dispatch
+> never saw a non-zero code: every CI "no-op" in that window was unproven, and the drift
+> alarm on `main` could not fire. Discovered by the P2c slice's expected-exit-2 check, when
+> a fourteen-resource PR reported "no-op" — the impossible pass the P2a exit-semantics design
+> had named in advance as the red flag. Fixed by `terraform_wrapper: false` on the plan job's
+> setup step in the same PR. Owner-local `-detailed-exitcode` runs never used the wrapper and
+> were unaffected; the P1 bootstrap and P2b evidence relied on local runs and stand.
