@@ -121,10 +121,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # is sent and again by the agent on the host before it runs — so the value that
 # reaches the shell cannot carry a quote, a space or a metacharacter. The SHA is
 # then re-checked on the host against a freshly fetched origin/main, so only a
-# commit on main deploys, whatever the caller claimed.
+# commit on main deploys, whatever the caller claimed — and after the checkout,
+# HEAD is compared with the SHA itself. The two checks read the same string
+# differently: `merge-base` resolves 40 hex digits as an object id, while
+# `checkout` prefers a local branch of that name, so a branch named like a main
+# SHA would otherwise pass the ancestry check and put other code under
+# apply.sh.
 #
-# Where this differs from the gate-frozen sequence, none of it changes what
-# runs or in what order:
+# Where this differs from the gate-frozen sequence (the first three items come
+# from the security review of PR #57):
+#   - the order: the tarball is downloaded and imported before the checkout,
+#     so a missing or expired tarball fails with the working tree where it was
+#     rather than half-moved to the new commit.
+#   - a clean-tree gate before anything changes: a tracked file edited on the
+#     host would be carried through the checkout into what apply.sh runs, so
+#     the host refuses instead. Untracked files — the host's .env among them —
+#     are not considered.
+#   - the HEAD check after the checkout, described above.
 #   - `set -eu`: runCommand lines are joined into one script, which otherwise
 #     carries on past a failing line. The image steps are separate lines, not
 #     one `&&` chain, because errexit ignores every command but the last in an
@@ -142,6 +155,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # poll is bounded at 120 s. The deploy workflow allows 60 s for delivery and
 # polls for 16 minutes, so the host always ends the command before the workflow
 # stops watching it.
+#
+# Changing `content` creates a new document version and leaves the old ones
+# callable: SendCommand takes a --document-version, and IAM has no condition
+# key to pin it. Every change here is therefore followed by deleting the
+# superseded versions (docs/PLAN.md D29).
 resource "aws_ssm_document" "mlobs_deploy" {
   name            = "mlobs-deploy"
   document_type   = "Command"
@@ -166,11 +184,13 @@ resource "aws_ssm_document" "mlobs_deploy" {
             - 'cd /home/ubuntu/ml-observability-system'
             - 'sudo -u ubuntu git fetch origin main'
             - 'sudo -u ubuntu git merge-base --is-ancestor {{Sha}} origin/main || { echo "refusing: {{Sha}} is not an ancestor of origin/main"; exit 1; }'
-            - 'sudo -u ubuntu git checkout {{Sha}}'
+            - 'test -z "$(sudo -u ubuntu git status --porcelain --untracked-files=no)" || { echo "refusing: tracked files modified on host"; exit 1; }'
             - 'aws s3 cp --no-progress --region ${var.region} s3://${aws_s3_bucket.artifacts.bucket}/shadow/{{Sha}}.tar.gz /tmp/shadow.tar.gz'
             - 'gunzip -f /tmp/shadow.tar.gz'
             - 'k3s ctr images import /tmp/shadow.tar'
             - 'rm -f /tmp/shadow.tar'
+            - 'sudo -u ubuntu git checkout {{Sha}}'
+            - 'test "$(sudo -u ubuntu git rev-parse HEAD)" = "{{Sha}}" || { echo "refusing: checkout did not land on {{Sha}}"; exit 1; }'
             - 'sudo -u ubuntu env KUBECONFIG=/home/ubuntu/.kube/config IMAGE_TAG={{Sha}} ./deploy/k3s/apply.sh'
   YAML
 }
@@ -257,17 +277,38 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["*"]
   }
 
-  # DISCLOSED ADDITION to the gate-frozen P2c role policy (docs/PLAN.md D28).
-  # The workflow's tarball preflight is `aws s3api head-object`, and S3
-  # authorises HeadObject as s3:GetObject — without this grant the preflight
-  # would fail on every run, present or not. Scoped to the same shadow/ prefix
-  # the host reads. No s3:ListBucket, so a missing key reads as 403, not 404;
-  # the preflight's message covers both.
+  # DISCLOSED ADDITION to the gate-frozen P2c role policy (docs/PLAN.md D28),
+  # as narrowed by the security review of PR #57. The workflow's tarball
+  # preflight only has to learn that shadow/<sha>.tar.gz exists, so it lists
+  # shadow/ and looks for the key. The first version headed the object
+  # instead, which S3 authorises as s3:GetObject: the right to download the
+  # weights, held by a role that never needs them. ListBucket is a bucket-level
+  # action, so the prefix condition does the scoping — a list is allowed only
+  # with the prefix exactly `shadow/`. What comes back is key names (commit
+  # SHAs), sizes and dates, never an object's content.
+  #
+  # s3:ResourceAccount, here and on the other two grants of this bucket, pins
+  # the account that owns the bucket as well as its name. Bucket names are
+  # global: if this bucket were ever deleted and the name claimed by another
+  # account, a grant by name alone would follow it there — the publish role
+  # writing the weights into it, the host importing whatever image it served.
   statement {
-    sid       = "HeadShadowTarball"
+    sid       = "ListShadowTarballs"
     effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.artifacts.arn}/shadow/*"]
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.artifacts.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values   = ["shadow/"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:ResourceAccount"
+      values   = ["601548053958"]
+    }
   }
 }
 
@@ -281,15 +322,20 @@ resource "aws_iam_role_policy" "deploy" {
 # mlobs-artifact-publish: the role ShadowPublish assumes
 # -----------------------------------------------------------------------------
 #
-# Trust is the main-branch subject, which is the context ShadowPublish runs in
-# (a push to main; it declares no environment). A subject names a context, not
-# a job, and every job on main is issued this one — the plan role trusts it for
-# the same reason. What keeps other jobs out of this role is ci.yml's gating on
-# the publish job and, behind that, a grant of exactly one write into one
-# prefix: it can add tarballs and do nothing else, not even read them back.
+# Trust is the `shadow-publish` environment subject: mlobs-deploy's shape,
+# without the reviewer. GitHub issues it only to a job that declares
+# `environment: shadow-publish`, and the environment's deployment branch rule
+# admits only runs on main (infra/README.md, "Deploy pipeline"). Not the
+# main-branch subject (security review of PR #57): a subject names a context,
+# not a job, and that one is issued to every job that runs on main —
+# TerraformPlan among them. It matters because of what this role writes. The
+# host imports whatever sits at shadow/<sha>.tar.gz and runs it as the shadow
+# scorer, so a write here is code on the host. Behind the trust is one write
+# into one prefix: it can add tarballs and do nothing else, not even read
+# them back.
 data "aws_iam_policy_document" "artifact_publish_assume_role" {
   statement {
-    sid     = "GitHubActionsMainPush"
+    sid     = "GitHubActionsShadowPublishEnvironment"
     effect  = "Allow"
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -307,7 +353,7 @@ data "aws_iam_policy_document" "artifact_publish_assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:MuratAlkan06/ml-observability-system:ref:refs/heads/main"]
+      values   = ["repo:MuratAlkan06/ml-observability-system:environment:shadow-publish"]
     }
   }
 }
@@ -321,13 +367,19 @@ resource "aws_iam_role" "artifact_publish" {
 # s3:PutObject also authorises the multipart calls `aws s3 cp` makes for an
 # object this size. Aborting a failed multipart upload would need
 # s3:AbortMultipartUpload; it is not granted, and the lifecycle rule above
-# sweeps the parts instead.
+# sweeps the parts instead. s3:ResourceAccount as on mlobs-deploy's grant.
 data "aws_iam_policy_document" "artifact_publish" {
   statement {
     sid       = "PutShadowTarball"
     effect    = "Allow"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.artifacts.arn}/shadow/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:ResourceAccount"
+      values   = ["601548053958"]
+    }
   }
 }
 
@@ -373,14 +425,21 @@ resource "aws_iam_role_policy_attachment" "host_ssm_core" {
 # DISCLOSED ADDITION to the gate-frozen P2c design (docs/PLAN.md D28). The
 # design gave the host AmazonSSMManagedInstanceCore alone, but the deploy
 # document downloads the shadow tarball on the host, as root, with the host's
-# own credentials — so the host must be able to read it. Read only, and only
-# under shadow/.
+# own credentials — so the host must be able to read it. Read only, only under
+# shadow/, and s3:ResourceAccount as on mlobs-deploy's grant. It is the one
+# role that still reads the objects: the deploy role lists, it does not read.
 data "aws_iam_policy_document" "host_shadow_read" {
   statement {
     sid       = "ReadShadowTarballs"
     effect    = "Allow"
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.artifacts.arn}/shadow/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:ResourceAccount"
+      values   = ["601548053958"]
+    }
   }
 }
 
