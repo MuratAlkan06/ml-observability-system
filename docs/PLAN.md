@@ -679,20 +679,34 @@ retention jobs, Alembic.
   renders at `IMAGE_TAG=<sha>`, never pushed to any registry — saves it with
   `docker save | gzip`, and uploads it to
   `s3://mlobs-artifacts-601548053958/shadow/<sha>.tar.gz` as
-  `mlobs-artifact-publish` (trust: the `refs/heads/main` subject; grant:
-  `s3:PutObject` under `shadow/`, nothing else). The bucket is managed by the P1
-  Terraform root: public access block on, SSE-S3, a TLS-deny bucket policy,
-  versioning off, `shadow/` objects expired after 60 days and abandoned
+  `mlobs-artifact-publish` (trust: the `shadow-publish` environment subject;
+  grant: `s3:PutObject` under `shadow/`, nothing else). The bucket is managed by
+  the P1 Terraform root: public access block on, SSE-S3, a TLS-deny bucket
+  policy, versioning off, `shadow/` objects expired after 60 days and abandoned
   multipart uploads after 7. The deploy document downloads the tarball on the
   host and imports it with `k3s ctr`. Private S3 is the owner's F7d ruling,
   consistent with D18's licensing position. **Two additions to the design as
   frozen at the gate, disclosed here and commented where they are granted:**
   the host's instance role holds `s3:GetObject` under `shadow/` beside
   `AmazonSSMManagedInstanceCore`, because the host itself fetches the tarball;
-  and `mlobs-deploy` holds the same grant, because S3 authorises the
-  workflow's `head-object` preflight as `s3:GetObject` — without it that
-  preflight would fail on every run. Both are read-only and prefix-scoped.
-  *Rejected:* the public-registry route D18 already excludes; keeping P2b's
+  and `mlobs-deploy` holds `s3:ListBucket` on the bucket, conditioned on the
+  request prefix being exactly `shadow/`, for the workflow's tarball preflight
+  (`list-objects-v2`, the one key picked out client-side). **Security review of
+  PR #57, adopted before merge:** that preflight first used `head-object`,
+  which S3 authorises as `s3:GetObject` — a download right for a role that
+  only needs to know a key exists — so the grant was narrowed to the
+  prefix-scoped list. `mlobs-artifact-publish` first trusted the
+  `refs/heads/main` subject, which GitHub issues to every job on `main`; since
+  the host imports and runs whatever sits under `shadow/`, it now trusts the
+  `shadow-publish` environment — no reviewer, deployments from `main` only —
+  which `ShadowPublish` declares. Both environments are created, and read
+  back, before the apply that creates the roles trusting them. The
+  credentialed `TerraformPlan` job pins Terraform to an exact patch (1.14.9)
+  rather than a range, so the binary that runs beside the AWS session changes
+  only by commit. And all three S3 grants carry an `s3:ResourceAccount`
+  condition on 601548053958: a grant by bucket name alone would follow the
+  name to another account if the bucket were ever deleted and the name
+  reclaimed. *Rejected:* the public-registry route D18 already excludes; keeping P2b's
   interim of a local build copied up with `scp`. *Why:* the weights stay out of
   every registry, and the tarball moves with no stored credential anywhere —
   the runner writes it with a per-run OIDC session, and the host reads it with
@@ -716,10 +730,21 @@ retention jobs, Alembic.
   write. The document is a fixed script with one parameter, `Sha`, whose
   `allowedPattern` `^[0-9a-f]{40}$` is enforced by the SSM API and again by the
   agent; before checking anything out, the script re-runs
-  `git merge-base --is-ancestor` against a freshly fetched `origin/main`. The
-  workflow repeats the pattern and ancestry checks client-side, preflights the
-  three GHCR manifests, the S3 tarball and the instance's `running` state, and
-  runs in its own concurrency group without `cancel-in-progress`. *Rejected:*
+  `git merge-base --is-ancestor` against a freshly fetched `origin/main`. As
+  hardened by the security review of PR #57, it also refuses a checkout with
+  edited tracked files, downloads and imports the tarball before the checkout
+  so that a failed download leaves the working tree where it was, and after
+  the checkout refuses unless `HEAD` is exactly the SHA — `git checkout`
+  prefers a local branch of that name over the commit the ancestry check
+  resolved. Any change to the document's content deletes the superseded
+  versions (`aws ssm delete-document --name mlobs-deploy --document-version
+  <n>`, the version always named: without it the whole document is deleted)
+  or renames the document. Older versions stay callable, since `SendCommand`
+  takes a document version and no `ssm:DocumentVersion` condition key exists
+  for it. The workflow repeats the pattern and ancestry checks client-side,
+  preflights the three GHCR manifests, the S3 tarball and the instance's
+  `running` state, and runs in its own concurrency group without
+  `cancel-in-progress`. *Rejected:*
   trusting the `refs/heads/main` subject for the deploy role;
   `AWS-RunShellScript` (D24); letting the pipeline start a stopped host (D24);
   cancelling an in-flight deploy for a newer one. *Why:* the main subject is
