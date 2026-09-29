@@ -330,8 +330,9 @@ jobs:
     # spend on a pull request that edits a docstring. This one-minute job is the
     # per-job filter K3sSmoke gates on. Pushes to main and manual dispatches
     # always run; only pull requests are filtered. operator/ joined the filter
-    # in Phase 3 O0: the operator's end-to-end tests run on this job's k3d
-    # cluster, not on kind (D35).
+    # in Phase 3 O0: the operator's end-to-end tests run on k3d, not on kind
+    # (D35) — since O2 in OperatorE2E and, with the stack, in K3sSmoke, both
+    # gated here.
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.filter.outputs.run }}
@@ -377,6 +378,14 @@ jobs:
     # edited scrape config, because a deploy pipeline that only works on an
     # empty cluster is not a deploy pipeline.
     #
+    # Since Phase 3 O2 it builds the operator too, and takes the stack through
+    # both of D37's states: steady after the first deploy; a canary window
+    # opened by hand, as on the host, with smoke.sh green in it; a third state
+    # put together by hand, which smoke.sh must reject; and the second deploy
+    # run while the window is open, which must close it on apply.sh's fixed
+    # line and end green in the steady state. The canary is the api image this
+    # job already builds, under a second 40-hex tag (the D35 deviation of O2).
+    #
     # This job holds no credentials of any kind: the images are built locally
     # and never pushed, and nothing here touches AWS. That is why it takes
     # `contents: read` and tag-pinned actions rather than the SHA pins
@@ -397,8 +406,23 @@ jobs:
       # the container tag spells the build metadata with a dash.
       K3S_IMAGE: rancher/k3s:v1.36.4-k3s1
       CLUSTER_NAME: mlobs-ci
+      # The deploy tag. apply.sh renders it into the ServingDeployment's
+      # spec.imageTag, whose schema admits a full 40-character commit SHA and
+      # nothing else, so the tags here are all of that shape. The redeploy and
+      # the canary get tags of their own on the same builds, derived below.
+      DEPLOY_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Derive the redeploy and canary tags
+        # Two more 40-hex tags, stable per commit and distinct from it and
+        # from each other; they name local builds and are never pushed.
+        run: |
+          redeploy_tag="$(printf '%s' "${DEPLOY_TAG}-redeploy" | sha1sum | cut -c1-40)"
+          canary_tag="$(printf '%s' "${DEPLOY_TAG}-canary" | sha1sum | cut -c1-40)"
+          echo "REDEPLOY_TAG=${redeploy_tag}" >> "$GITHUB_ENV"
+          echo "CANARY_TAG=${canary_tag}" >> "$GITHUB_ENV"
+          echo "ok: deploy ${DEPLOY_TAG}, redeploy ${redeploy_tag}, canary ${canary_tag}"
 
       - name: Reclaim runner disk
         # The api and shadow-scorer images each bake a torch install and a model
@@ -422,7 +446,7 @@ jobs:
         run: |
           avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
           if [ "$avail" -lt 8 ]; then
-            echo "::error::only ${avail}G free — the four image builds need more"
+            echo "::error::only ${avail}G free — the five image builds need more"
             exit 1
           fi
           echo "ok: ${avail}G free (>= 8G)"
@@ -468,10 +492,14 @@ jobs:
 
       - name: Build service images
         run: |
-          docker build -f docker/api.Dockerfile           -t mlobs-api:ci .
-          docker build -f docker/consumer.Dockerfile      -t mlobs-consumer:ci .
-          docker build -f docker/drift.Dockerfile         -t mlobs-drift:ci .
-          docker build -f docker/shadow_scorer.Dockerfile -t mlobs-shadow-scorer:ci .
+          docker build -f docker/api.Dockerfile           -t "mlobs-api:${DEPLOY_TAG}" .
+          docker build -f docker/consumer.Dockerfile      -t "mlobs-consumer:${DEPLOY_TAG}" .
+          docker build -f docker/drift.Dockerfile         -t "mlobs-drift:${DEPLOY_TAG}" .
+          docker build -f docker/shadow_scorer.Dockerfile -t "mlobs-shadow-scorer:${DEPLOY_TAG}" .
+          docker build -t "mlobs-operator:${DEPLOY_TAG}" operator
+          # The canary: the api build above under its own tag, not a second
+          # torch build (the D35 deviation of O2).
+          docker tag "mlobs-api:${DEPLOY_TAG}" "mlobs-api:${CANARY_TAG}"
           docker images --filter reference='mlobs-*' \
             --format '{{.Repository}}:{{.Tag}} {{.Size}}'
 
@@ -488,7 +516,9 @@ jobs:
         # instead of chasing a registry that has never heard of these tags.
         run: |
           k3d image import -c "$CLUSTER_NAME" \
-            mlobs-api:ci mlobs-consumer:ci mlobs-drift:ci mlobs-shadow-scorer:ci
+            "mlobs-api:${DEPLOY_TAG}" "mlobs-api:${CANARY_TAG}" \
+            "mlobs-consumer:${DEPLOY_TAG}" "mlobs-drift:${DEPLOY_TAG}" \
+            "mlobs-shadow-scorer:${DEPLOY_TAG}" "mlobs-operator:${DEPLOY_TAG}"
           docker exec "k3d-${CLUSTER_NAME}-server-0" k3s crictl images | grep mlobs || true
 
       - name: Synthesize a test .env
@@ -507,8 +537,15 @@ jobs:
       - name: Deploy with apply.sh
         env:
           IMAGE_PREFIX: docker.io/library
-          IMAGE_TAG: ci
-        run: deploy/k3s/apply.sh
+        run: |
+          # A `run:` with no `shell:` is `bash -e` without pipefail, and a
+          # failing script piped into tee would otherwise pass; every step
+          # below that pipes a script sets it for the same reason.
+          set -o pipefail
+          IMAGE_TAG="$DEPLOY_TAG" deploy/k3s/apply.sh | tee "$RUNNER_TEMP/apply-1.log"
+          # A fresh cluster holds no window, and the patch says so on its line.
+          grep -qxF 'ok: close-window patch sent; no canary window was open' "$RUNNER_TEMP/apply-1.log"
+          grep -qxF 'ok: smoke passed (steady state)' "$RUNNER_TEMP/apply-1.log"
 
       - name: Run smoke.sh standalone
         # apply.sh already ran it as its last step. Running it again on its own
@@ -516,19 +553,95 @@ jobs:
         # on a deploy having just happened in the same shell.
         run: deploy/k3s/smoke.sh
 
-      - name: Second apply converges
+      - name: Node-local loopback reaches the api
+        # D34: 127.0.0.1:8000 on the node itself reaches the NodePort through
+        # kube-proxy's iptables-mode route_localnet, and is re-verified on any
+        # k3s bump. smoke.sh's 127.0.0.1:8000 above is the runner's, carried
+        # into the node by the -p mapping; this is the node's own loopback,
+        # the address a curl on the EC2 host uses.
+        run: |
+          set -o pipefail
+          docker exec "k3d-${CLUSTER_NAME}-server-0" \
+            wget -qO- http://127.0.0.1:8000/health | tee "$RUNNER_TEMP/loopback.json"
+          grep -q '"model_loaded":true' "$RUNNER_TEMP/loopback.json"
+          echo
+          echo "ok: node-local 127.0.0.1:8000 answered /health"
+
+      - name: Open a canary window; smoke is green in it
+        # A window is opened the way a human opens one on the host: a merge
+        # patch that sets both canary fields (D32). The operator pauses the
+        # shadow scorer, observes it gone, then brings the canary up; smoke.sh
+        # then judges the window state from the cluster.
+        run: |
+          set -o pipefail
+          kubectl -n mlobs patch servingdeployment/api --type merge \
+            -p "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1}}"
+          kubectl -n mlobs wait servingdeployment/api --for=condition=CanaryActive --timeout=60s
+          kubectl -n mlobs wait servingdeployment/api --for=condition=ShadowPaused --timeout=180s
+          replicas="$(kubectl -n mlobs get statefulset shadow-scorer -o jsonpath='{.spec.replicas}')"
+          if [ "$replicas" != 0 ]; then
+            echo "::error::the shadow scorer is at ${replicas}, not 0, in an open window"
+            exit 1
+          fi
+          echo "ok: CanaryActive True, shadow scorer at 0"
+          # The canary's torch load is the long pole; the state poll waits on it.
+          STATE_TIMEOUT_SECONDS=300 deploy/k3s/smoke.sh | tee "$RUNNER_TEMP/smoke-window.log"
+          grep -qxF 'ok: smoke passed (window state)' "$RUNNER_TEMP/smoke-window.log"
+          docker exec "k3d-${CLUSTER_NAME}-server-0" \
+            wget -qO /dev/null http://127.0.0.1:8000/health
+          echo "ok: node-local 127.0.0.1:8000 answered /health in the window"
+
+      - name: Smoke rejects a constructed third state
+        # D37's two states are all smoke.sh may pass. One that is neither is
+        # built here by hand: the operator stopped, so nothing puts it back,
+        # and the shadow scorer scaled to 1 beside a serving canary. The
+        # operator is then restored, re-pauses the shadow scorer, and the
+        # window is green again.
+        run: |
+          set -o pipefail
+          kubectl -n mlobs scale deployment/operator --replicas=0
+          deadline=$((SECONDS + 120))
+          until [ -z "$(kubectl -n mlobs get pods -l app=operator -o name)" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::the operator pod did not go within 120s"
+              exit 1
+            fi
+            sleep 2
+          done
+          kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1
+          status=0
+          STATE_TIMEOUT_SECONDS=30 deploy/k3s/smoke.sh > "$RUNNER_TEMP/smoke-third.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/smoke-third.log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::smoke.sh passed a state that is neither steady nor window"
+            exit 1
+          fi
+          if ! grep -qF 'error: the stack is in neither the steady nor the window state' "$RUNNER_TEMP/smoke-third.log"; then
+            echo "::error::smoke.sh failed, but not on its state check"
+            exit 1
+          fi
+          echo "ok: smoke.sh rejected the constructed third state"
+
+          kubectl -n mlobs scale deployment/operator --replicas=1
+          kubectl -n mlobs rollout status deployment/operator --timeout=180s
+          STATE_TIMEOUT_SECONDS=300 deploy/k3s/smoke.sh | tee "$RUNNER_TEMP/smoke-window-2.log"
+          grep -qxF 'ok: smoke passed (window state)' "$RUNNER_TEMP/smoke-window-2.log"
+
+      - name: A second apply during the window closes it and converges
         env:
           IMAGE_PREFIX: docker.io/library
-          IMAGE_TAG: ci2
         run: |
-          # Retag all four rather than one. The image override is a single
+          set -o pipefail
+          # Retag all five rather than one. The image override is a single
           # IMAGE_TAG, so a new tag moves every ref at once — a superset of the
           # one-image case, and a harder convergence test than it.
-          for svc in api consumer drift shadow-scorer; do
-            docker tag "mlobs-${svc}:ci" "mlobs-${svc}:ci2"
+          for svc in api consumer drift shadow-scorer operator; do
+            docker tag "mlobs-${svc}:${DEPLOY_TAG}" "mlobs-${svc}:${REDEPLOY_TAG}"
           done
           k3d image import -c "$CLUSTER_NAME" \
-            mlobs-api:ci2 mlobs-consumer:ci2 mlobs-drift:ci2 mlobs-shadow-scorer:ci2
+            "mlobs-api:${REDEPLOY_TAG}" "mlobs-consumer:${REDEPLOY_TAG}" \
+            "mlobs-drift:${REDEPLOY_TAG}" "mlobs-shadow-scorer:${REDEPLOY_TAG}" \
+            "mlobs-operator:${REDEPLOY_TAG}"
 
           # Edit the scrape config so the ConfigMap regenerates and the pod
           # template's config hash moves. The probe is an external label and not
@@ -553,12 +666,24 @@ jobs:
             -o jsonpath="{.spec.template.metadata.annotations['mlobs/config-hash']}")"
 
           started=$SECONDS
-          deploy/k3s/apply.sh
+          IMAGE_TAG="$REDEPLOY_TAG" deploy/k3s/apply.sh | tee "$RUNNER_TEMP/apply-2.log"
           elapsed=$((SECONDS - started))
           # apply.sh waits on each of the nine workloads with a hard 180s bound
           # and dies if any exceeds it, so reaching this line is itself the
           # convergence assertion. The elapsed figure is evidence, not the test.
           echo "ok: second apply converged in ${elapsed}s (per-workload bound 180s)"
+
+          # The deploy ran while the window was open, so it closed it (D32) on
+          # its fixed line, and its own smoke.sh found the stack steady again.
+          if ! grep -qxF 'ok: canary window closed by the close-window patch (D32)' "$RUNNER_TEMP/apply-2.log"; then
+            echo "::error::the deploy during an open window did not print the close-window fixed line"
+            exit 1
+          fi
+          if ! grep -qxF 'ok: smoke passed (steady state)' "$RUNNER_TEMP/apply-2.log"; then
+            echo "::error::the deploy that closed the window did not end in the steady state"
+            exit 1
+          fi
+          echo "ok: the deploy closed the open window on its fixed line and ended steady"
 
           hash_after="$(kubectl -n mlobs get deployment prometheus \
             -o jsonpath="{.spec.template.metadata.annotations['mlobs/config-hash']}")"
@@ -579,8 +704,10 @@ jobs:
             fi
             sleep 1
           done
-          if ! curl -fsS "http://127.0.0.1:9090/api/v1/status/config" \
-               | grep -q 'ci_convergence_probe'; then
+          # Read whole, then searched: with pipefail on, a grep -q that exits
+          # at its first match could fail the pipe under curl.
+          status_config="$(curl -fsS "http://127.0.0.1:9090/api/v1/status/config")"
+          if ! grep -q 'ci_convergence_probe' <<<"$status_config"; then
             echo "::error::/api/v1/status/config does not reflect the edited scrape config"
             exit 1
           fi
@@ -594,13 +721,93 @@ jobs:
         # credentials are.
         run: |
           kubectl -n mlobs get pods -o wide || true
+          kubectl -n mlobs get servingdeployment api -o yaml || true
           kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -40 || true
           kubectl -n mlobs describe pods | tail -160 || true
           kubectl -n mlobs logs deployment/api --tail=50 || true
+          kubectl -n mlobs logs deployment/operator --tail=80 || true
 
       - name: Disk report
         if: always()
         run: df -h /
+
+      - name: Delete cluster
+        if: always()
+        run: k3d cluster delete "$CLUSTER_NAME" || true
+
+  OperatorE2E:
+    name: operator e2e (k3d, stub image)
+    # Phase 3 O2 (D35): the operator on its own, on the k3d image K3sSmoke
+    # pins, with a stub in place of the torch api — leader election and the
+    # reconcile mechanics, no smoke. operator/hack/e2e.sh is the whole check
+    # and runs the same against a local k3d cluster; this job only builds and
+    # imports what it needs. The cluster is started WITHOUT the D34 flag pair,
+    # on purpose: the script's first assertion is that apply.sh's preflight
+    # refuses a default node-port range, on its fixed line, before it changes
+    # anything, and that runs here against the real pinned k3s. Nothing below
+    # sets the range, so the pair's other half has no place here either.
+    #
+    # Gated by the same path filter as K3sSmoke, and credential-less like it.
+    needs: K3sPaths
+    if: needs.K3sPaths.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: operator-e2e-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      K3D_VERSION: v5.9.0
+      K3S_IMAGE: rancher/k3s:v1.36.4-k3s1
+      CLUSTER_NAME: mlobs-e2e
+      IMAGE_PREFIX: docker.io/library
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install k3d
+        # The same pinned release asset as K3sSmoke.
+        run: |
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Create k3d cluster
+        # The host's add-ons disabled as in K3sSmoke; the node-port range left
+        # at its default, as explained above.
+        run: |
+          k3d cluster create "$CLUSTER_NAME" \
+            --image "$K3S_IMAGE" \
+            --k3s-arg '--disable=traefik@server:*' \
+            --k3s-arg '--disable=servicelb@server:*' \
+            --k3s-arg '--disable=metrics-server@server:*' \
+            --wait \
+            --timeout 300s
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+
+      - name: Build and import the operator and the stub
+        run: |
+          canary_tag="$(printf '%s' "${IMAGE_TAG}-canary" | sha1sum | cut -c1-40)"
+          echo "CANARY_TAG=${canary_tag}" >> "$GITHUB_ENV"
+          docker build -t "mlobs-operator:${IMAGE_TAG}" operator
+          docker build -t mlobs-stub:e2e - < operator/hack/e2e-stub.Dockerfile
+          docker tag mlobs-stub:e2e "mlobs-api:${IMAGE_TAG}"
+          docker tag mlobs-stub:e2e "mlobs-api:${canary_tag}"
+          k3d image import -c "$CLUSTER_NAME" \
+            "mlobs-operator:${IMAGE_TAG}" mlobs-stub:e2e \
+            "mlobs-api:${IMAGE_TAG}" "mlobs-api:${canary_tag}"
+
+      - name: Operator end-to-end
+        run: operator/hack/e2e.sh
+
+      - name: Cluster diagnostics
+        if: failure()
+        run: |
+          kubectl -n mlobs get all -o wide || true
+          kubectl -n mlobs get servingdeployment api -o yaml || true
+          kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl -n mlobs logs deployment/operator --tail=100 || true
 
       - name: Delete cluster
         if: always()
@@ -637,28 +844,36 @@ jobs:
     # Its own group, and deliberately without cancel-in-progress: the
     # workflow-wide group cancels on a newer push, and a publish cancelled
     # part-way could leave the moving `main` tag pointing at neither the old nor
-    # the new build. Per-service so the three run in parallel.
+    # the new build. Per-service so the four run in parallel.
     concurrency:
       group: ghcr-publish-${{ matrix.service }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      # Three images, not four. shadow-scorer is absent on purpose: the model it
+      # Four images, not five. shadow-scorer is absent on purpose: the model it
       # bakes is published on Hugging Face with no upstream licence stated, so
       # republishing those weights inside a container image on a public registry
       # is a redistribution this repository declines to make (owner ruling
       # 2026-09-10, D18). The posture is that the weights stay where their
       # author put them, fetched verbatim at build time; the image itself moves
       # as a private S3 tarball in P2c, with a local build plus scp as the
-      # interim in P2b.
+      # interim in P2b. The operator joined in Phase 3 O2: apply.sh deploys it
+      # at the same per-SHA tag as the rest (03-operator.yaml), and its build
+      # context is its own module directory.
       matrix:
         include:
           - service: api
             dockerfile: docker/api.Dockerfile
+            context: .
           - service: consumer
             dockerfile: docker/consumer.Dockerfile
+            context: .
           - service: drift
             dockerfile: docker/drift.Dockerfile
+            context: .
+          - service: operator
+            dockerfile: operator/Dockerfile
+            context: operator
     steps:
       - uses: actions/checkout@v7
 
@@ -677,10 +892,11 @@ jobs:
       - name: Build and push
         env:
           DOCKERFILE: ${{ matrix.dockerfile }}
+          CONTEXT: ${{ matrix.context }}
           IMAGE: ghcr.io/muratalkan06/mlobs-${{ matrix.service }}
           SHA_TAG: ${{ github.sha }}
         run: |
-          docker build -f "$DOCKERFILE" -t "${IMAGE}:${SHA_TAG}" -t "${IMAGE}:main" .
+          docker build -f "$DOCKERFILE" -t "${IMAGE}:${SHA_TAG}" -t "${IMAGE}:main" "$CONTEXT"
           docker push "${IMAGE}:${SHA_TAG}"
           docker push "${IMAGE}:main"
           echo "ok: pushed ${IMAGE}:${SHA_TAG}"
