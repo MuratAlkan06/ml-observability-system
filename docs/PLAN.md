@@ -1003,3 +1003,15 @@ retention jobs, Alembic.
 > ownerReference-and-image only. The api keeps `strategy: Recreate`: the reason was the hostPort
 > bind deadlock and is now D26's memory bar — a surged second torch pod does not fit beside the
 > shadow on the 4GB host.
+
+> **D34 erratum (2026-09-29, O2):** the exact 8000-8000 range survives contact with k3s v1.36.4
+> only without the bundled network-policy controller: it refuses a single-port range and k3s
+> crash-loops. The ruled range stays exact; the controller is disabled instead —
+> `--disable-network-policy` joins the range flag as an atomic pair everywhere the range is set.
+> The in-repo pin sites gain the pair at O2; the third site, the live host's
+> `/etc/rancher/k3s/config.yaml`, gains it inside O4's gated window (issue #68) with the rest of
+> the cutover, deliberately deferred rather than missed. The cost is stated plainly: the stack
+> defines no NetworkPolicy today, so nothing enforced is lost, but any NetworkPolicy added later
+> would sit silently unenforced until the controller returns, and re-enabling it means revisiting
+> the range. Verified against a real v1.36.4 cluster at O2 (issue #66, PR #81); no frozen text
+> edited.
