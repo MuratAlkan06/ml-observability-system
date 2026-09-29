@@ -13,7 +13,9 @@ stamped with `lastTransitionTime`: `Ready`, True once `deployment/api` has
 rolled out the current spec and is Available (D32's wait target, with
 `observedGeneration == generation`); and `CanaryActive` and `ShadowPaused`,
 False with reasons `NoCanary` and `ShadowRunning` until the canary window
-exists (D37). The operator is not deployed anywhere yet; the canary window
+exists (D37). Leader election is on by default (`--leader-elect`), through a
+Lease in `mlobs`; it is tested as the acquisition of that Lease only, with no
+failover (D35). The operator is not deployed anywhere yet; the canary window
 lands in O2.
 
 ## Pins

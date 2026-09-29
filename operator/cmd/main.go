@@ -65,6 +65,23 @@ func setupCacheNamespaces(namespaces string) cache.Options {
 	}
 }
 
+const (
+	// leaderElectionID names the Lease the operator's replicas contend for.
+	leaderElectionID = "5bb4b9ad.mlobs.dev"
+	// leaderElectionNamespace holds that Lease: mlobs, the one namespace the
+	// operator's Role grants leases in (docs/PLAN.md D33). Naming it also
+	// lets the manager run out of cluster, where it cannot be inferred.
+	leaderElectionNamespace = "mlobs"
+)
+
+// setLeaderElection applies kubebuilder's default leader election to opts:
+// a coordination.k8s.io Lease, named leaderElectionID, in mlobs (D35).
+func setLeaderElection(opts *ctrl.Options, enabled bool) {
+	opts.LeaderElection = enabled
+	opts.LeaderElectionID = leaderElectionID
+	opts.LeaderElectionNamespace = leaderElectionNamespace
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -78,8 +95,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
+		"Enable leader election for controller manager, through a Lease in the mlobs namespace. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
@@ -182,8 +199,6 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "5bb4b9ad.mlobs.dev",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -196,6 +211,7 @@ func main() {
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
 	}
+	setLeaderElection(&mgrOptions, enableLeaderElection)
 
 	// Configure cache to watch namespace(s) specified in WATCH_NAMESPACE
 	mgrOptions.Cache = setupCacheNamespaces(watchNamespace)
