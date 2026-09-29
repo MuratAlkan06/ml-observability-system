@@ -461,6 +461,24 @@ jobs:
           sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
           k3d version
 
+      - name: Load br_netfilter on the runner
+        # Traffic between two pods on the node's bridge, a reply from a
+        # Service's endpoint included, passes through kube-proxy's rules only
+        # when br_netfilter is loaded; without it no pod reaches a Service,
+        # cluster DNS first. On a real host k3s loads the module itself at
+        # startup. Inside a k3d node it cannot ("Failed to load kernel module
+        # br_netfilter with modprobe"), and with the network-policy controller
+        # off, the other half of the D34 pair, nothing else loads it on the
+        # hosted runner's kernel: the first run of this job stalled every pod
+        # in Init on exactly that. The default-range e2e cluster, controller
+        # on, resolves Services on the same runners without this step. This
+        # loads the module where k3s would have, on the machine that owns the
+        # kernel.
+        run: |
+          sudo modprobe br_netfilter
+          test -e /proc/sys/net/bridge/bridge-nf-call-iptables
+          echo "ok: br_netfilter loaded; bridge-nf-call-iptables=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)"
+
       - name: Create k3d cluster
         # traefik and servicelb are disabled to match the host (D19): an
         # ingress controller the manifests never reference would only be one

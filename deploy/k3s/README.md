@@ -128,7 +128,11 @@ disable-network-policy: true
 
 That change is O4's, inside its gated cutover window (issue #68), not a
 pipeline step; the host is the third pin site and is deferred there on
-purpose. Until the host has it, `apply.sh` there stops at its preflight,
+purpose. With network policy off, `br_netfilter` is loaded by k3s's own
+startup and by nothing else, and pods reach Services only while it is loaded;
+the restart is followed by `lsmod | grep br_netfilter` and a pod resolving a
+Service by name (in k3d, where k3s cannot load modules, CI loads it on the
+runner). Until the host has it, `apply.sh` there stops at its preflight,
 before anything is applied: it reads the range k3s records in each server
 node's `k3s.io/node-args` annotation and stops on the fixed line naming the
 pair when that range does not admit 8000, and the running stack is left as it
@@ -217,7 +221,11 @@ sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
 # 2. a cluster shaped like the host: same k3s, same add-ons disabled, the
 #    same exact node-port range with network policy off (D34 and its O2
 #    erratum; the two lines are a pair, never one without the other), and
-#    :8000 and :3000 published through to your machine
+#    :8000 and :3000 published through to your machine. On a Linux machine,
+#    load br_netfilter first: k3s loads it itself on a real host but cannot
+#    from inside a k3d node, and with network policy off nothing else does,
+#    so no pod would reach a Service. Docker Desktop already has it loaded.
+sudo modprobe br_netfilter   # Linux only
 k3d cluster create mlobs-dev \
   --image rancher/k3s:v1.36.4-k3s1 \
   -p '8000:8000@server:0' \
