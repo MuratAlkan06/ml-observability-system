@@ -28,6 +28,10 @@ import (
 // ServingDeployment existed; validImageTag is the one the spec asks for.
 const previousImageTag = "89abcdef0123456789abcdef0123456789abcdef"
 
+// servingDeploymentName is the CR's name in these specs, the one apply.sh
+// renders.
+const servingDeploymentName = "api"
+
 // Bounds for the one spec that waits on a running manager: a readiness poll
 // inside a deadline, never a timing assertion (PRINCIPLES.md §5).
 const (
@@ -52,7 +56,7 @@ func newTestReconciler() (*ServingDeploymentReconciler, *record.FakeRecorder) {
 // createServingDeployment creates a ServingDeployment asking for validImageTag.
 func createServingDeployment(namespace string) *servingv1alpha1.ServingDeployment {
 	sd := &servingv1alpha1.ServingDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: servingDeploymentName, Namespace: namespace},
 		Spec:       servingv1alpha1.ServingDeploymentSpec{ImageTag: validImageTag},
 	}
 	Expect(k8sClient.Create(ctx, sd)).To(Succeed())

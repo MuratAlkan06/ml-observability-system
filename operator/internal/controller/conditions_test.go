@@ -64,6 +64,7 @@ var _ = Describe("Writing the ServingDeployment's conditions", func() {
 	It("writes Ready, CanaryActive and ShadowPaused on the first reconcile, "+
 		"each stamped with lastTransitionTime and the observed generation", func() {
 		ns := newTestNamespace()
+		createStatefulSet(ns, shadowStatefulSetName)
 		sd := createServingDeployment(ns)
 		r, _ := newTestReconciler()
 

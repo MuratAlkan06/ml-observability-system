@@ -16,9 +16,12 @@ import (
 // sd.Generation (docs/PLAN.md D37 and its O1 addendum). meta.SetStatusCondition
 // stamps lastTransitionTime when a condition's status changes and only then.
 //
-// dep is the stable Deployment as reconcileStable last wrote or read it, and
-// reconcileErr is what reconcileStable returned.
-func setConditions(sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error) {
+// dep is the stable Deployment as reconcileStable last wrote or read it,
+// reconcileErr is what reconcileStable returned, and shadow is what
+// reconcileShadow observed and wrote.
+func setConditions(
+	sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error, shadow shadowState,
+) {
 	ready := metav1.Condition{Type: servingv1alpha1.ConditionReady, ObservedGeneration: sd.Generation}
 	switch {
 	case reconcileErr != nil:
@@ -41,9 +44,8 @@ func setConditions(sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment
 	}
 	meta.SetStatusCondition(&sd.Status.Conditions, ready)
 
-	// No canary logic exists before O2, so neither of these can be True yet,
-	// whatever the spec's canary fields say; each states what the operator is
-	// actually doing.
+	// The canary Deployment does not exist yet, so CanaryActive cannot be
+	// True, whatever the spec's canary fields say.
 	meta.SetStatusCondition(&sd.Status.Conditions, metav1.Condition{
 		Type:               servingv1alpha1.ConditionCanaryActive,
 		Status:             metav1.ConditionFalse,
@@ -51,12 +53,13 @@ func setConditions(sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment
 		Reason:             servingv1alpha1.ReasonNoCanary,
 		Message:            "the operator runs no canary Deployment",
 	})
+	shadowStatus, shadowReason, shadowMessage := shadowPausedCondition(shadow)
 	meta.SetStatusCondition(&sd.Status.Conditions, metav1.Condition{
 		Type:               servingv1alpha1.ConditionShadowPaused,
-		Status:             metav1.ConditionFalse,
+		Status:             shadowStatus,
 		ObservedGeneration: sd.Generation,
-		Reason:             servingv1alpha1.ReasonShadowRunning,
-		Message:            "the operator has not paused the shadow scorer",
+		Reason:             shadowReason,
+		Message:            shadowMessage,
 	})
 }
 

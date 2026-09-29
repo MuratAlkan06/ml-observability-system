@@ -99,4 +99,18 @@ for pair in "${PAIRS[@]}"; do
     drift=1
   fi
 done
+
+# The operator's whole grant is one namespaced Role (D33 and its O2 addendum).
+# controller-gen emits a ClusterRole for an rbac marker that names no
+# namespace, and a hand edit above the marker could add a ClusterRoleBinding
+# or point the RoleBinding's roleRef at a ClusterRole; any of them fails here,
+# in both modes. Explicit status, as above.
+rbac="${MANIFESTS_DIR}/02-operator-rbac.yaml"
+status=0
+grep -nE 'kind:[[:space:]]*"?ClusterRole' "$rbac" >&2 || status=$?
+case "$status" in
+  0) die "02-operator-rbac.yaml references a ClusterRole or ClusterRoleBinding; the operator holds one namespaced Role (D33)" ;;
+  1) echo "ok: deploy/k3s/manifests/02-operator-rbac.yaml holds no ClusterRole" ;;
+  *) die "grep exited with status ${status}" ;;
+esac
 exit "$drift"

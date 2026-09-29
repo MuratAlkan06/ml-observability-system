@@ -7,6 +7,14 @@
 # feature that would have needed a cluster-wide grant (D33). Nothing runs as
 # this identity yet; the operator's own Deployment lands in a later slice.
 #
+# Beside the Deployment grant, the Role reads the namespace's StatefulSets and
+# may patch one subresource of one of them: the scale of shadow-scorer, which
+# the operator pauses for a canary window (the D33 addendum of O2). RBAC
+# cannot name-scope list and watch, so the read covers both StatefulSets; the
+# one write is that replica count, and the controller only ever sends 0 or 1.
+# `make -C operator verify-manifests` also fails if this file ever references
+# a ClusterRole.
+#
 # The ServiceAccount and RoleBinding above the marker line are hand-written.
 # The Role below it is controller-gen's output, verbatim, from the
 # +kubebuilder:rbac markers in operator/internal/controller/. Change the
@@ -64,6 +72,22 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resourceNames:
+  - shadow-scorer
+  resources:
+  - statefulsets/scale
+  verbs:
+  - patch
 - apiGroups:
   - coordination.k8s.io
   resources:

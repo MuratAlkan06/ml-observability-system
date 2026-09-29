@@ -17,8 +17,10 @@ const (
 	// ConditionCanaryActive is True while a canary window is open: a canary
 	// image tag is set and at least one canary replica is requested.
 	ConditionCanaryActive = "CanaryActive"
-	// ConditionShadowPaused is True while the shadow scorer is scaled to zero
-	// for an open canary window.
+	// ConditionShadowPaused is True while the shadow scorer's StatefulSet, as
+	// observed, is at zero replicas and reports no pods. It is computed from
+	// that observation, never from what the operator asked for: a scale the
+	// operator has just written does not make it True (D37 addendum of O2).
 	ConditionShadowPaused = "ShadowPaused"
 )
 
@@ -38,9 +40,17 @@ const (
 	// ReasonNoCanary: CanaryActive is False because the operator runs no
 	// canary Deployment. Until the canary window lands (O2), always.
 	ReasonNoCanary = "NoCanary"
-	// ReasonShadowRunning: ShadowPaused is False because the operator has not
-	// paused the shadow scorer. Until the canary window lands (O2), always.
+	// ReasonShadowRunning: ShadowPaused is False because the shadow scorer's
+	// StatefulSet requests replicas, still reports pods, or was scaled by the
+	// reconcile that wrote the condition and is not yet observed at its new
+	// scale.
 	ReasonShadowRunning = "ShadowRunning"
+	// ReasonShadowScaledToZero: ShadowPaused is True; the StatefulSet is
+	// observed at zero replicas with no pods.
+	ReasonShadowScaledToZero = "ShadowScaledToZero"
+	// ReasonShadowNotFound: ShadowPaused is False because the namespace holds
+	// no shadow scorer StatefulSet to pause.
+	ReasonShadowNotFound = "ShadowNotFound"
 )
 
 // ServingDeploymentSpec defines the desired state of ServingDeployment.
