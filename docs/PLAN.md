@@ -788,3 +788,25 @@ retention jobs, Alembic.
 > had named in advance as the red flag. Fixed by `terraform_wrapper: false` on the plan job's
 > setup step in the same PR. Owner-local `-detailed-exitcode` runs never used the wrapper and
 > were unaffected; the P1 bootstrap and P2b evidence relied on local runs and stand.
+> **Erratum (2026-09-28, P2c):** D30's canary leak rehearsal did not take place. No run sent the
+> SSM channel an env file of canary values before it read the real one. Deploy run 36357281534
+> (2026-09-27) was both the channel's first read of the host `.env` and the first end-to-end test
+> of its output hygiene (D23), which is the ordering D30 rejected. Three things stand in for it.
+> First, K3sSmoke runs the same `apply.sh` and `smoke.sh` against a synthetic `.env`, and their
+> fixed-line output matches the SSM run line for line. Second, the public logs of runs
+> 36357281534, 36517554863 and 36518530716 were swept after the fact for the four real values:
+> zero hits. Third, those logs hold the complete SSM stdout and stderr, and every line in them
+> comes from git, the AWS CLI, `k3s ctr` or a fixed `apply.sh`/`smoke.sh` line. **Residual gap:**
+> (1) The clean result for the first read was established after the fact. Had it leaked, the
+> credentials would have sat in a public log from about 23:04Z that day until the first sweep at
+> no later than 2026-09-29T03:57Z, and the remedy would have been rotation, not prevention.
+> (2) Every real run succeeded, so the channel's failure paths — the `die` lines, the kubectl
+> stderr left unsuppressed on the namespace, ConfigMap and manifest applies, and SSM's
+> Failed/TimedOut outcomes — have never carried real or canary values on any channel. Their
+> hygiene rests on the code alone. (3) The synthetic canary seeds two of the four keys, leaving
+> `SLACK_WEBHOOK_URL` empty and `GF_ADMIN_USER` unset, so CI takes the default-injection branch
+> and the host takes the pass-through one. It is also not asserted: no CI step fails when a
+> canary appears, and the evidence is a manual sweep of run 36356514105. (4) The public log was a
+> complete record of SSM output on these three runs only because it fit (at most 1,053 stdout and
+> 803 stderr characters, against deploy.yml's 80/40-line tails and SSM's 24,000/8,000-character
+> limits). The pipeline does not guarantee that. The frozen text is not edited.

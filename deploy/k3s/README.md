@@ -255,8 +255,9 @@ Shadow primary-path cost ≈2.4 ms p50 / ≈10 ms p95. How the p95 figure reads
 against the v1.1 ≤10% criterion is set out in the README's k3s re-measurement
 section.
 
-**Host facts.** ssm-agent is present (snap 3.3.4793.0, latest/stable), which
-confirms the P2c dependency.
+**Host facts.** ssm-agent was present at migration (snap 3.3.4793.0,
+latest/stable), confirming the P2c dependency; refreshed to latest/candidate
+3.3.5226.0 at the P2c owner steps to meet the CVE-2026-89049 floor (issue #49).
 
 **SSH ingress churn.** The SSH `/32` rotated twice during this slice, each time
 through the P1 root: plan `0 add/1 change/0 destroy`, apply, then the Actions
