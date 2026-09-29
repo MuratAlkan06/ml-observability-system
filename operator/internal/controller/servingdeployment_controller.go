@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,9 +50,12 @@ type ServingDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=mlobs,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives deployment/api, the stable api Deployment in the
-// ServingDeployment's namespace, to the image spec.imageTag names, and records
-// the generation it did so for in status.observedGeneration. It reconciles the
-// stable path only; the canary window lands in O2 (docs/PLAN.md D31, D32).
+// ServingDeployment's namespace, to the image spec.imageTag names, then writes
+// the status for the generation it acted on: the Ready, CanaryActive and
+// ShadowPaused conditions and status.observedGeneration. The status is written
+// on failure too, so a refused adoption shows on the resource and not only in
+// the operator's log. It reconciles the stable path only; the canary window
+// lands in O2 (docs/PLAN.md D31, D32, D37).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -67,18 +71,18 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	if _, err := r.reconcileStable(ctx, sd); err != nil {
-		return ctrl.Result{}, err
-	}
+	dep, reconcileErr := r.reconcileStable(ctx, sd)
 
-	if sd.Status.ObservedGeneration != sd.Generation {
-		base := sd.DeepCopy()
-		sd.Status.ObservedGeneration = sd.Generation
+	base := sd.DeepCopy()
+	setConditions(sd, dep, reconcileErr)
+	sd.Status.ObservedGeneration = sd.Generation
+	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err)
+			return ctrl.Result{}, errors.Join(reconcileErr,
+				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, reconcileErr
 }
 
 // adoptionError reports a deployment/api the operator cannot take over: one

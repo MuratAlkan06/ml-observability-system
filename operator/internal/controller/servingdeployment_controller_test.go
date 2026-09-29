@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -217,7 +218,14 @@ var _ = Describe("Reconciling the stable api Deployment", func() {
 		after := getStable(ns)
 		Expect(after.ResourceVersion).To(Equal(before.ResourceVersion), "a refused adoption must not write")
 		Expect(recorder.Events).To(Receive(ContainSubstring("Warning AdoptionFailed cannot adopt deployment/api")))
-		Expect(getServingDeployment(sd).Status.ObservedGeneration).To(BeZero())
+
+		sd = getServingDeployment(sd)
+		Expect(sd.Status.ObservedGeneration).To(Equal(sd.Generation))
+		ready := meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(servingv1alpha1.ReasonAdoptionFailed))
+		Expect(ready.Message).To(ContainSubstring("already owned by another Widget controller someone-else"))
 	})
 
 	It("does not recreate deployment/api while the ServingDeployment is being deleted", func() {
@@ -247,7 +255,8 @@ var _ = Describe("Reconciling the stable api Deployment", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "got %v", err)
 	})
 
-	It("puts a drifted image back through the Owns watch of a running manager, with no direct Reconcile call", func() {
+	It("puts a drifted image back, and turns Ready True once the rollout is Available, "+
+		"through the watches of a running manager with no direct Reconcile call", func() {
 		ns := newTestNamespace()
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme:     k8sClient.Scheme(),
@@ -288,6 +297,15 @@ var _ = Describe("Reconciling the stable api Deployment", func() {
 			dep := &appsv1.Deployment{}
 			g.Expect(k8sClient.Get(ctx, stableKey(ns), dep)).To(Succeed())
 			g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(stableImage(validImageTag)))
+		}).WithTimeout(managerPollTimeout).WithPolling(managerPollInterval).Should(Succeed())
+
+		// Ready depends on the Deployment's status, so a status change on the
+		// owned Deployment must reach the reconciler through Owns() as well.
+		markRolledOut(ns)
+		Eventually(func(g Gomega) {
+			latest := &servingv1alpha1.ServingDeployment{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sd), latest)).To(Succeed())
+			g.Expect(meta.IsStatusConditionTrue(latest.Status.Conditions, servingv1alpha1.ConditionReady)).To(BeTrue())
 		}).WithTimeout(managerPollTimeout).WithPolling(managerPollInterval).Should(Succeed())
 	})
 })

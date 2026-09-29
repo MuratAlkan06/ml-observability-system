@@ -8,12 +8,39 @@ import (
 // Condition types the operator writes on a ServingDeployment, each with its
 // lastTransitionTime; the operator is their sole writer (docs/PLAN.md D37).
 const (
+	// ConditionReady is True while the stable Deployment the operator
+	// reconciles has rolled out its current spec and is Available. Read it
+	// together with status.observedGeneration == metadata.generation: that
+	// pair is the wait target of apply.sh's deploy sequence (D32; the D37
+	// addendum of O1).
+	ConditionReady = "Ready"
 	// ConditionCanaryActive is True while a canary window is open: a canary
 	// image tag is set and at least one canary replica is requested.
 	ConditionCanaryActive = "CanaryActive"
 	// ConditionShadowPaused is True while the shadow scorer is scaled to zero
 	// for an open canary window.
 	ConditionShadowPaused = "ShadowPaused"
+)
+
+// Condition reasons.
+const (
+	// ReasonStableAvailable: Ready is True.
+	ReasonStableAvailable = "StableAvailable"
+	// ReasonAwaitingRollout: Ready is False because the stable Deployment has
+	// not yet rolled out its current spec to an Available state.
+	ReasonAwaitingRollout = "AwaitingRollout"
+	// ReasonAdoptionFailed: Ready is False because the stable Deployment
+	// exists but cannot be adopted.
+	ReasonAdoptionFailed = "AdoptionFailed"
+	// ReasonReconcileFailed: Ready is False because reconciling the stable
+	// Deployment returned an error; the message carries it.
+	ReasonReconcileFailed = "ReconcileFailed"
+	// ReasonNoCanary: CanaryActive is False because the operator runs no
+	// canary Deployment. Until the canary window lands (O2), always.
+	ReasonNoCanary = "NoCanary"
+	// ReasonShadowRunning: ShadowPaused is False because the operator has not
+	// paused the shadow scorer. Until the canary window lands (O2), always.
+	ReasonShadowRunning = "ShadowRunning"
 )
 
 // ServingDeploymentSpec defines the desired state of ServingDeployment.

@@ -8,8 +8,13 @@ Status: O1. The controller reconciles the stable path. It adopts
 `deployment/api` in place — a controller ownerReference added, the name and
 pod template kept, only the api image moved to `spec.imageTag` — or creates it
 in the `20-api.yaml` shape when it is absent, and records
-`status.observedGeneration`. The operator is not deployed anywhere yet; the
-canary window lands in O2.
+`status.observedGeneration`. It is the sole writer of three conditions, each
+stamped with `lastTransitionTime`: `Ready`, True once `deployment/api` has
+rolled out the current spec and is Available (D32's wait target, with
+`observedGeneration == generation`); and `CanaryActive` and `ShadowPaused`,
+False with reasons `NoCanary` and `ShadowRunning` until the canary window
+exists (D37). The operator is not deployed anywhere yet; the canary window
+lands in O2.
 
 ## Pins
 
