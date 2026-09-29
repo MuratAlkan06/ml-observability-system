@@ -55,7 +55,7 @@ jobs:
       # that file, or the action warns and the two can drift apart.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.13.2
           working-directory: operator
 
   GoTest:
