@@ -1,0 +1,24 @@
+# The ServingDeployment — the api under the operator (Phase 3 O2; docs/PLAN.md
+# D31, D32).
+#
+# The operator creates deployment/api from this resource, or adopts the one
+# that exists, and keeps its image on spec.imageTag; while a canary window is
+# open it also runs deployment/api-canary and pauses the shadow scorer (D37).
+#
+# The pipeline renders spec.imageTag and nothing else. The canary fields are
+# set by a host-side `kubectl patch` that opens a window and are never
+# rendered here; apply.sh follows this apply with its constant close-window
+# patch, so a pipeline deploy during an open window closes it (D32). apply.sh
+# applies this file last, once the CRD is Established and the operator has
+# rolled out, and then waits for the resource's Ready condition at the current
+# generation.
+---
+apiVersion: serving.mlobs.dev/v1alpha1
+kind: ServingDeployment
+metadata:
+  name: api
+  namespace: mlobs
+  labels:
+    app: api
+spec:
+  imageTag: IMAGE_TAG

@@ -2,8 +2,9 @@
 #
 # Compose source of truth: the `grafana` service in docker-compose.yml.
 #
-# The second and last hostPort workload (D19): 3000 is the port the README tells
-# a reader to open, and traefik/servicelb are disabled on this host.
+# The one hostPort workload since the api moved to a NodePort Service in
+# Phase 3 O2 (D19 and its O2 erratum): 3000 is the port the README tells a
+# reader to open, and traefik/servicelb are disabled on this host.
 #
 # No Service object, deliberately. Nothing inside the cluster dials Grafana —
 # the traffic is one-way, Grafana to `prometheus:9090` — and the only client is
@@ -19,8 +20,8 @@ metadata:
     app: grafana
 spec:
   replicas: 1
-  # Same hostPort deadlock as the api Deployment: a RollingUpdate would wait
-  # forever for :3000 to be free.
+  # The hostPort deadlock D22 describes: a RollingUpdate would wait forever
+  # for :3000 to be free.
   strategy:
     type: Recreate
   selector:

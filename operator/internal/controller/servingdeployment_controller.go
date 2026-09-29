@@ -51,6 +51,10 @@ type ServingDeploymentReconciler struct {
 	// time.Now. Tests set it, so the 45-minute window TTL is exercised
 	// without waiting on it.
 	Now func() time.Time
+	// ImagePrefix is the registry and owner of the api images the operator
+	// writes, as <ImagePrefix>/mlobs-api:<tag>; empty means
+	// DefaultImagePrefix. The operator's --image-prefix sets it.
+	ImagePrefix string
 }
 
 // now reads the reconciler's clock.
@@ -59,6 +63,16 @@ func (r *ServingDeploymentReconciler) now() time.Time {
 		return time.Now()
 	}
 	return r.Now()
+}
+
+// apiImage renders tag as an api image reference under the reconciler's
+// prefix.
+func (r *ServingDeploymentReconciler) apiImage(tag string) string {
+	prefix := r.ImagePrefix
+	if prefix == "" {
+		prefix = DefaultImagePrefix
+	}
+	return apiImage(prefix, tag)
 }
 
 // The operator's whole grant: one namespaced Role in mlobs, no ClusterRole and
@@ -122,7 +136,7 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	reconcileErr := joinErrors(stableErr, windowErr)
 
 	base := sd.DeepCopy()
-	setConditions(sd, dep, stableErr, w, shadow, now)
+	setConditions(sd, dep, stableErr, r.apiImage(sd.Spec.ImageTag), w, shadow, now)
 	sd.Status.ObservedGeneration = sd.Generation
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
@@ -165,7 +179,7 @@ func (e *adoptionError) Error() string {
 }
 
 // reconcileStable makes deployment/api exist in the ServingDeployment's
-// namespace, be controlled by it, and run stableImage(spec.imageTag). It
+// namespace, be controlled by it, and run r.apiImage(spec.imageTag). It
 // returns the Deployment as last written or read.
 //
 // An existing deployment/api is adopted in place: the ServingDeployment's
@@ -176,7 +190,7 @@ func (e *adoptionError) Error() string {
 func (r *ServingDeploymentReconciler) reconcileStable(
 	ctx context.Context, sd *servingv1alpha1.ServingDeployment,
 ) (*appsv1.Deployment, error) {
-	image := stableImage(sd.Spec.ImageTag)
+	image := r.apiImage(sd.Spec.ImageTag)
 
 	dep := &appsv1.Deployment{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: sd.Namespace, Name: stableDeploymentName}, dep)

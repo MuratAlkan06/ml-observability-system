@@ -81,7 +81,10 @@ type ServingDeploymentSpec struct {
 
 	// canaryImageTag is the canary api image tag, in the same 40-character
 	// commit SHA form. It is set only by a host-side patch that opens a canary
-	// window and is never rendered by the pipeline (docs/PLAN.md D32).
+	// window and is never rendered by the pipeline (docs/PLAN.md D32). The
+	// operator never writes it: a window that reaches its 45-minute TTL is
+	// closed in the cluster, and this field stays until the close-window patch
+	// clears it.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	CanaryImageTag string `json:"canaryImageTag,omitempty"`
@@ -98,8 +101,9 @@ type ServingDeploymentSpec struct {
 
 // ServingDeploymentStatus defines the observed state of ServingDeployment.
 type ServingDeploymentStatus struct {
-	// conditions carry the stack's state. The operator writes
-	// CanaryActive and ShadowPaused (docs/PLAN.md D37).
+	// conditions carry the stack's state. The operator writes Ready,
+	// CanaryActive and ShadowPaused, each with lastTransitionTime, and is
+	// their sole writer (docs/PLAN.md D37 and its addenda).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

@@ -33,9 +33,13 @@ metadata:
     app: shadow-scorer
 spec:
   serviceName: shadow-scorer
-  # Scaling this to 0 is the sanctioned "off" switch for the latency A/B, the
-  # k3s equivalent of `docker compose stop shadow-scorer` (deploy/k3s/README.md).
-  replicas: 1
+  # No replica count here, on purpose: from Phase 3 O2 the operator owns this
+  # StatefulSet's scale. It holds it at 1, and at 0 while a canary window is
+  # open, writing only through the scale subresource (D37 and its O2 addendum).
+  # A count in this file would reset the operator's scale on every pipeline
+  # apply. The manual `kubectl scale` switch this comment once sanctioned for
+  # the latency A/B is retired: a hand scale is put back on the operator's
+  # next reconcile.
   selector:
     matchLabels:
       app: shadow-scorer

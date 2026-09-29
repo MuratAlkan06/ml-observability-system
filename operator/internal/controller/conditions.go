@@ -21,10 +21,11 @@ import (
 // deadline was counted from.
 //
 // dep is the stable Deployment as reconcileStable last wrote or read it,
-// reconcileErr is what reconcileStable returned, w is the window decided for
-// this reconcile, and shadow is what reconcileWindow observed and wrote.
+// reconcileErr is what reconcileStable returned, image is the stable image it
+// drove dep to, w is the window decided for this reconcile, and shadow is what
+// reconcileWindow observed and wrote.
 func setConditions(
-	sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error, w window,
+	sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error, image string, w window,
 	shadow shadowState, now time.Time,
 ) {
 	stamp := metav1.NewTime(now.Truncate(time.Second))
@@ -45,12 +46,12 @@ func setConditions(
 		ready.Status = metav1.ConditionTrue
 		ready.Reason = servingv1alpha1.ReasonStableAvailable
 		ready.Message = fmt.Sprintf("deployment/%s has rolled out %s and is Available",
-			stableDeploymentName, stableImage(sd.Spec.ImageTag))
+			stableDeploymentName, image)
 	default:
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = servingv1alpha1.ReasonAwaitingRollout
 		ready.Message = fmt.Sprintf("waiting for deployment/%s to roll out %s and become Available",
-			stableDeploymentName, stableImage(sd.Spec.ImageTag))
+			stableDeploymentName, image)
 	}
 	meta.SetStatusCondition(&sd.Status.Conditions, ready)
 

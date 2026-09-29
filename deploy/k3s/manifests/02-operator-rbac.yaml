@@ -4,8 +4,8 @@
 # `operator` and all in mlobs. No ClusterRole and no ClusterRoleBinding: the
 # operator works only inside this namespace and holds no write on CRDs, and its
 # metrics bind to localhost with authn/authz off in v0 — the one scaffold
-# feature that would have needed a cluster-wide grant (D33). Nothing runs as
-# this identity yet; the operator's own Deployment lands in a later slice.
+# feature that would have needed a cluster-wide grant (D33). The operator's
+# Deployment, 03-operator.yaml, runs as this identity.
 #
 # Beside the Deployment grant, the Role reads the namespace's StatefulSets and
 # may patch one subresource of one of them: the scale of shadow-scorer, which

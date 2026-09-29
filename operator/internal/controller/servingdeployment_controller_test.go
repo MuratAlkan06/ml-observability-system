@@ -145,7 +145,7 @@ var _ = Describe("Reconciling the stable api Deployment", func() {
 		Expect(recorder.Events).NotTo(Receive())
 	})
 
-	It("creates deployment/api in the 20-api.yaml shape, controlled by the ServingDeployment, when none exists", func() {
+	It("creates deployment/api in the testdata/api-deployment.yaml shape, controlled by the ServingDeployment, when none exists", func() {
 		ns := newTestNamespace()
 		sd := createServingDeployment(ns)
 		r, recorder := newTestReconciler()

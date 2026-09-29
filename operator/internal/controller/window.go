@@ -175,7 +175,7 @@ func (r *ServingDeploymentReconciler) openWindow(
 			shadowStatefulSetName, canaryDeploymentName)
 		return shadow, nil
 	}
-	image := stableImage(sd.Spec.CanaryImageTag)
+	image := r.apiImage(sd.Spec.CanaryImageTag)
 	if err := r.ensureCanary(ctx, sd, canary, image); err != nil {
 		return shadow, err
 	}

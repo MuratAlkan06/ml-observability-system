@@ -18,16 +18,20 @@ const (
 	canaryDeploymentName = "api-canary"
 	// apiContainerName is the container whose image the operator sets.
 	apiContainerName = "api"
-	// imagePrefix is apply.sh's default IMAGE_PREFIX: the registry and owner
-	// GhcrPublish pushes the per-SHA images to.
-	imagePrefix = "ghcr.io/muratalkan06"
 )
 
-// stableImage renders an image tag as the api image reference, in the form
-// deploy/k3s/apply.sh renders IMAGE_PREFIX/mlobs-api:IMAGE_TAG under its
-// default prefix. Every image the operator writes comes from here.
-func stableImage(tag string) string {
-	return imagePrefix + "/mlobs-api:" + tag
+// DefaultImagePrefix is apply.sh's default IMAGE_PREFIX: the registry and
+// owner GhcrPublish pushes the per-SHA images to. It is the operator's
+// --image-prefix default; apply.sh renders its own IMAGE_PREFIX into that flag
+// in 03-operator.yaml, so a k3d rehearsal that imports local builds under
+// docker.io/library has the operator write those same references.
+const DefaultImagePrefix = "ghcr.io/muratalkan06"
+
+// apiImage renders an image tag as the api image reference under prefix, in
+// the form deploy/k3s/apply.sh renders <prefix>/mlobs-api:<tag>. Every image
+// the operator writes comes from here.
+func apiImage(prefix, tag string) string {
+	return prefix + "/mlobs-api:" + tag
 }
 
 // apiLabels returns a fresh copy of the stable api's labels, so the
@@ -54,22 +58,22 @@ func canaryLabels() map[string]string {
 // newStableDeployment returns the api Deployment the operator creates when
 // deployment/api is absent.
 //
-// It is a conscious copy of the Deployment in deploy/k3s/manifests/20-api.yaml,
-// which is the original and carries the reasoning behind each field (Recreate,
-// the three probes, the D8 memory bounds). apply.sh still renders that
-// manifest until O2 moves the api Deployment under the operator, so the two
-// must agree: a test decodes the manifest and fails on any difference. An
-// adopted Deployment is never rebuilt from this shape; adoption changes only
-// its ownerReferences and its api image (D31).
+// Since O2 no manifest renders deployment/api, so this is the one description
+// of its shape that ships. testdata/api-deployment.yaml holds the same
+// Deployment as YAML, with the reasoning behind each field (Recreate, the
+// three probes, the D8 memory bounds) carried over from the 20-api.yaml
+// Deployment it replaces, and a test fails on any difference between the two:
+// a change here is a change to both. There is no hostPort: the api is
+// published by the NodePort Service in 20-api.yaml (D34 and the D19 erratum of
+// O2). An adopted Deployment is never rebuilt from this shape; adoption
+// changes only its ownerReferences and its api image (D31).
 func newStableDeployment(namespace, image string) *appsv1.Deployment {
-	dep := newAPIDeployment(stableDeploymentName, namespace, apiLabels, image, 1)
-	dep.Spec.Template.Spec.Containers[0].Ports[0].HostPort = 8000
-	return dep
+	return newAPIDeployment(stableDeploymentName, namespace, apiLabels, image, 1)
 }
 
 // newCanaryDeployment returns deployment/api-canary at image and replicas: the
-// stable's pod template with the canary's labels, and no hostPort, so that it
-// can run beside the stable on one node behind the shared Service.
+// stable's pod template under the canary's labels, so that it runs beside the
+// stable on one node behind the shared Service.
 func newCanaryDeployment(namespace, image string, replicas int32) *appsv1.Deployment {
 	return newAPIDeployment(canaryDeploymentName, namespace, canaryLabels, image, replicas)
 }

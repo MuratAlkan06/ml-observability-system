@@ -11,8 +11,9 @@
 # The operator holds no write on CRDs; this is applied with the host's admin
 # credentials like everything else here (D33). It sorts in the 0x band, after
 # the namespace and ahead of every workload, so it precedes anything that will
-# ever use the kind. Until apply.sh gains the CRD-first deploy sequence (D32) it
-# is applied with the rest of the directory and nothing uses it.
+# ever use the kind. apply.sh applies it on its own and waits for it to be
+# Established before the operator and the ServingDeployment that use it (D32's
+# deploy sequence).
 #
 # The field descriptions below come from Go doc comments, and apply.sh
 # substitutes three placeholder tokens in every file here; the sync check fails
@@ -63,7 +64,10 @@ spec:
                 description: |-
                   canaryImageTag is the canary api image tag, in the same 40-character
                   commit SHA form. It is set only by a host-side patch that opens a canary
-                  window and is never rendered by the pipeline (docs/PLAN.md D32).
+                  window and is never rendered by the pipeline (docs/PLAN.md D32). The
+                  operator never writes it: a window that reaches its 45-minute TTL is
+                  closed in the cluster, and this field stays until the close-window patch
+                  clears it.
                 pattern: ^[0-9a-f]{40}$
                 type: string
               canaryReplicas:
@@ -91,8 +95,9 @@ spec:
             properties:
               conditions:
                 description: |-
-                  conditions carry the stack's state. The operator writes
-                  CanaryActive and ShadowPaused (docs/PLAN.md D37).
+                  conditions carry the stack's state. The operator writes Ready,
+                  CanaryActive and ShadowPaused, each with lastTransitionTime, and is
+                  their sole writer (docs/PLAN.md D37 and its addenda).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
