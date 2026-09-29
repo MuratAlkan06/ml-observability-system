@@ -321,7 +321,8 @@ and its images exist, then executes a fixed, parameter-locked SSM document on
 the host — no SSH keys, no long-lived cloud credentials in the repository or
 CI. Rolling back is the same command with the previous commit; both were
 demonstrated live at the v2.0.0 close (see
-[`infra/README.md`](infra/README.md) — Deploy pipeline and Rolling back).
+[Deploy pipeline](infra/README.md#deploy-pipeline) and
+[Rolling back](infra/README.md#rolling-back)).
 
 ## Stack
 
