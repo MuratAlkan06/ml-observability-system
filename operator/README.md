@@ -4,9 +4,19 @@ The `ServingDeployment` operator — Phase 3 of this repository
 (`docs/PHASE3.md`; decisions D31–D37 in `docs/PLAN.md`). One namespaced CRD,
 `servingdeployments.serving.mlobs.dev`, and a Go controller for it.
 
-Status: O0. The module, the API types and the CRD's validation are in place;
-the controller's `Reconcile` is still the scaffold's no-op, and the operator
-is not deployed anywhere. Reconciliation lands in O1, the canary window in O2.
+Status: O1. The controller reconciles the stable path. It adopts
+`deployment/api` in place — a controller ownerReference added, the name and
+pod template kept, only the api image moved to `spec.imageTag` — or creates it
+in the `20-api.yaml` shape when it is absent, and records
+`status.observedGeneration`. It is the sole writer of three conditions, each
+stamped with `lastTransitionTime`: `Ready`, True once `deployment/api` has
+rolled out the current spec and is Available (D32's wait target, with
+`observedGeneration == generation`); and `CanaryActive` and `ShadowPaused`,
+False with reasons `NoCanary` and `ShadowRunning` until the canary window
+exists (D37). Leader election is on by default (`--leader-elect`), through a
+Lease in `mlobs`; it is tested as the acquisition of that Lease only, with no
+failover (D35). The operator is not deployed anywhere yet; the canary window
+lands in O2.
 
 ## Pins
 
