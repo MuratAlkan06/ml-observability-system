@@ -490,6 +490,32 @@ jobs:
           kubectl wait --for=condition=Ready node --all --timeout=120s
           kubectl get nodes -o wide
 
+      - name: Cluster DNS and Service routing answer
+        # Every workload's init container finds its dependency by Service
+        # name, so a pod that cannot resolve and reach a Service leaves the
+        # whole stack in Init until apply.sh's bounds run out, minutes later
+        # and far from the cause. A throwaway pod checks both here, before the
+        # image builds: it resolves the API server's Service by name and opens
+        # its ClusterIP port.
+        run: |
+          kubectl -n kube-system rollout status deployment/coredns --timeout=180s
+          kubectl run net-probe --namespace default --image=busybox:1.37 --restart=Never \
+            --command -- sh -c 'nslookup kubernetes.default.svc.cluster.local && nc -z -w 5 kubernetes.default.svc.cluster.local 443'
+          if ! kubectl wait --namespace default pod/net-probe \
+                --for=jsonpath='{.status.phase}'=Succeeded --timeout=120s; then
+            kubectl --namespace default logs pod/net-probe || true
+            kubectl -n kube-system get pods -o wide || true
+            kubectl -n kube-system logs deployment/coredns --tail=40 || true
+            docker exec "k3d-${CLUSTER_NAME}-server-0" iptables -S FORWARD || true
+            docker logs "k3d-${CLUSTER_NAME}-server-0" 2>&1 \
+              | grep -iE 'error|fail|netpol|network polic|flannel|proxy' | tail -60 || true
+            echo "::error::a pod could not resolve and reach a Service by name"
+            exit 1
+          fi
+          kubectl --namespace default logs pod/net-probe
+          kubectl --namespace default delete pod/net-probe --wait=false
+          echo "ok: cluster DNS resolves Service names and Service routing reaches the endpoint"
+
       - name: Build service images
         run: |
           docker build -f docker/api.Dockerfile           -t "mlobs-api:${DEPLOY_TAG}" .
@@ -725,7 +751,13 @@ jobs:
           kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -40 || true
           kubectl -n mlobs describe pods | tail -160 || true
           kubectl -n mlobs logs deployment/api --tail=50 || true
+          kubectl -n mlobs logs deployment/api -c redis-ready --tail=10 || true
           kubectl -n mlobs logs deployment/operator --tail=80 || true
+          kubectl -n kube-system get pods -o wide || true
+          kubectl -n kube-system logs deployment/coredns --tail=40 || true
+          docker exec "k3d-${CLUSTER_NAME}-server-0" iptables -S FORWARD || true
+          docker logs "k3d-${CLUSTER_NAME}-server-0" 2>&1 \
+            | grep -iE 'error|fail|netpol|network polic|flannel|proxy' | tail -60 || true
 
       - name: Disk report
         if: always()
