@@ -78,10 +78,28 @@ a `kubectl rollout undo` or a redeploy of a previous SHA (D25):
 deploy/k3s/smoke.sh
 ```
 
-It asserts the nine rollouts, `GET /health` 200, a `POST /predict` round trip
-carrying `request_id` + `label` + `confidence`, that Prometheus reports exactly
-the jobs configured in `prometheus/prometheus.yml` as up, and Grafana
-`/api/health` 200. Needs `kubectl`, `curl` and `python3` on PATH.
+It is state-aware (D37). The stack is in exactly one of two states, and
+`smoke.sh` decides which from the cluster: the `ServingDeployment`'s
+`CanaryActive` and `ShadowPaused` conditions at its current generation, the
+canary Deployment and the shadow scorer as observed — never the spec's canary
+fields, which an expired window leaves behind until the close-window patch
+clears them.
+
+| State | Conditions | Workloads | Prometheus jobs up |
+|---|---|---|---|
+| steady | `CanaryActive` False, `ShadowPaused` False | `api-canary` absent or at 0 with no pods; `shadow-scorer` at 1, ready | every configured job except `api_canary` |
+| window | `CanaryActive` True, `ShadowPaused` True | `shadow-scorer` at 0 with no pods; `api-canary` at 1 or more, all ready | every configured job except `shadow_scorer` |
+
+Any other combination, such as a transition still settling, is polled for up
+to `STATE_TIMEOUT_SECONDS` (default 180) and then rejected, so a state put
+together by hand fails the check. In either state it then asserts the
+rollouts, `GET /health` 200 and a `POST /predict` round trip carrying
+`request_id` + `label` + `confidence` through the api's node port; that
+Prometheus reports exactly the state's jobs up, `drift_shadow` included in
+both; and Grafana `/api/health` 200. In a window it also sends twenty
+`/predict` connections through the same port and requires the canary's own
+predictions counter to have moved: the canary is serving behind the shared
+Service, not only running. Needs `kubectl`, `curl` and `python3` on PATH.
 
 ### Host k3s flags
 

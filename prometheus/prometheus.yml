@@ -8,6 +8,14 @@ scrape_configs:
     static_configs:
       - targets: ["api:8000"]
 
+  # Phase 3 O2 (D34): the canary api, scraped through its own Service,
+  # api-canary, apart from the stable. It is up only while a canary window is
+  # open; deploy/k3s/smoke.sh requires it up then and down otherwise (D37).
+  # Compose runs no canary, so under Compose this target is always down.
+  - job_name: api_canary
+    static_configs:
+      - targets: ["api-canary:8000"]
+
   - job_name: consumer
     static_configs:
       - targets: ["consumer:9108"]
