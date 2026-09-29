@@ -13,8 +13,9 @@ distribution shifts. Request latency, pipeline throughput, and drift scores are 
 Prometheus and visualized in Grafana, and a host-side traffic simulator with a `--mode drift`
 switch can trip all three detectors on demand. A second, smaller **candidate model** scores the
 same live traffic in a shadow deployment, so agreement, confidence deltas, latency, and per-model
-drift can be compared side by side to support a data-driven promote-or-hold decision — with zero
-impact on the primary prediction path. It is a compact, end-to-end demonstration of the
+drift can be compared side by side to support a data-driven promote-or-hold decision — with
+near-zero impact on the primary prediction path as certified under Docker Compose (under the
+current k3s runtime the delta is published as measured; see the k3s re-measurement section). It is a compact, end-to-end demonstration of the
 observability that real ML systems need but rarely ship with.
 
 Engineering rules binding every contributor — human or agent — live in
@@ -314,6 +315,14 @@ runbook, the running-versus-stopped cost note (≈ $3/month at the start-for-a-d
 usage pattern), and an explicit list of what the slice does not prove — notably that the host is
 *described* by code, not yet rebuilt from it.
 
+Deploys are one command: an environment-gated GitHub Actions workflow
+(`deploy.yml`) that requires a human approval, verifies the commit is on `main`
+and its images exist, then executes a fixed, parameter-locked SSM document on
+the host — no SSH keys, no long-lived cloud credentials in the repository or
+CI. Rolling back is the same command with the previous commit; both were
+demonstrated live at the v2.0.0 close (see
+[`infra/README.md`](infra/README.md) — Deploy pipeline and Rolling back).
+
 ## Stack
 
 | Layer | Technology |
@@ -333,6 +342,11 @@ usage pattern), and an explicit list of what the slice does not prove — notabl
 
 Built in waves of independently reviewable slices.
 
+**v2.0.0 — Phase 2: infrastructure, Kubernetes, gated deploys** — principles +
+CI gates, Terraform adoption of the host, the live k3s migration, and the
+approval-gated SSM deploy channel; see the
+[release notes](https://github.com/MuratAlkan06/ml-observability-system/releases/tag/v2.0.0).
+
 - [x] **Wave 1 — A · Reset & scaffold** — legacy stubs removed, frozen plan adopted, CI + tooling in place
 
 **Wave 2 — parallel slices**
@@ -350,7 +364,8 @@ Built in waves of independently reviewable slices.
 
 **v1.1 — Shadow / candidate comparison**
 - [x] **S6 · Shadow scorer** — MiniLM-L6 candidate re-scores live traffic off a second consumer
-  group; `shadow_predictions` table; comparison metrics on `:9110`, zero primary-path impact
+  group; `shadow_predictions` table; comparison metrics on `:9110`; primary-path impact certified
+  near-zero under Compose (k3s-era delta published as measured in the re-measurement section)
 - [x] **S7 · Multi-model drift** — per-model drift jobs (`drift` / `drift-shadow`), model-scoped
   baselines and `[mlobs][<model_version>]` Slack prefixes
 - [x] **S8 · Comparison observability** — *mlobs — Model Comparison* dashboard, promotion-decision
