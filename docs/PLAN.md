@@ -811,3 +811,123 @@ retention jobs, Alembic.
 > complete record of SSM output on these three runs only because it fit (at most 1,053 stdout and
 > 803 stderr characters, against deploy.yml's 80/40-line tails and SSM's 24,000/8,000-character
 > limits). The pipeline does not guarantee that. The frozen text is not edited.
+
+# Operator phase — ADR summary (D31–D37), v2
+
+> FROZEN (owner rulings 2026-09-29 recorded in D31/D34). Decisions for the operator that the
+> 2026-09-29 re-sequencing ruling places ahead of the P3 stretch (`docs/PHASE2.md`, P3 erratum;
+> the contract is `docs/PHASE3.md`). The first draft of this block (v1) was gated APPROVED on
+> direction, on ADR A — in-place adoption of the live api Deployment — and on ADR B — monorepo,
+> `/operator`, and the pins — and REVISE on eight findings; all eight are integrated here, which
+> makes this v2. Everything above is untouched; this block appends only.
+
+- **D31 Scope, home and pins; the kind is `ServingDeployment`:** a Go operator in this
+  repository at `/operator`, scaffolded with kubebuilder v4.15.0 — a scaffold-time tool, not a
+  build dependency — on controller-runtime v0.24.x and k8s.io v0.36.x, the band matching D19's
+  k3s `v1.36.4+k3s1`. It serves one namespaced CRD. The live `deployment/api` is adopted in
+  place: the `ServingDeployment` becomes its owner through an ownerReference and the name is
+  kept, and `20-api.yaml` loses its Deployment in the same slice that first applies the CR
+  through `apply.sh`, so no tree both renders `deployment/api` from a manifest and hands it to
+  the operator. The kustomize `config/` tree kubebuilder scaffolds is not kept: the CRD, the
+  RBAC and the operator's own Deployment are hand-flattened into `deploy/k3s/manifests/`, the
+  overlay is deleted, and a CI check regenerates them with controller-gen and fails on any
+  diff. The kind was renamed at design review under `PRINCIPLES.md` §1 Law 1: the resource
+  moves image tags, and model identity — `model_name`, `model_revision`, `model_version` — is
+  frozen inside the image, not in the spec. *Provenance:* the owner brief's original name was
+  `ModelDeployment`; the rename is owner-ruled 2026-09-29. *Rejected:* keeping
+  `ModelDeployment` with a recorded caveat; a separate operator repository; keeping the
+  kustomize tree beside the flattened manifests. *Why:* the operator's manifests land in
+  `deploy/k3s/manifests/` and its changes gate the same k3d rehearsal (D35), which a second
+  repository would split in two. The kustomize tree and the flattened manifests would be two
+  copies of one description — the hazard D21 closed for the scrape config, two files that
+  will disagree silently — and the sync check is what closes it here.
+- **D32 Control flow — the pipeline sets the stable tag, a human opens the window:** the CR
+  that `apply.sh` renders carries only `spec.imageTag`. `spec.canaryImageTag` and
+  `spec.canaryReplicas` are set by a host-side `kubectl patch` and are never rendered. The rule
+  is that a pipeline deploy during an open window closes it, and it holds mechanically: after
+  the CR apply, `apply.sh` sends a constant merge patch — `canaryImageTag: null`,
+  `canaryReplicas: 0` — which is a no-op when no window is open and prints a fixed output line
+  when it closes one. `apply.sh` can close a window and can never open one. The deploy
+  sequence is frozen: CRD apply → wait for `Established` → operator apply and rollout wait →
+  CR apply → close-window patch → wait for the CR's `Ready` with
+  `observedGeneration == generation` → `rollout status deployment/api` → `smoke.sh`. Promotion
+  is ordered by the operator: the stable Deployment rolls to the promoted tag and completes
+  while the canary is still serving, and only then does the canary go to 0, so there is no
+  serving gap. *Rejected:* a server-side-apply field manager owning only the stable fields, so
+  that a pipeline apply would leave an open window alone. *Why:* a window that survives a
+  deploy survives onto a NEW stable, and the comparison it was opened for silently becomes a
+  comparison against a different stable; and which manager owns which field would live in the
+  cluster's `managedFields`, invisible to anyone reading the repository.
+- **D33 The boundary claim, scoped; RBAC:** the AWS side is unchanged, and checkably so — no
+  diff under `infra/ec2/`, with D24, D28 and D29 untouched. The in-cluster surface is new, and
+  it is reviewed here. The operator holds one namespaced Role in `mlobs`: read (get, list,
+  watch) and create, update, patch and delete on `apps/deployments`; `servingdeployments` with
+  their `status` and `finalizers` subresources; create and patch on events; and
+  `coordination.k8s.io` leases for leader election. It has no write on CRDs — those are
+  applied by `apply.sh` under the host's admin credentials. It has no ClusterRole: metrics bind
+  to localhost with authn/authz disabled in v0. There are no webhooks in v0; the CRD's OpenAPI
+  schema carries the validation. *Rejected:* a ClusterRole for the scaffold's metrics
+  authn/authz filter. *Why:* that filter calls the cluster-scoped TokenReview and
+  SubjectAccessReview APIs, so it is the one thing in the scaffold that would need a
+  cluster-wide grant, and v0 has no off-pod metrics consumer to justify it. The AWS half of the
+  boundary claim is checkable from `infra/ec2/`, but an operator that writes Deployments is new
+  privilege inside the cluster, so the claim is scoped to what it covers and the new surface is
+  enumerated rather than implied.
+- **D34 Traffic split — NodePort 8000 on an exact range:** the api Service becomes
+  `type: NodePort` with `nodePort: 8000` and `externalTrafficPolicy: Local`, and k3s runs with
+  `--service-node-port-range=8000-8000`, pinned exactly. The flag moves in the three pin sites
+  D19's version already lives in (`docs/K3S.md`): the host install; the K3sSmoke k3d
+  arguments, as `--k3s-arg '--service-node-port-range=8000-8000@server:*'`; and the local k3d
+  recipe in `deploy/k3s/README.md`. A D19 erratum records the api's move from `hostPort` to
+  NodePort; Grafana keeps `hostPort` 3000, and the security group is untouched. Three
+  properties are stated in this ADR and in the README rather than left to be discovered: the
+  split is by replica ratio; it is per connection, so a keep-alive client stays on one pod; and
+  rollback is human-triggered in v0. Loopback `127.0.0.1:8000` is asserted in the rehearsal. It
+  rides kube-proxy's iptables-mode `route_localnet`, so it is re-verified on any k3s bump. The
+  canary is scraped through its own ClusterIP Service, `api-canary`, and the job `api_canary`
+  joins the one scrape file (D21). The details are owner-ruled 2026-09-29 as specified here —
+  the exact 8000-8000 range, `externalTrafficPolicy: Local`, the three-site flag pin and the
+  three caveats. *Rejected:* the scrape-only fallback, in which the canary takes no live
+  traffic and is observed only through its scrape. *Why:* D19 turned NodePort down because a
+  port in 30000–32767 moves the port a stranger types. An exact range keeps that port at 8000
+  — the one the security group already admits — while a Service, unlike a hostPort, can put
+  two Deployments behind one port on one node.
+- **D35 CI shape:** the operator's end-to-end tests run on the k3d image K3sSmoke already pins,
+  `rancher/k3s:v1.36.4-k3s1`, not on kind, and the CR there names a stub image (`pause` or
+  `http-echo`) rather than a torch build. envtest is pinned to 1.36.x. Leader election is
+  tested as a lease-acquisition assertion only. `^operator/` joins the `K3sPaths` filter; the
+  DocsGate sweeps extend to `operator/`; and Dependabot gains the `gomod` ecosystem at
+  `/operator`, weekly, with an ignore constraint holding k8s.io at the v0.36 minor and
+  controller-runtime at v0.24 — a band released only together with a k3s bump recorded as a
+  D19 erratum. *Rejected:* kind; a timing-based failover demonstration. *Why:* kind would
+  rehearse the operator against a cluster the host does not run, where the k3d image is the
+  host's own pinned k3s (D19). A failover demo waits on lease durations and pod-kill timing,
+  which makes it flaky by construction; that the lease is acquired is the part that can be
+  asserted deterministically.
+- **D36 Rollback across the boundary — ordered, and rehearsed before it is needed live:**
+  undoing the operator is six steps, in order. (1) Canary to 0 by host patch. (2) Delete the
+  CR. (3) Wait, to a bound, for `deployment/api` to be garbage-collected through its
+  ownerReference — the proof that the adoption is undone. (4) Scale down or delete the
+  operator; the CRD is deleted last or left inert. (5) Dispatch the pre-cutover SHA through
+  the pipeline; that tree's `20-api.yaml` still carries the Deployment. (6) `smoke.sh` green.
+  Steps 1–4 run outside the pipeline, as host `kubectl` over an SSM session, and are stated as
+  such; steps 5–6 are the pipeline. The sequence is rehearsed green in k3d CI, with the stub
+  image, before O4 runs it live. *Rejected:* deleting the CRD before the CR; "rolling back" the
+  operator itself. *Why:* the CR is deleted while the operator still runs, and its deletion is
+  the event step 3 waits on; removing the CRD first would take every CR with it, outside that
+  order. The adoption lives in the ownerReference on `deployment/api`, not in the operator's
+  version, so an older operator would still be reconciling an adopted api.
+- **D37 State is enforced, not assumed:** the operator writes two conditions on the CR,
+  `CanaryActive` and `ShadowPaused`, each with `lastTransitionTime`, and is their sole writer.
+  An open window pauses the shadow scorer — two torch api pods plus the shadow would not fit
+  under D26's bar on the 4GB host — so the stack is in exactly one of two states: steady
+  (canary = 0 ∧ shadow = 1) or window (canary ≥ 1 ∧ shadow = 0). `smoke.sh` asserts
+  exactly-one-of from cluster state. Its target-set assertion becomes state-aware: `api_canary`
+  is required iff `CanaryActive`, `shadow_scorer` iff not `ShadowPaused`, and `drift_shadow` in
+  both states — its count-based window merely ages while the shadow is paused.
+  `prometheus/prometheus.yml` stays the one scrape description (D21), and the fixed workload
+  lists in `apply.sh` and `smoke.sh` become state-aware with it. The window's TTL is 45
+  minutes, and the arithmetic is recorded with it: `XADD MAXLEN ~ 50000` at the frozen 5 rps is
+  a trim horizon of 10,000 s, about 2.8 h; the TTL stays at or below a third of
+  50000 / observed rps and is recomputed before any higher-rate run; a shadow left paused past
+  the horizon takes a permanent, silent gap.
