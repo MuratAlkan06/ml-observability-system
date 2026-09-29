@@ -25,10 +25,12 @@ metadata:
   labels:
     app: api
 spec:
-  # k3s runs with --service-node-port-range=8000-8000 (the three pin sites are
+  # k3s runs with --service-node-port-range=8000-8000, paired always with
+  # --disable-network-policy (D34 and its O2 erratum; the three pin sites are
   # listed in docs/K3S.md), so 8000 is the only node port this Service could
-  # be given. apply.sh dry-runs this object server-side before it changes
-  # anything else, and stops if the cluster's range does not admit it.
+  # be given. apply.sh's preflight reads the range k3s records and dry-runs
+  # this object server-side before it changes anything else, and stops if the
+  # cluster's range does not admit it.
   type: NodePort
   # A NodePort connection is served by an api pod on the node it arrived at,
   # with the client's source address kept. On a one-node cluster that is every

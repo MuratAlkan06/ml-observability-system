@@ -438,12 +438,19 @@ jobs:
           k3d version
 
       - name: Create k3d cluster
-        # traefik and servicelb are disabled to match the host (D19): the stack
-        # is reached through hostPorts, and an ingress controller the manifests
-        # never reference would only be one more thing holding :80. The two -p
-        # mappings publish the api and grafana hostPorts off the server node's
-        # container, which is what lets smoke.sh curl 127.0.0.1:8000 and :3000
-        # here exactly as it does on the EC2 box.
+        # traefik and servicelb are disabled to match the host (D19): an
+        # ingress controller the manifests never reference would only be one
+        # more thing holding :80. The node-port range is pinned to exactly
+        # 8000-8000, one of D34's three pin sites (docs/K3S.md): the api is a
+        # NodePort Service on 8000, which a default range refuses, and
+        # apply.sh's preflight stops on a cluster without it. The range and
+        # --disable-network-policy are one atomic pair (the D34 erratum of
+        # O2): k3s's network-policy controller refuses a single-port range
+        # and crash-loops the server, so neither line goes in without the
+        # other. The two -p mappings publish the api's node port and
+        # grafana's hostPort off the server node's container, which is what
+        # lets smoke.sh curl 127.0.0.1:8000 and :3000 here exactly as it does
+        # on the EC2 box.
         run: |
           k3d cluster create "$CLUSTER_NAME" \
             --image "$K3S_IMAGE" \
@@ -452,6 +459,8 @@ jobs:
             --k3s-arg '--disable=traefik@server:*' \
             --k3s-arg '--disable=servicelb@server:*' \
             --k3s-arg '--disable=metrics-server@server:*' \
+            --k3s-arg '--service-node-port-range=8000-8000@server:*' \
+            --k3s-arg '--disable-network-policy@server:*' \
             --wait \
             --timeout 300s
           kubectl wait --for=condition=Ready node --all --timeout=120s

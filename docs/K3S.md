@@ -75,7 +75,16 @@ test.
 - **k3s version bumps.** The pin (D19) lives in three places — the host
   install, `K3S_IMAGE` in CI, and the local k3d recipe — and moves in one
   change, with `K3sSmoke` green on the new pin before the host moves. Each bump
-  is recorded as a `PLAN.md` erratum against D19.
+  is recorded as a `PLAN.md` erratum against D19. D34's node-port range,
+  `--service-node-port-range=8000-8000`, is pinned in the same three places
+  as an atomic pair with `--disable-network-policy` (the D34 erratum of O2:
+  k3s's network-policy controller refuses a single-port range and the server
+  crash-loops): the host's `/etc/rancher/k3s/config.yaml`
+  (`deploy/k3s/README.md`, "Host k3s flags"; the host gains the pair inside
+  O4's gated window, issue #68), the `K3sSmoke` k3d arguments, and the local
+  recipe. A bump re-verifies `127.0.0.1:8000`, which reaches the NodePort
+  through kube-proxy's iptables-mode `route_localnet`, and re-checks whether
+  the network-policy controller still refuses the exact range.
 - **A second environment.** D12, D17 and D23 all name it as their trigger: a
   module layer for Terraform, a templating layer for the manifests, a sealing
   tool for secrets. None of them earns its keep with one host.
