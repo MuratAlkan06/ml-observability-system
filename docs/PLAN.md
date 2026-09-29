@@ -994,3 +994,12 @@ retention jobs, Alembic.
 > steady and on a live one the same run's close-window patch and the operator's next reconcile
 > re-enforce the order. O3's runbook still carries the TTL arithmetic and the out-of-pipeline
 > steps, unchanged. Ruled at O2 start (issue #66); no frozen text edited.
+
+> **D19 erratum (2026-09-29, O2):** "host ports kept" narrows to Grafana. The api moves from
+> `hostPort` 8000 to the D34 NodePort Service on the exact 8000-8000 range; the port a stranger
+> types is unchanged and the security group is untouched. The operator's api template carries no
+> `hostPort`; the live host's adopted Deployment still does, and sheds it in a one-time
+> out-of-pipeline patch sequenced inside O4's gated window (issue #68) — adoption stays
+> ownerReference-and-image only. The api keeps `strategy: Recreate`: the reason was the hostPort
+> bind deadlock and is now D26's memory bar — a surged second torch pod does not fit beside the
+> shadow on the 4GB host.
