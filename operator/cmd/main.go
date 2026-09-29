@@ -210,6 +210,10 @@ func main() {
 	if err := (&controller.ServingDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// GetEventRecorderFor writes core/v1 Events, which the Role grants
+		// (docs/PLAN.md D33). Its replacement, GetEventRecorder, writes
+		// events.k8s.io/v1 Events, which the Role does not grant.
+		Recorder: mgr.GetEventRecorderFor("servingdeployment-controller"), //nolint:staticcheck // SA1019, see above
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servingdeployment")
 		os.Exit(1)

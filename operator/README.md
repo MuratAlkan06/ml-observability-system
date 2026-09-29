@@ -4,9 +4,12 @@ The `ServingDeployment` operator — Phase 3 of this repository
 (`docs/PHASE3.md`; decisions D31–D37 in `docs/PLAN.md`). One namespaced CRD,
 `servingdeployments.serving.mlobs.dev`, and a Go controller for it.
 
-Status: O0. The module, the API types and the CRD's validation are in place;
-the controller's `Reconcile` is still the scaffold's no-op, and the operator
-is not deployed anywhere. Reconciliation lands in O1, the canary window in O2.
+Status: O1. The controller reconciles the stable path. It adopts
+`deployment/api` in place — a controller ownerReference added, the name and
+pod template kept, only the api image moved to `spec.imageTag` — or creates it
+in the `20-api.yaml` shape when it is absent, and records
+`status.observedGeneration`. The operator is not deployed anywhere yet; the
+canary window lands in O2.
 
 ## Pins
 
