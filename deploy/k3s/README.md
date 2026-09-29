@@ -34,7 +34,11 @@ host (D19).
 Nothing under this directory is a copy of anything. `apply.sh` builds every
 ConfigMap from the canonical files — `prometheus/prometheus.yml`,
 `grafana/provisioning/**`, `grafana/dashboards/*.json`, `sql/init.sql` plus
-`sql/migrations/*.sql`, and `baseline/*.json`.
+`sql/migrations/*.sql`, and `baseline/*.json`. The operator's CRD and Role are
+generated, not copied: controller-gen's output sits below a marker line in
+`manifests/01-servingdeployment-crd.yaml` and `manifests/02-operator-rbac.yaml`,
+and `make -C operator verify-manifests` (CI job `OperatorManifestSync`) fails
+if either drifts from the Go source (D31).
 
 ## Deploying
 

@@ -17,9 +17,16 @@ type ServingDeploymentReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=operator-system,resources=servingdeployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=operator-system,resources=servingdeployments/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=operator-system,resources=servingdeployments/finalizers,verbs=update
+// The operator's whole grant: one namespaced Role in mlobs, no ClusterRole and
+// no write on CRDs (docs/PLAN.md D33). controller-gen renders these markers
+// into deploy/k3s/manifests/02-operator-rbac.yaml; `make verify-manifests`
+// fails if the two disagree.
+// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=mlobs,resources=servingdeployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=mlobs,resources=servingdeployments/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=mlobs,resources=servingdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,namespace=mlobs,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",namespace=mlobs,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=coordination.k8s.io,namespace=mlobs,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

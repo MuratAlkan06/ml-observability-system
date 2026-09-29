@@ -50,8 +50,13 @@ var _ = BeforeSuite(func() {
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
+	// The CRD envtest installs is the flattened file apply.sh deploys, not a
+	// copy of it: there is no config/ tree (docs/PLAN.md D31), so the schema
+	// tests exercise exactly what ships.
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "..", "deploy", "k3s", "manifests", "01-servingdeployment-crd.yaml"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 

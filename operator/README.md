@@ -17,7 +17,8 @@ assets. The band moves only together with a k3s bump (D35).
 
 ## What was not kept from the scaffold
 
-- The kustomize `config/` tree (D31).
+- The kustomize `config/` tree (D31). The CRD and the Role are flattened into
+  `deploy/k3s/manifests/` instead, kept in sync by `make verify-manifests`.
 - The kind-based e2e suite under `test/` and its Makefile targets: the
   operator's end-to-end tests run on the pinned k3d image instead (D35).
 - The scaffold's own `.github/` workflows, dev container and agent guide.
@@ -25,6 +26,8 @@ assets. The band moves only together with a k3s bump (D35).
 ## Develop
 
 ```bash
+make manifests  # CRD + Role, spliced into deploy/k3s/manifests/01-, 02-
+make verify-manifests  # the CI sync check: fails if those drift from the Go source
 make generate   # DeepCopy methods (controller-gen object)
 make lint       # golangci-lint, custom-built with the logcheck plugin
 make test       # envtest: a real kube-apiserver and etcd, 1.36.x

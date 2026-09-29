@@ -43,6 +43,17 @@ help: ## Display this help.
 
 ##@ Development
 
+# The CRD and the Role are not kept in a kustomize tree here: they live
+# flattened under deploy/k3s/manifests/, and hack/manifests.sh splices
+# controller-gen's output into them below a marker line (docs/PLAN.md D31).
+.PHONY: manifests
+manifests: controller-gen ## Regenerate the CRD and Role in deploy/k3s/manifests/ from the Go source.
+	CONTROLLER_GEN="$(CONTROLLER_GEN)" hack/manifests.sh write
+
+.PHONY: verify-manifests
+verify-manifests: controller-gen ## Fail if the flattened CRD or Role differ from controller-gen's output.
+	CONTROLLER_GEN="$(CONTROLLER_GEN)" hack/manifests.sh verify
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object paths="./..."
@@ -56,7 +67,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test ./... -coverprofile cover.out
 
 .PHONY: lint
