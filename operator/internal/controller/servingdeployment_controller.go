@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -27,11 +29,15 @@ import (
 
 // Event reasons the reconciler records on a ServingDeployment.
 const (
-	eventReasonAdopted        = "Adopted"
-	eventReasonCreated        = "Created"
-	eventReasonImageUpdated   = "ImageUpdated"
-	eventReasonAdoptionFailed = "AdoptionFailed"
-	eventReasonShadowScaled   = "ShadowScaled"
+	eventReasonAdopted          = "Adopted"
+	eventReasonCreated          = "Created"
+	eventReasonImageUpdated     = "ImageUpdated"
+	eventReasonAdoptionFailed   = "AdoptionFailed"
+	eventReasonShadowScaled     = "ShadowScaled"
+	eventReasonCanaryCreated    = "CanaryCreated"
+	eventReasonCanaryUpdated    = "CanaryUpdated"
+	eventReasonCanaryScaledDown = "CanaryScaledDown"
+	eventReasonWindowExpired    = "WindowExpired"
 )
 
 // ServingDeploymentReconciler reconciles a ServingDeployment object
@@ -41,6 +47,18 @@ type ServingDeploymentReconciler struct {
 	// Recorder must write core/v1 Events: those are what the operator's Role
 	// grants create and patch on (docs/PLAN.md D33).
 	Recorder record.EventRecorder
+	// Now is the reconciler's clock, read once per reconcile; nil means
+	// time.Now. Tests set it, so the 45-minute window TTL is exercised
+	// without waiting on it.
+	Now func() time.Time
+}
+
+// now reads the reconciler's clock.
+func (r *ServingDeploymentReconciler) now() time.Time {
+	if r.Now == nil {
+		return time.Now()
+	}
+	return r.Now()
 }
 
 // The operator's whole grant: one namespaced Role in mlobs, no ClusterRole and
@@ -63,12 +81,16 @@ type ServingDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=mlobs,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives deployment/api, the stable api Deployment in the
-// ServingDeployment's namespace, to the image spec.imageTag names, and the
-// shadow scorer to scale 0 while the spec requests a canary window and to 1
-// otherwise, then writes the status for the generation it acted on: the Ready,
-// CanaryActive and ShadowPaused conditions and status.observedGeneration. The
-// status is written on failure too, so a refused adoption shows on the
-// resource and not only in the operator's log (docs/PLAN.md D31, D32, D37).
+// ServingDeployment's namespace, to the image spec.imageTag names; decides the
+// canary window from the spec, the CanaryActive condition on record and the
+// clock; and takes the next step toward that window's state — the canary
+// Deployment, deployment/api-canary, up or down, and the shadow scorer at 0 or
+// 1, in the order reconcileWindow keeps. It then writes the status for the
+// generation it acted on: the Ready, CanaryActive and ShadowPaused conditions
+// and status.observedGeneration. The status is written on failure too, so a
+// refused adoption shows on the resource and not only in the operator's log.
+// While a window is open the request is requeued for its deadline. The spec is
+// never written (docs/PLAN.md D31, D32, D37 and their O2 rulings).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -84,12 +106,23 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	now := r.now()
 	dep, stableErr := r.reconcileStable(ctx, sd)
-	shadow, shadowErr := r.reconcileShadow(ctx, sd)
-	reconcileErr := joinErrors(stableErr, shadowErr)
+	w := decideWindow(sd.Spec, meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionCanaryActive), now)
+	if w.expiredNow {
+		logf.FromContext(ctx).Info("The canary window reached its TTL; closing it", "ttl", canaryWindowTTL)
+		r.Recorder.Eventf(sd, corev1.EventTypeNormal, eventReasonWindowExpired,
+			"the canary window reached its %s TTL; closing it and leaving the spec's canary fields to the "+
+				"close-window patch", canaryWindowTTL)
+	}
+	shadow, windowErr := r.reconcileWindow(ctx, sd, dep, &w)
+	if windowErr != nil {
+		w.progress = "blocked: " + windowErr.Error()
+	}
+	reconcileErr := joinErrors(stableErr, windowErr)
 
 	base := sd.DeepCopy()
-	setConditions(sd, dep, stableErr, shadow)
+	setConditions(sd, dep, stableErr, w, shadow, now)
 	sd.Status.ObservedGeneration = sd.Generation
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
@@ -97,7 +130,15 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
-	return ctrl.Result{}, reconcileErr
+	if reconcileErr != nil {
+		return ctrl.Result{}, reconcileErr
+	}
+	if w.open {
+		// The TTL is enforced by this requeue, not by an event: nothing in
+		// the cluster changes at the deadline.
+		return ctrl.Result{RequeueAfter: w.deadline.Sub(now)}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 // joinErrors is errors.Join, except that a single non-nil error is returned
@@ -113,20 +154,6 @@ func joinErrors(errs ...error) error {
 		return nonNil[0]
 	}
 	return errors.Join(nonNil...)
-}
-
-// reconcileShadow pauses the shadow scorer while the spec requests a canary
-// window and resumes it otherwise, and reports what it observed and wrote. A
-// hand scale is put back here too: the operator is the shadow's sole scale
-// writer from O2 (D37 addendum of O2).
-func (r *ServingDeploymentReconciler) reconcileShadow(
-	ctx context.Context, sd *servingv1alpha1.ServingDeployment,
-) (shadowState, error) {
-	sts, err := r.getShadow(ctx, sd.Namespace)
-	if err != nil {
-		return shadowState{}, err
-	}
-	return r.setShadowScale(ctx, sd, shadowState{sts: sts}, canaryRequested(sd.Spec))
 }
 
 // adoptionError reports a deployment/api the operator cannot take over: one

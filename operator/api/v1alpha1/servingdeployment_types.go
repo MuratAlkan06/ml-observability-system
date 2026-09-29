@@ -14,8 +14,12 @@ const (
 	// pair is the wait target of apply.sh's deploy sequence (D32; the D37
 	// addendum of O1).
 	ConditionReady = "Ready"
-	// ConditionCanaryActive is True while a canary window is open: a canary
-	// image tag is set and at least one canary replica is requested.
+	// ConditionCanaryActive is True while a canary window is open and
+	// unexpired: the spec names a canary image tag and at least one canary
+	// replica, and fewer than 45 minutes have passed since the condition last
+	// turned True. It turns True on the reconcile that starts opening the
+	// window by pausing the shadow scorer, and its lastTransitionTime is the
+	// window's TTL clock (D37 addendum of O2).
 	ConditionCanaryActive = "CanaryActive"
 	// ConditionShadowPaused is True while the shadow scorer's StatefulSet, as
 	// observed, is at zero replicas and reports no pods. It is computed from
@@ -37,9 +41,18 @@ const (
 	// ReasonReconcileFailed: Ready is False because reconciling the stable
 	// Deployment returned an error; the message carries it.
 	ReasonReconcileFailed = "ReconcileFailed"
-	// ReasonNoCanary: CanaryActive is False because the operator runs no
-	// canary Deployment. Until the canary window lands (O2), always.
+	// ReasonWindowOpen: CanaryActive is True; the window is open and its TTL
+	// has not run out.
+	ReasonWindowOpen = "WindowOpen"
+	// ReasonNoCanary: CanaryActive is False because the spec requests no
+	// canary window.
 	ReasonNoCanary = "NoCanary"
+	// ReasonWindowExpired: CanaryActive is False because the window's TTL ran
+	// out. The operator closed it in the cluster and left the spec alone; the
+	// condition stays latched here, and no window opens, until the spec passes
+	// through the closed shape the close-window patch leaves (D32
+	// clarification of O2).
+	ReasonWindowExpired = "WindowExpired"
 	// ReasonShadowRunning: ShadowPaused is False because the shadow scorer's
 	// StatefulSet requests replicas, still reports pods, or was scaled by the
 	// reconcile that wrote the condition and is not yet observed at its new

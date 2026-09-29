@@ -100,12 +100,18 @@ func createWindowServingDeployment(namespace string) *servingv1alpha1.ServingDep
 	return sd
 }
 
-// setCanarySpec rewrites sd's canary fields the way a host-side patch does.
+// setCanarySpec rewrites sd's canary fields the way a host-side `kubectl
+// patch --type merge` does: no resourceVersion precondition, so it never
+// conflicts with the operator's status writes. An empty tag is sent as null,
+// which with replicas 0 is exactly apply.sh's close-window patch (D32).
 func setCanarySpec(sd *servingv1alpha1.ServingDeployment, tag string, replicas int32) {
-	latest := getServingDeployment(sd)
-	latest.Spec.CanaryImageTag = tag
-	latest.Spec.CanaryReplicas = replicas
-	Expect(k8sClient.Update(ctx, latest)).To(Succeed())
+	tagJSON := "null"
+	if tag != "" {
+		tagJSON = `"` + tag + `"`
+	}
+	body := fmt.Sprintf(`{"spec":{"canaryImageTag":%s,"canaryReplicas":%d}}`, tagJSON, replicas)
+	target := &servingv1alpha1.ServingDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: sd.Namespace, Name: sd.Name}}
+	Expect(k8sClient.Patch(ctx, target, client.RawPatch(types.MergePatchType, []byte(body)))).To(Succeed())
 }
 
 // canaryImageTag is the tag a test window's canary runs; any 40-hex value
