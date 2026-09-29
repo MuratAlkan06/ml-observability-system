@@ -1,0 +1,118 @@
+name: Operator
+
+# Phase 3 O0: lint, envtest and the manifest sync check for the Go operator
+# module under operator/ (docs/PLAN.md D31, D35). A workflow of its own rather
+# than three more jobs in ci.yml, because GitHub applies `paths:` per workflow:
+# none of these jobs has anything to say about a change that touches neither
+# the module nor the manifests it generates, and a workflow-level filter is the
+# only filter that skips them outright. The operator's end-to-end run on k3d
+# belongs to K3sSmoke in ci.yml, not here (D35).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "operator/**"
+      - "deploy/k3s/manifests/**"
+      - ".github/workflows/operator.yml"
+  pull_request:
+    paths:
+      - "operator/**"
+      - "deploy/k3s/manifests/**"
+      - ".github/workflows/operator.yml"
+  workflow_dispatch:
+
+# No job here holds a credential of any kind — nothing is pushed and nothing
+# touches AWS — so read access to the repository is the whole grant, and the
+# actions are tag-pinned like the other credential-less jobs (see K3sSmoke).
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: operator
+
+jobs:
+  GoLint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # go-version-file honours go.mod's `toolchain` line over its `go` line,
+      # so CI builds with exactly the toolchain the module pins.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      # The action finds operator/.custom-gcl.yml and builds the custom binary
+      # with the logcheck plugin itself. `version` must equal the one pinned in
+      # that file, or the action warns and the two can drift apart.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: operator
+
+  GoTest:
+    name: Go test (envtest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: Go toolchain
+        run: go version
+
+      - name: Build
+        run: go build ./...
+
+      # setup-envtest is installed at the controller-runtime version go.mod
+      # resolves (v0.24.x), through the Makefile's own pin, and the assets are
+      # the 1.36.x band the host's k3s v1.36.4 sits in (D19, D35). The version
+      # the kube-apiserver binary reports is asserted, not assumed: a wildcard
+      # that resolved outside the band would otherwise pass unnoticed.
+      - name: Install envtest assets (1.36.x)
+        run: |
+          make envtest
+          assets="$(bin/setup-envtest use 1.36.x --bin-dir bin -p path)"
+          assets="$(cd "$assets" && pwd)"
+          version="$("${assets}/kube-apiserver" --version)"
+          case "$version" in
+            "Kubernetes v1.36."*) ;;
+            *)
+              echo "::error::envtest kube-apiserver reports '${version}', expected v1.36.x (D35)"
+              exit 1
+              ;;
+          esac
+          echo "KUBEBUILDER_ASSETS=${assets}" >> "$GITHUB_ENV"
+          echo "ok: envtest assets ${assets} (${version})"
+
+      - name: Test
+        run: go test ./... -count=1
+
+  OperatorManifestSync:
+    name: Operator manifest sync
+    # The CRD and the Role under deploy/k3s/manifests/ are controller-gen output
+    # spliced below a marker line; this regenerates them into a scratch
+    # directory and fails on any diff (D31). It is the check that stands in for
+    # the kustomize tree the scaffold came with.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: Verify flattened manifests
+        run: make verify-manifests
