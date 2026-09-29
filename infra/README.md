@@ -607,9 +607,11 @@ while the P2c pull request is still open.
    configuration and the account agree, and the plan role can read everything
    `deploy.tf` created. Then merge.
 
-The live evidence that closes P2c — a canary leak rehearsal before the channel
-first reads the real `.env`, a real deploy, a rollback, a no-op plan on `main`
-— is set out in D30.
+The live evidence that closes P2c — a real deploy, a rollback, a no-op plan on
+`main` — is set out in D30. D30 also required a canary leak rehearsal before
+the channel first read the real `.env`; that rehearsal was not performed as
+specified, and substitute evidence was used instead — see the D30 erratum in
+[`docs/PLAN.md`](../docs/PLAN.md).
 
 ## Cost
 

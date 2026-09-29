@@ -788,6 +788,7 @@ retention jobs, Alembic.
 > had named in advance as the red flag. Fixed by `terraform_wrapper: false` on the plan job's
 > setup step in the same PR. Owner-local `-detailed-exitcode` runs never used the wrapper and
 > were unaffected; the P1 bootstrap and P2b evidence relied on local runs and stand.
+
 > **Erratum (2026-09-28, P2c):** D30's canary leak rehearsal did not take place. No run sent the
 > SSM channel an env file of canary values before it read the real one. Deploy run 36357281534
 > (2026-09-27) was both the channel's first read of the host `.env` and the first end-to-end test
