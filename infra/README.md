@@ -586,9 +586,12 @@ while the P2c pull request is still open.
 
    3.3.4851.0 is the minimum: it fixes CVE-2026-89049 (AWS security bulletin
    2026-107), a server-side request forgery in the agent's port forwarding
-   that can reach the instance role's credentials. An older agent is updated
-   with `sudo snap refresh amazon-ssm-agent`. Record the installed version
-   with the D30 evidence.
+   that can reach the instance role's credentials. As of this writing the snap's
+   `latest/stable` channel (3.3.4793.0) is BELOW that floor, so a plain
+   `sudo snap refresh amazon-ssm-agent` does not reach it — use
+   `sudo snap refresh amazon-ssm-agent --channel=latest/candidate` (3.3.5226.0
+   at the P2c close) and revert to `latest/stable` once it reaches the floor.
+   Record the installed version with the D30 evidence.
 
 4. **Check the host has what the document calls.** The document runs as root
    with `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin`,
