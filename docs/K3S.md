@@ -46,12 +46,12 @@ runtime underneath.
 | | Compose (to 2026-09-27) | k3s `v1.36.4+k3s1` (from 2026-09-27) |
 |---|---|---|
 | Images | built on the host (`up --build`) | `api`, `consumer`, `drift` from GHCR, built by CI; `shadow-scorer` built off-host and imported into containerd (D18) |
-| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward` |
+| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward`. From Phase 3 O2 the api's `:8000` is a NodePort Service on the exact 8000-8000 range instead (D34 and the D19 erratum); on the host from O4 |
 | Scrape config | `prometheus/prometheus.yml` bind-mounted | the same file as a ConfigMap, mounted verbatim and hash-annotated (D21) |
 | Postgres data | anonymous volume | `local-path` PVC, 5Gi; everything else ephemeral (D20) |
 | Secrets | `.env` interpolated by Compose | the same `.env` rendered into one Secret (D23) |
 | After an instance start | per-service restart policy; two services had none | k3s systemd unit; all nine workloads controller-managed |
-| Shadow A/B switch | `docker compose stop` / `start shadow-scorer` | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` / `1` — exercised live on 2026-09-27 |
+| Shadow A/B switch | `docker compose stop` / `start shadow-scorer` | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` / `1` — exercised live on 2026-09-27; retired in Phase 3 O2, when the operator became the sole writer of the shadow scorer's scale: it pauses the shadow only inside a canary window and puts a hand scale back (D37) |
 
 The demo history crossed the cutover by `pg_dump --clean --if-exists` and
 restore: predictions 8386 → 8386, shadow_predictions 3628 → 3628, drift_runs

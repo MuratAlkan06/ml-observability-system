@@ -25,11 +25,16 @@ deploy/k3s/
 
 Nine workloads in namespace `mlobs`: `api`, `grafana`, `postgres`, `redis`,
 `prometheus`, `drift`, `drift-shadow` (Deployments) and `consumer`,
-`shadow-scorer` (StatefulSets). Eight ClusterIP Services, named exactly as the
-Compose DNS names so `prometheus/prometheus.yml` is mounted unchanged (D21).
-One PVC, for Postgres (D20). No Ingress and no LoadBalancer: `api` and `grafana`
-publish host ports 8000 and 3000, and traefik and servicelb are disabled on the
-host (D19).
+`shadow-scorer` (StatefulSets). Beside them runs the `ServingDeployment`
+operator (Phase 3, [`operator/`](../../operator/README.md)), which since O2
+owns `deployment/api`, created or adopted from the `ServingDeployment` in
+`manifests/40-servingdeployment.yaml` rather than rendered from a manifest, and
+`deployment/api-canary`, which runs only inside a canary window. Eight Services
+named exactly as the Compose DNS names so `prometheus/prometheus.yml` is mounted
+unchanged (D21), plus `api-canary`, the canary's own scrape address. One PVC,
+for Postgres (D20). No Ingress and no LoadBalancer: `grafana` publishes host
+port 3000, the api is a NodePort Service on 8000 (D34), and traefik and
+servicelb are disabled on the host (D19).
 
 Nothing under this directory is a copy of anything. `apply.sh` builds every
 ConfigMap from the canonical files — `prometheus/prometheus.yml`,
@@ -158,15 +163,14 @@ Everything below assumes `-n mlobs`.
 |---|---|
 | `docker compose up -d` | `IMAGE_TAG=<sha> deploy/k3s/apply.sh` |
 | `docker compose ps` | `kubectl -n mlobs get pods` |
-| `docker compose stop shadow-scorer` (the latency A/B "off" switch) | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` |
-| `docker compose start shadow-scorer` | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1` |
+| `docker compose stop` / `start shadow-scorer` (the latency A/B switch) | none since Phase 3 O2. The operator is the sole writer of the shadow scorer's scale: it holds it at 1, pauses it only inside a canary window, and puts a hand `kubectl scale` back on its next reconcile (D37). The switch this row used to name, `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` / `1`, is retired. |
 | `docker compose logs -f api` | `kubectl -n mlobs logs -f deployment/api` |
 | `docker compose logs -f consumer` | `kubectl -n mlobs logs -f statefulset/consumer` |
 | `docker compose restart drift` | `kubectl -n mlobs rollout restart deployment/drift` |
 | `docker compose exec -T postgres psql -U mlobs -d mlobs` | `kubectl -n mlobs exec -it deployment/postgres -- psql -U mlobs -d mlobs` |
 | `127.0.0.1:9090` (Prometheus loopback publish) | `kubectl -n mlobs port-forward svc/prometheus 9090:9090` |
 | `127.0.0.1:6379` (Redis loopback publish) | `kubectl -n mlobs port-forward svc/redis 6379:6379` |
-| `localhost:8000` / `localhost:3000` | unchanged — both are host ports |
+| `localhost:8000` / `localhost:3000` | unchanged — `:3000` is Grafana's host port, and `:8000` the api's NodePort (D34) |
 | `docker compose up -d --build` | rebuild, push or import, then re-run `apply.sh` with the new `IMAGE_TAG` |
 | `docker compose down` | `kubectl delete namespace mlobs` (also deletes the PVC) |
 
@@ -197,8 +201,10 @@ keeping, take a `pg_dump` first (D25).
 
 ## Rehearsing locally with k3d
 
-This mirrors the `K3sSmoke` CI job step for step; if it passes here it should
-pass there. Requires Docker, `kubectl` and roughly 20GB of free disk — the two
+This mirrors the `K3sSmoke` CI job step for step, its canary window included
+(below the recipe); if it passes here it should pass there. The operator's own
+end-to-end check, `operator/hack/e2e.sh`, runs against a local cluster too
+(`operator/README.md`). Requires Docker, `kubectl` and roughly 20GB of free disk — the two
 torch images are large and each is stored twice, once by the docker daemon and
 again in the cluster's containerd.
 
@@ -253,6 +259,24 @@ To rehearse a redeploy the way CI does, retag the five images under a second
 kubectl -n mlobs get deployment prometheus \
   -o jsonpath="{.spec.template.metadata.annotations['mlobs/config-hash']}"
 ```
+
+`K3sSmoke` also takes the stack through a canary window, and so can a local
+cluster. A window is opened the way a human opens one on the host, with a
+merge patch setting both canary fields (D32); here the canary is the api
+image under a second 40-character tag, as in CI:
+
+```bash
+CANARY_TAG="$(printf '%s' "${TAG}-canary" | shasum | cut -c1-40)"
+docker tag "mlobs-api:${TAG}" "mlobs-api:${CANARY_TAG}"
+k3d image import -c mlobs-dev "mlobs-api:${CANARY_TAG}"
+kubectl -n mlobs patch servingdeployment/api --type merge \
+  -p "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1}}"
+STATE_TIMEOUT_SECONDS=300 deploy/k3s/smoke.sh   # ends "ok: smoke passed (window state)"
+```
+
+Any `apply.sh` run then closes the window on its fixed line, and its own
+`smoke.sh` ends in the steady state. The window's 45-minute TTL applies here
+too.
 
 ## Migration record and rehearsal results (2026-09-27)
 
@@ -314,8 +338,9 @@ Verdict: **t3.medium retained.** No instance-type change, so
 
 **D27 re-measurement.** `hey` 0.1.5 on-instance, the README methodology
 unchanged: 15 s warm-up then 120 s measured, `-c 1 -q 5`, fixed payload. The
-A/B switch is the scale idiom from the table above, exercised live; the shadow
-scorer was restored to `replicas=1` afterwards.
+A/B switch was `kubectl -n mlobs scale statefulset/shadow-scorer`, exercised
+live (the idiom retired in Phase 3 O2, when the operator took over the shadow
+scorer's scale); the shadow scorer was restored to `replicas=1` afterwards.
 
 | Window | req/s | p50 | p95 | p99 |
 |---|---|---|---|---|

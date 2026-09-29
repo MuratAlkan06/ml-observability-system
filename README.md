@@ -193,7 +193,8 @@ hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localho
 Re-measured **on the same EC2 t3.medium** after the cutover to k3s `v1.36.4+k3s1`, with the v1.1
 methodology unchanged: [`hey`](https://github.com/rakyll/hey) `0.1.5` on-instance, 15 s warm-up
 then a **120-second** measured window, `-c 1 -q 5`, fixed payload — shadow scorer on vs. off via
-`kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1|0`:
+the manual switch of the time, `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1|0`
+(retired in Phase 3 O2; see below):
 
 | Shadow | Throughput | p50 | p95 | p99 |
 | --- | --- | --- | --- | --- |
@@ -205,8 +206,13 @@ p95 that computes to +10.1% (111.2 vs 101.0 ms), just outside the ≤10% criteri
 run above met at −1.0%; it comes from one matched pair of 120 s windows and is published as
 measured, not re-certified. The compose-era tables stay as measured (D27, [docs/K3S.md](docs/K3S.md)).
 
-Reproduce: the v1.1 block above, swapping `docker compose start` / `stop shadow-scorer` for
-`kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1` / `--replicas=0`.
+Reproduce: this run used the v1.1 block above with `docker compose start` / `stop shadow-scorer`
+swapped for `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1` / `--replicas=0`. That
+switch is retired since Phase 3 O2: the `ServingDeployment` operator is the sole writer of the
+shadow scorer's scale, holds it at 1 and pauses it only inside a canary window, and puts a hand
+scale back on its next reconcile (D37). A window runs a second api pod beside the stable, so it
+does not isolate the shadow's cost either; a k3s re-run of this A/B needs a method of its own,
+recorded when one is taken. The Compose block above is unaffected.
 
 ## How drift detection works
 
@@ -305,6 +311,14 @@ two had no restart policy and stayed down after a start. The demo history crosse
 and when to revisit are in [docs/K3S.md](docs/K3S.md); the cutover record and the memory
 rehearsal that kept the t3.medium are in
 [deploy/k3s/README.md](deploy/k3s/README.md#migration-record-and-rehearsal-results-2026-09-27).
+
+Phase 3 puts the api under a `ServingDeployment` operator ([`operator/`](operator/README.md)). In
+the repository, since O2, `apply.sh` deploys the operator and hands `deployment/api` to it, a
+human-opened canary window runs a canary pod beside the stable behind the same `:8000` (a
+NodePort Service on k3s's exact 8000-8000 node-port range), and `smoke.sh` checks whichever of the
+two states the stack is in. The live host moves over in O4 (issue #68), inside a gated window
+that also gives its k3s the node-port flags. Until then a pipeline deploy to the host stops at
+`apply.sh`'s preflight, before it changes anything, and the running stack stays as it is.
 
 That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
