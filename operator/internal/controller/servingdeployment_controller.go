@@ -4,29 +4,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	servingv1alpha1 "github.com/MuratAlkan06/ml-observability-system/operator/api/v1alpha1"
 )
 
 // Event reasons the reconciler records on a ServingDeployment.
 const (
-	eventReasonAdopted        = "Adopted"
-	eventReasonCreated        = "Created"
-	eventReasonImageUpdated   = "ImageUpdated"
-	eventReasonAdoptionFailed = "AdoptionFailed"
+	eventReasonAdopted          = "Adopted"
+	eventReasonCreated          = "Created"
+	eventReasonImageUpdated     = "ImageUpdated"
+	eventReasonAdoptionFailed   = "AdoptionFailed"
+	eventReasonShadowScaled     = "ShadowScaled"
+	eventReasonCanaryCreated    = "CanaryCreated"
+	eventReasonCanaryUpdated    = "CanaryUpdated"
+	eventReasonCanaryScaledDown = "CanaryScaledDown"
+	eventReasonWindowExpired    = "WindowExpired"
 )
 
 // ServingDeploymentReconciler reconciles a ServingDeployment object
@@ -36,6 +47,32 @@ type ServingDeploymentReconciler struct {
 	// Recorder must write core/v1 Events: those are what the operator's Role
 	// grants create and patch on (docs/PLAN.md D33).
 	Recorder record.EventRecorder
+	// Now is the reconciler's clock, read once per reconcile; nil means
+	// time.Now. Tests set it, so the 45-minute window TTL is exercised
+	// without waiting on it.
+	Now func() time.Time
+	// ImagePrefix is the registry and owner of the api images the operator
+	// writes, as <ImagePrefix>/mlobs-api:<tag>; empty means
+	// DefaultImagePrefix. The operator's --image-prefix sets it.
+	ImagePrefix string
+}
+
+// now reads the reconciler's clock.
+func (r *ServingDeploymentReconciler) now() time.Time {
+	if r.Now == nil {
+		return time.Now()
+	}
+	return r.Now()
+}
+
+// apiImage renders tag as an api image reference under the reconciler's
+// prefix.
+func (r *ServingDeploymentReconciler) apiImage(tag string) string {
+	prefix := r.ImagePrefix
+	if prefix == "" {
+		prefix = DefaultImagePrefix
+	}
+	return apiImage(prefix, tag)
 }
 
 // The operator's whole grant: one namespaced Role in mlobs, no ClusterRole and
@@ -46,16 +83,28 @@ type ServingDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=mlobs,resources=servingdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=serving.mlobs.dev,namespace=mlobs,resources=servingdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,namespace=mlobs,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//
+// The shadow pause (D33 addendum of O2): read on the namespace's StatefulSets,
+// because RBAC cannot name-scope list and watch, and one write — patch on the
+// scale subresource of shadow-scorer alone. No update, no get on the scale,
+// no write on any StatefulSet itself: the operator reads the scale from the
+// StatefulSet and can change nothing but that one object's replica count.
+// +kubebuilder:rbac:groups=apps,namespace=mlobs,resources=statefulsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,namespace=mlobs,resources=statefulsets/scale,resourceNames=shadow-scorer,verbs=patch
 // +kubebuilder:rbac:groups="",namespace=mlobs,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=mlobs,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives deployment/api, the stable api Deployment in the
-// ServingDeployment's namespace, to the image spec.imageTag names, then writes
-// the status for the generation it acted on: the Ready, CanaryActive and
-// ShadowPaused conditions and status.observedGeneration. The status is written
-// on failure too, so a refused adoption shows on the resource and not only in
-// the operator's log. It reconciles the stable path only; the canary window
-// lands in O2 (docs/PLAN.md D31, D32, D37).
+// ServingDeployment's namespace, to the image spec.imageTag names; decides the
+// canary window from the spec, the CanaryActive condition on record and the
+// clock; and takes the next step toward that window's state — the canary
+// Deployment, deployment/api-canary, up or down, and the shadow scorer at 0 or
+// 1, in the order reconcileWindow keeps. It then writes the status for the
+// generation it acted on: the Ready, CanaryActive and ShadowPaused conditions
+// and status.observedGeneration. The status is written on failure too, so a
+// refused adoption shows on the resource and not only in the operator's log.
+// While a window is open the request is requeued for its deadline. The spec is
+// never written (docs/PLAN.md D31, D32, D37 and their O2 rulings).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -71,10 +120,23 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	dep, reconcileErr := r.reconcileStable(ctx, sd)
+	now := r.now()
+	dep, stableErr := r.reconcileStable(ctx, sd)
+	w := decideWindow(sd.Spec, meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionCanaryActive), now)
+	if w.expiredNow {
+		logf.FromContext(ctx).Info("The canary window reached its TTL; closing it", "ttl", canaryWindowTTL)
+		r.Recorder.Eventf(sd, corev1.EventTypeNormal, eventReasonWindowExpired,
+			"the canary window reached its %s TTL; closing it and leaving the spec's canary fields to the "+
+				"close-window patch", canaryWindowTTL)
+	}
+	shadow, windowErr := r.reconcileWindow(ctx, sd, dep, &w)
+	if windowErr != nil {
+		w.progress = "blocked: " + windowErr.Error()
+	}
+	reconcileErr := joinErrors(stableErr, windowErr)
 
 	base := sd.DeepCopy()
-	setConditions(sd, dep, reconcileErr)
+	setConditions(sd, dep, stableErr, r.apiImage(sd.Spec.ImageTag), w, shadow, now)
 	sd.Status.ObservedGeneration = sd.Generation
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
@@ -82,7 +144,30 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
-	return ctrl.Result{}, reconcileErr
+	if reconcileErr != nil {
+		return ctrl.Result{}, reconcileErr
+	}
+	if w.open {
+		// The TTL is enforced by this requeue, not by an event: nothing in
+		// the cluster changes at the deadline.
+		return ctrl.Result{RequeueAfter: w.deadline.Sub(now)}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// joinErrors is errors.Join, except that a single non-nil error is returned
+// as itself rather than wrapped, so its type survives for callers and tests.
+func joinErrors(errs ...error) error {
+	var nonNil []error
+	for _, err := range errs {
+		if err != nil {
+			nonNil = append(nonNil, err)
+		}
+	}
+	if len(nonNil) == 1 {
+		return nonNil[0]
+	}
+	return errors.Join(nonNil...)
 }
 
 // adoptionError reports a deployment/api the operator cannot take over: one
@@ -94,7 +179,7 @@ func (e *adoptionError) Error() string {
 }
 
 // reconcileStable makes deployment/api exist in the ServingDeployment's
-// namespace, be controlled by it, and run stableImage(spec.imageTag). It
+// namespace, be controlled by it, and run r.apiImage(spec.imageTag). It
 // returns the Deployment as last written or read.
 //
 // An existing deployment/api is adopted in place: the ServingDeployment's
@@ -105,7 +190,7 @@ func (e *adoptionError) Error() string {
 func (r *ServingDeploymentReconciler) reconcileStable(
 	ctx context.Context, sd *servingv1alpha1.ServingDeployment,
 ) (*appsv1.Deployment, error) {
-	image := stableImage(sd.Spec.ImageTag)
+	image := r.apiImage(sd.Spec.ImageTag)
 
 	dep := &appsv1.Deployment{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: sd.Namespace, Name: stableDeploymentName}, dep)
@@ -197,11 +282,37 @@ func apiContainer(dep *appsv1.Deployment) *corev1.Container {
 
 // SetupWithManager sets up the controller with the Manager. Owns() enqueues
 // the owning ServingDeployment on any change to deployment/api once it is
-// adopted, so a drifted image is put back without waiting for a resync.
+// adopted, so a drifted image is put back without waiting for a resync. The
+// shadow scorer is not owned — the operator holds no write on it beyond its
+// scale — so a change to it enqueues every ServingDeployment in its namespace
+// instead: a hand scale is put back, and a pause is seen through to its pods.
 func (r *ServingDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&servingv1alpha1.ServingDeployment{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(&appsv1.StatefulSet{},
+			handler.EnqueueRequestsFromMapFunc(r.servingDeploymentsInNamespace),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == shadowStatefulSetName
+			}))).
 		Named("servingdeployment").
 		Complete(r)
+}
+
+// servingDeploymentsInNamespace maps an object to a request for every
+// ServingDeployment in its namespace.
+func (r *ServingDeploymentReconciler) servingDeploymentsInNamespace(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	list := &servingv1alpha1.ServingDeploymentList{}
+	if err := r.List(ctx, list, client.InNamespace(obj.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "Listing ServingDeployments to enqueue for a shadow scorer change",
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return requests
 }

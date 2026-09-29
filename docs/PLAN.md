@@ -936,3 +936,82 @@ retention jobs, Alembic.
 > iff the reconciled stable Deployment is Available and status.observedGeneration equals
 > metadata.generation — supplying the wait target D32's deploy sequence names. Ruled at O1 start
 > (issue #65); no frozen text edited.
+
+> **D32 clarification (2026-09-29, O2):** the spec's writers stay exactly the frozen set — the
+> pipeline renders `spec.imageTag`, a human host-side patch opens a window, `apply.sh`'s constant
+> patch closes one — and the operator is never a third, expiry included. When the 45-minute TTL
+> lapses (D37 addendum below) the operator restores the cluster to steady and latches the
+> condition, leaving the stale canary fields in the spec: an expired-but-unclosed spec is a legal,
+> steady-equivalent state, because `smoke.sh` judges from cluster state and conditions, never from
+> the canary fields. The spec is normalized by the same constant close-window patch — the next
+> pipeline deploy prints its fixed line, or a human runs the patch by hand. Until then the latch
+> holds: editing the canary fields of an expired window does not reopen it; a new window requires
+> the spec to pass through the closed shape first, which is what makes the TTL unevadable. Ruled
+> at O2 start (issue #66); no frozen text edited.
+
+> **D33 addendum (2026-09-29, O2):** D37's pause is the operator's to enforce, so the Role gains
+> the minimum that makes it possible: get, list and watch on `apps/statefulsets` in mlobs, and
+> patch on the `statefulsets/scale` subresource restricted by `resourceNames` to `shadow-scorer`.
+> The shape is stated honestly: RBAC cannot name-scope list and watch, so the read grant covers
+> the namespace's two StatefulSets, while the only write the operator holds on a StatefulSet is
+> the replica count of the one named object, through the scale subresource only — and the
+> controller writes only the literal values 0 and 1, asserted in test. It cannot touch the
+> consumer, and it cannot touch the shadow scorer's template or image. The grant is expressed as
+> `+kubebuilder:rbac` markers (controller-gen emits `resourceNames`) and lands in the generated
+> half of `02-operator-rbac.yaml` under the existing sync check, which now also asserts the file
+> contains no ClusterRole. D33's boundary is unchanged: one namespaced Role, no ClusterRole, no
+> webhooks, no CRD write. Ruled at O2 start (issue #66); no frozen text edited.
+
+> **D35 deviation (2026-09-29, O2):** the stub-image ruling meets a harder assertion than it
+> anticipated. State-aware smoke in the window state proves the canary serves: `/predict` through
+> the shared Service reaches the canary on roughly half the connections, and the `api_canary`
+> target must be up — `pause` or `http-echo` can do neither. In K3sSmoke the CR's canary therefore
+> names the api image the job already builds, under a second 40-hex tag on the same local build:
+> no second torch build and no new pull, which is what the stub ruling actually protected. The
+> stub stays exactly where its reasoning holds — the operator-only k3d e2e (leader election and
+> reconcile mechanics, no smoke). O2's acceptance parenthetical "(k3d, stub image)" is read with
+> this deviation. Ruled at O2 start (issue #66); no frozen text edited.
+
+> **D37 addendum (2026-09-29, O2):** "an open window pauses the shadow scorer" names the operator
+> as the actor — O1's committed condition reasons already read that way — and O2 gives it the
+> grant (D33 addendum) and the protocol. The ordering is D26's bar made mechanical: on open, the
+> shadow is scaled to 0 and observed gone before the canary comes up; on close or promote, the
+> canary is observed gone before the shadow returns to 1; the stable-first half of promotion is
+> already frozen in D32 and is not restated. `ShadowPaused` is computed from the StatefulSet
+> actually observed, never from intent. The 45-minute TTL is operator-enforced: the clock is
+> `CanaryActive`'s last False→True `lastTransitionTime` — persisted in status, so it survives an
+> operator restart — the reconciler schedules itself to the deadline with `RequeueAfter`, and a
+> mid-window `canaryImageTag` change does not restart it, because `CanaryActive` does not
+> transition. At the deadline the operator restores steady and sets `CanaryActive` False with
+> reason `WindowExpired`; the spec side is the D32 clarification above. With enforcement in place
+> the manual shadow switch (`kubectl scale statefulset/shadow-scorer`) is retired: the operator is
+> the sole writer of the shadow's scale from O2, a hand scale is reverted on the next reconcile,
+> and the switch's documentation (README, `docs/K3S.md`, `deploy/k3s/README.md`, the
+> 22-shadow-scorer.yaml comment) is updated in-slice; measured history stays as measured.
+> `22-shadow-scorer.yaml` drops its `replicas: 1` line so a pipeline apply stops resetting the
+> operator's scale, with the one-time caveat recorded: the first apply after the removal patches
+> the field to null and the API server defaults it to 1 — benign, because a fresh cluster is
+> steady and on a live one the same run's close-window patch and the operator's next reconcile
+> re-enforce the order. O3's runbook still carries the TTL arithmetic and the out-of-pipeline
+> steps, unchanged. Ruled at O2 start (issue #66); no frozen text edited.
+
+> **D19 erratum (2026-09-29, O2):** "host ports kept" narrows to Grafana. The api moves from
+> `hostPort` 8000 to the D34 NodePort Service on the exact 8000-8000 range; the port a stranger
+> types is unchanged and the security group is untouched. The operator's api template carries no
+> `hostPort`; the live host's adopted Deployment still does, and sheds it in a one-time
+> out-of-pipeline patch sequenced inside O4's gated window (issue #68) — adoption stays
+> ownerReference-and-image only. The api keeps `strategy: Recreate`: the reason was the hostPort
+> bind deadlock and is now D26's memory bar — a surged second torch pod does not fit beside the
+> shadow on the 4GB host.
+
+> **D34 erratum (2026-09-29, O2):** the exact 8000-8000 range survives contact with k3s v1.36.4
+> only without the bundled network-policy controller: it refuses a single-port range and k3s
+> crash-loops. The ruled range stays exact; the controller is disabled instead —
+> `--disable-network-policy` joins the range flag as an atomic pair everywhere the range is set.
+> The in-repo pin sites gain the pair at O2; the third site, the live host's
+> `/etc/rancher/k3s/config.yaml`, gains it inside O4's gated window (issue #68) with the rest of
+> the cutover, deliberately deferred rather than missed. The cost is stated plainly: the stack
+> defines no NetworkPolicy today, so nothing enforced is lost, but any NetworkPolicy added later
+> would sit silently unenforced until the controller returns, and re-enabling it means revisiting
+> the range. Verified against a real v1.36.4 cluster at O2 (issue #66, PR #81); no frozen text
+> edited.

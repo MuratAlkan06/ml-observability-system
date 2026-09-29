@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -74,6 +75,20 @@ const (
 	leaderElectionNamespace = "mlobs"
 )
 
+// validateImagePrefix rejects an --image-prefix that cannot head an image
+// reference of the form <prefix>/mlobs-api:<tag>.
+func validateImagePrefix(prefix string) error {
+	switch {
+	case prefix == "":
+		return errors.New("--image-prefix must not be empty")
+	case strings.ContainsAny(prefix, " \t\n@"):
+		return fmt.Errorf("--image-prefix %q must not contain whitespace or a digest", prefix)
+	case strings.HasPrefix(prefix, "/") || strings.HasSuffix(prefix, "/"):
+		return fmt.Errorf("--image-prefix %q must not begin or end with a slash", prefix)
+	}
+	return nil
+}
+
 // setLeaderElection applies kubebuilder's default leader election to opts:
 // a coordination.k8s.io Lease, named leaderElectionID, in mlobs (D35).
 func setLeaderElection(opts *ctrl.Options, enabled bool) {
@@ -91,6 +106,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var imagePrefix string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -109,6 +125,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&imagePrefix, "image-prefix", controller.DefaultImagePrefix,
+		"Registry and owner of the api image the operator writes into deployment/api and deployment/api-canary, "+
+			"as <prefix>/mlobs-api:<tag>. deploy/k3s/apply.sh renders its IMAGE_PREFIX here.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -116,6 +135,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := validateImagePrefix(imagePrefix); err != nil {
+		setupLog.Error(err, "Invalid flag")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -229,7 +253,8 @@ func main() {
 		// GetEventRecorderFor writes core/v1 Events, which the Role grants
 		// (docs/PLAN.md D33). Its replacement, GetEventRecorder, writes
 		// events.k8s.io/v1 Events, which the Role does not grant.
-		Recorder: mgr.GetEventRecorderFor("servingdeployment-controller"), //nolint:staticcheck // SA1019, see above
+		Recorder:    mgr.GetEventRecorderFor("servingdeployment-controller"), //nolint:staticcheck // SA1019, see above
+		ImagePrefix: imagePrefix,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servingdeployment")
 		os.Exit(1)

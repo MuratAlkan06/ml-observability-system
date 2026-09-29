@@ -1,0 +1,111 @@
+# deployment/api as the operator creates it — the golden copy of
+# newStableDeployment (stable_deployment.go), decoded and compared field for
+# field by stable_deployment_test.go.
+#
+# Until Phase 3 O2 this Deployment lived in deploy/k3s/manifests/20-api.yaml,
+# which was the original and carried the reasoning below. O2 moved the api
+# Deployment under the operator (D31), so no manifest renders it any more; this
+# file keeps the reasoning and keeps the builder honest, and a change to either
+# is a change to both. The canary, deployment/api-canary, is this pod template
+# under the canary's labels.
+#
+# The image is the reference the builder writes for the test tag under
+# apply.sh's default prefix.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: mlobs
+  labels:
+    app: api
+spec:
+  replicas: 1
+  # Recreate is load-bearing, not tidiness. It was first the hostPort bind
+  # deadlock (D22); with the api on a NodePort Service since O2 it is D26's
+  # memory bar: a surged second torch pod does not fit beside the shadow scorer
+  # on the 4GB host (the D19 erratum of O2). Recreate stops the old pod first
+  # and accepts the few seconds of downtime the single-replica Compose stack
+  # had anyway — or, during a canary window, none, since the canary serves.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # Compose expressed this as `depends_on: redis: condition: service_healthy`.
+      # An initContainer is the k8s equivalent that actually blocks: without it
+      # the app starts, fails to reach Redis, and reports `degraded` until the
+      # next ping (D22).
+      initContainers:
+        - name: redis-ready
+          image: redis:7.4-alpine
+          command: ["sh", "-c", "until redis-cli -h redis ping; do sleep 2; done"]
+          resources:
+            requests:
+              memory: 16Mi
+      containers:
+        - name: api
+          image: ghcr.io/muratalkan06/mlobs-api:0123456789abcdef0123456789abcdef01234567
+          # IfNotPresent so a locally-built image imported into the node's
+          # containerd (`k3d image import`, or `ctr images import` on the host)
+          # is used as-is instead of being chased in a registry that does not
+          # have it.
+          imagePullPolicy: IfNotPresent
+          # No hostPort: the NodePort Service in 20-api.yaml publishes :8000
+          # (D34), which is what lets the stable and the canary share a node.
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+          # The three probes read /health differently on purpose, because
+          # /health has three outcomes (src/inference_service/app.py):
+          # 503 unavailable (model not loaded), 200 degraded (model loaded,
+          # Redis unreachable), 200 ok.
+          #
+          # startupProbe: the model load is the slow part. 18 x 10s = 180s of
+          # grace before the liveness probe is allowed to have an opinion; the
+          # Compose healthcheck bought the same time with start_period 60s plus
+          # 5 x 15s retries.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          # readinessProbe: 200 means take traffic, and that deliberately
+          # includes `degraded`. A pod whose Redis link is down still answers
+          # /predict correctly — the stream XADD is fire-and-forget — so
+          # removing it from the Service would turn a partial outage into a
+          # total one.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # livenessProbe: tcpSocket, not /health. Restarting the container is
+          # the wrong answer to `degraded` (Redis is the sick one) and to
+          # `unavailable` (a restart re-runs the same failing model load). Only
+          # a process that has stopped accepting connections is worth killing.
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # v1.1 D8, transcribed from Compose `mem_limit: 1536m`. The request is
+          # what the scheduler reserves; the limit is the OOM ceiling that keeps
+          # the torch container inside the t3.medium 4GB budget.
+          resources:
+            requests:
+              memory: 1Gi
+            limits:
+              memory: 1536Mi

@@ -1,10 +1,21 @@
 # Inference API — docs/PLAN.md §2.
 #
 # Compose source of truth: the `api` service in docker-compose.yml.
-# This is one of the two workloads a human reaches from outside the cluster, so
-# it keeps a hostPort instead of gaining an Ingress: k3s on this host runs with
-# traefik and servicelb disabled (D19), and the EC2 security group already
-# admits 8000 — the port a stranger following the README curls.
+#
+# Since Phase 3 O2 this file holds the api's two Services and no workload. The
+# api Deployment, deployment/api, is created or adopted and then owned by the
+# operator through the ServingDeployment in 40-servingdeployment.yaml, and so is
+# the canary Deployment, deployment/api-canary (D31, D32). The shape the
+# operator creates, with the reasoning behind each field that used to live
+# here, is operator/internal/controller/testdata/api-deployment.yaml; the
+# operator's tests pin its Deployment builder to that file.
+#
+# This is one of the two workloads a human reaches from outside the cluster.
+# It used to publish hostPort 8000; it is now published by a NodePort Service
+# on k3s's exact 8000-8000 node-port range (D34, and the D19 erratum of O2).
+# The port a stranger following the README curls is still 8000, the EC2
+# security group is untouched, and unlike a hostPort a Service can put the
+# stable and the canary behind one port on one node.
 ---
 apiVersion: v1
 kind: Service
@@ -14,107 +25,49 @@ metadata:
   labels:
     app: api
 spec:
-  type: ClusterIP
+  # k3s runs with --service-node-port-range=8000-8000, paired always with
+  # --disable-network-policy (D34 and its O2 erratum; the three pin sites are
+  # listed in docs/K3S.md), so 8000 is the only node port this Service could
+  # be given. apply.sh's preflight reads the range k3s records and dry-runs
+  # this object server-side before it changes anything else, and stops if the
+  # cluster's range does not admit it.
+  type: NodePort
+  # A NodePort connection is served by an api pod on the node it arrived at,
+  # with the client's source address kept. On a one-node cluster that is every
+  # api pod.
+  externalTrafficPolicy: Local
+  # app: api selects the stable's pods and the canary's alike, so an open
+  # canary window splits traffic by replica ratio, per connection: a
+  # keep-alive client stays on one pod (D34).
   selector:
     app: api
   ports:
     - name: http
       port: 8000
       targetPort: 8000
+      nodePort: 8000
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Service
 metadata:
-  name: api
+  name: api-canary
   namespace: mlobs
   labels:
     app: api
+    role: canary
 spec:
-  replicas: 1
-  # Recreate is load-bearing, not tidiness. With a hostPort a RollingUpdate
-  # deadlocks: the new pod cannot bind :8000 while the old pod still holds it,
-  # and the old pod is not torn down until the new one is ready. Recreate stops
-  # the old pod first and accepts the few seconds of downtime that the
-  # single-replica Compose stack had anyway.
-  strategy:
-    type: Recreate
+  # The canary's own address, so Prometheus scrapes it apart from the stable:
+  # job api_canary in prometheus/prometheus.yml targets api-canary:8000 (D34,
+  # D21). It selects the canary's pods only. It is a static manifest rather
+  # than an object the operator creates, because the operator's Role holds no
+  # grant on Services (D33). Outside a window it has no endpoints and the
+  # api_canary target reads down, which is what smoke.sh expects of the
+  # steady state.
+  type: ClusterIP
   selector:
-    matchLabels:
-      app: api
-  template:
-    metadata:
-      labels:
-        app: api
-    spec:
-      # Compose expressed this as `depends_on: redis: condition: service_healthy`.
-      # An initContainer is the k8s equivalent that actually blocks: without it
-      # the app starts, fails to reach Redis, and reports `degraded` until the
-      # next ping (D22).
-      initContainers:
-        - name: redis-ready
-          image: redis:7.4-alpine
-          command: ["sh", "-c", "until redis-cli -h redis ping; do sleep 2; done"]
-          resources:
-            requests:
-              memory: 16Mi
-      containers:
-        - name: api
-          image: IMAGE_PREFIX/mlobs-api:IMAGE_TAG
-          # IfNotPresent so a locally-built image imported into the node's
-          # containerd (`k3d image import`, or `ctr images import` on the host)
-          # is used as-is instead of being chased in a registry that does not
-          # have it.
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 8000
-              hostPort: 8000
-          env:
-            - name: REDIS_URL
-              value: redis://redis:6379/0
-          # The three probes read /health differently on purpose, because
-          # /health has three outcomes (src/inference_service/app.py):
-          # 503 unavailable (model not loaded), 200 degraded (model loaded,
-          # Redis unreachable), 200 ok.
-          #
-          # startupProbe: the model load is the slow part. 18 x 10s = 180s of
-          # grace before the liveness probe is allowed to have an opinion; the
-          # Compose healthcheck bought the same time with start_period 60s plus
-          # 5 x 15s retries.
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 18
-          # readinessProbe: 200 means take traffic, and that deliberately
-          # includes `degraded`. A pod whose Redis link is down still answers
-          # /predict correctly — the stream XADD is fire-and-forget — so
-          # removing it from the Service would turn a partial outage into a
-          # total one.
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          # livenessProbe: tcpSocket, not /health. Restarting the container is
-          # the wrong answer to `degraded` (Redis is the sick one) and to
-          # `unavailable` (a restart re-runs the same failing model load). Only
-          # a process that has stopped accepting connections is worth killing.
-          livenessProbe:
-            tcpSocket:
-              port: 8000
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          # v1.1 D8, transcribed from Compose `mem_limit: 1536m`. The request is
-          # what the scheduler reserves; the limit is the OOM ceiling that keeps
-          # the torch container inside the t3.medium 4GB budget.
-          resources:
-            requests:
-              memory: 1Gi
-            limits:
-              memory: 1536Mi
+    app: api
+    role: canary
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

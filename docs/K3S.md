@@ -46,12 +46,12 @@ runtime underneath.
 | | Compose (to 2026-09-27) | k3s `v1.36.4+k3s1` (from 2026-09-27) |
 |---|---|---|
 | Images | built on the host (`up --build`) | `api`, `consumer`, `drift` from GHCR, built by CI; `shadow-scorer` built off-host and imported into containerd (D18) |
-| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward` |
+| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward`. From Phase 3 O2 the api's `:8000` is a NodePort Service on the exact 8000-8000 range instead (D34 and the D19 erratum); on the host from O4 |
 | Scrape config | `prometheus/prometheus.yml` bind-mounted | the same file as a ConfigMap, mounted verbatim and hash-annotated (D21) |
 | Postgres data | anonymous volume | `local-path` PVC, 5Gi; everything else ephemeral (D20) |
 | Secrets | `.env` interpolated by Compose | the same `.env` rendered into one Secret (D23) |
 | After an instance start | per-service restart policy; two services had none | k3s systemd unit; all nine workloads controller-managed |
-| Shadow A/B switch | `docker compose stop` / `start shadow-scorer` | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` / `1` — exercised live on 2026-09-27 |
+| Shadow A/B switch | `docker compose stop` / `start shadow-scorer` | `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=0` / `1` — exercised live on 2026-09-27; retired in Phase 3 O2, when the operator became the sole writer of the shadow scorer's scale: it pauses the shadow only inside a canary window and puts a hand scale back (D37) |
 
 The demo history crossed the cutover by `pg_dump --clean --if-exists` and
 restore: predictions 8386 → 8386, shadow_predictions 3628 → 3628, drift_runs
@@ -75,7 +75,16 @@ test.
 - **k3s version bumps.** The pin (D19) lives in three places — the host
   install, `K3S_IMAGE` in CI, and the local k3d recipe — and moves in one
   change, with `K3sSmoke` green on the new pin before the host moves. Each bump
-  is recorded as a `PLAN.md` erratum against D19.
+  is recorded as a `PLAN.md` erratum against D19. D34's node-port range,
+  `--service-node-port-range=8000-8000`, is pinned in the same three places
+  as an atomic pair with `--disable-network-policy` (the D34 erratum of O2:
+  k3s's network-policy controller refuses a single-port range and the server
+  crash-loops): the host's `/etc/rancher/k3s/config.yaml`
+  (`deploy/k3s/README.md`, "Host k3s flags"; the host gains the pair inside
+  O4's gated window, issue #68), the `K3sSmoke` k3d arguments, and the local
+  recipe. A bump re-verifies `127.0.0.1:8000`, which reaches the NodePort
+  through kube-proxy's iptables-mode `route_localnet`, and re-checks whether
+  the network-policy controller still refuses the exact range.
 - **A second environment.** D12, D17 and D23 all name it as their trigger: a
   module layer for Terraform, a templating layer for the manifests, a sealing
   tool for secrets. None of them earns its keep with one host.

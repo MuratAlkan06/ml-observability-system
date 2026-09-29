@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -13,13 +14,26 @@ import (
 )
 
 // setConditions writes Ready, CanaryActive and ShadowPaused on sd for
-// sd.Generation (docs/PLAN.md D37 and its O1 addendum). meta.SetStatusCondition
-// stamps lastTransitionTime when a condition's status changes and only then.
+// sd.Generation (docs/PLAN.md D37 and its addenda). meta.SetStatusCondition
+// moves a condition's lastTransitionTime when its status changes and only
+// then, to now truncated to the second — the precision the field is stored
+// at, so CanaryActive's stored value is exactly the clock the window's
+// deadline was counted from.
 //
-// dep is the stable Deployment as reconcileStable last wrote or read it, and
-// reconcileErr is what reconcileStable returned.
-func setConditions(sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error) {
-	ready := metav1.Condition{Type: servingv1alpha1.ConditionReady, ObservedGeneration: sd.Generation}
+// dep is the stable Deployment as reconcileStable last wrote or read it,
+// reconcileErr is what reconcileStable returned, image is the stable image it
+// drove dep to, w is the window decided for this reconcile, and shadow is what
+// reconcileWindow observed and wrote.
+func setConditions(
+	sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment, reconcileErr error, image string, w window,
+	shadow shadowState, now time.Time,
+) {
+	stamp := metav1.NewTime(now.Truncate(time.Second))
+	ready := metav1.Condition{
+		Type:               servingv1alpha1.ConditionReady,
+		ObservedGeneration: sd.Generation,
+		LastTransitionTime: stamp,
+	}
 	switch {
 	case reconcileErr != nil:
 		ready.Status = metav1.ConditionFalse
@@ -32,31 +46,35 @@ func setConditions(sd *servingv1alpha1.ServingDeployment, dep *appsv1.Deployment
 		ready.Status = metav1.ConditionTrue
 		ready.Reason = servingv1alpha1.ReasonStableAvailable
 		ready.Message = fmt.Sprintf("deployment/%s has rolled out %s and is Available",
-			stableDeploymentName, stableImage(sd.Spec.ImageTag))
+			stableDeploymentName, image)
 	default:
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = servingv1alpha1.ReasonAwaitingRollout
 		ready.Message = fmt.Sprintf("waiting for deployment/%s to roll out %s and become Available",
-			stableDeploymentName, stableImage(sd.Spec.ImageTag))
+			stableDeploymentName, image)
 	}
 	meta.SetStatusCondition(&sd.Status.Conditions, ready)
 
-	// No canary logic exists before O2, so neither of these can be True yet,
-	// whatever the spec's canary fields say; each states what the operator is
-	// actually doing.
+	canaryStatus := metav1.ConditionFalse
+	if w.open {
+		canaryStatus = metav1.ConditionTrue
+	}
 	meta.SetStatusCondition(&sd.Status.Conditions, metav1.Condition{
 		Type:               servingv1alpha1.ConditionCanaryActive,
-		Status:             metav1.ConditionFalse,
+		Status:             canaryStatus,
 		ObservedGeneration: sd.Generation,
-		Reason:             servingv1alpha1.ReasonNoCanary,
-		Message:            "the operator runs no canary Deployment",
+		LastTransitionTime: stamp,
+		Reason:             w.reason,
+		Message:            w.message(),
 	})
+	shadowStatus, shadowReason, shadowMessage := shadowPausedCondition(shadow)
 	meta.SetStatusCondition(&sd.Status.Conditions, metav1.Condition{
 		Type:               servingv1alpha1.ConditionShadowPaused,
-		Status:             metav1.ConditionFalse,
+		Status:             shadowStatus,
 		ObservedGeneration: sd.Generation,
-		Reason:             servingv1alpha1.ReasonShadowRunning,
-		Message:            "the operator has not paused the shadow scorer",
+		LastTransitionTime: stamp,
+		Reason:             shadowReason,
+		Message:            shadowMessage,
 	})
 }
 

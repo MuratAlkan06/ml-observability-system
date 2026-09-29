@@ -5,8 +5,9 @@ name: Operator
 # than three more jobs in ci.yml, because GitHub applies `paths:` per workflow:
 # none of these jobs has anything to say about a change that touches neither
 # the module nor the manifests it generates, and a workflow-level filter is the
-# only filter that skips them outright. The operator's end-to-end run on k3d
-# belongs to K3sSmoke in ci.yml, not here (D35).
+# only filter that skips them outright. The operator's end-to-end runs on k3d
+# belong to ci.yml, not here (D35): OperatorE2E and K3sSmoke, behind the
+# K3sPaths filter there.
 
 on:
   push:

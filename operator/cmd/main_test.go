@@ -66,6 +66,18 @@ func TestLeaderElectionAcquiresTheLeaseInMlobsUnderTheManagersIdentity(t *testin
 	g.Expect(lease.Spec.HolderIdentity).To(HaveValue(HavePrefix(hostname + "_")))
 }
 
+// --image-prefix heads the api image references the operator writes; apply.sh
+// renders its IMAGE_PREFIX into it, docker.io/library in the k3d rehearsals.
+func TestValidateImagePrefixAcceptsRegistryPrefixesAndRejectsTheRest(t *testing.T) {
+	g := NewWithT(t)
+	for _, ok := range []string{"ghcr.io/muratalkan06", "docker.io/library", "localhost:5000/mlobs"} {
+		g.Expect(validateImagePrefix(ok)).To(Succeed(), ok)
+	}
+	for _, bad := range []string{"", "ghcr.io/muratalkan06/", "/ghcr.io", "ghcr.io/a b", "ghcr.io/x@sha256"} {
+		g.Expect(validateImagePrefix(bad)).NotTo(Succeed(), bad)
+	}
+}
+
 // firstEnvtestBinaryDir finds the envtest assets `make setup-envtest` puts
 // under bin/k8s/, for runs outside make that leave KUBEBUILDER_ASSETS unset;
 // the controller suite's getFirstFoundEnvTestBinaryDir does the same.
