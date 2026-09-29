@@ -931,3 +931,8 @@ retention jobs, Alembic.
   a trim horizon of 10,000 s, about 2.8 h; the TTL stays at or below a third of
   50000 / observed rps and is recomputed before any higher-rate run; a shadow left paused past
   the horizon takes a permanent, silent gap.
+
+> **D37 addendum (2026-09-29, O1):** the `Ready` condition joins the operator-written set — True
+> iff the reconciled stable Deployment is Available and status.observedGeneration equals
+> metadata.generation — supplying the wait target D32's deploy sequence names. Ruled at O1 start
+> (issue #65); no frozen text edited.
