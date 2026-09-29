@@ -1,11 +1,12 @@
 # Namespace for the whole stack (Phase 2 P2a, D17).
 #
-# Every object in this directory names `namespace: mlobs` explicitly rather than
-# relying on the caller's current context: `kubectl apply -f manifests/` must
-# land in the same place no matter which namespace the operator happens to be
-# sitting in. apply.sh applies this file first, because the Secret and the
-# ConfigMaps it generates cannot be created into a namespace that is not there
-# yet.
+# Every namespaced object in this directory names `namespace: mlobs` explicitly
+# (the cluster-scoped CRD in 01-servingdeployment-crd.yaml has none to name)
+# rather than relying on the caller's current context: `kubectl apply -f
+# manifests/` must land in the same place no matter which namespace the
+# operator happens to be sitting in. apply.sh applies this file first, because
+# the Secret and the ConfigMaps it generates cannot be created into a namespace
+# that is not there yet.
 #
 # One namespace, not one per service: Prometheus resolves its targets by the
 # short DNS name (`api:8000`, `drift-shadow:9109`) exactly as it did under
