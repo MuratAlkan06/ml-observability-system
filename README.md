@@ -319,6 +319,8 @@ NodePort Service on k3s's exact 8000-8000 node-port range), and `smoke.sh` check
 two states the stack is in. The live host moves over in O4 (issue #68), inside a gated window
 that also gives its k3s the node-port flags. Until then a pipeline deploy to the host stops at
 `apply.sh`'s preflight, before it changes anything, and the running stack stays as it is.
+Opening and closing a window, the 45-minute TTL and its arithmetic, and undoing the operator (D36,
+rehearsed in CI by the `RollbackRehearsal` job) are in the [operator runbook](docs/RUNBOOK.md).
 
 That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
@@ -337,6 +339,35 @@ CI. Rolling back is the same command with the previous commit; both were
 demonstrated live at the v2.0.0 close (see
 [Deploy pipeline](infra/README.md#deploy-pipeline) and
 [Rolling back](infra/README.md#rolling-back)).
+
+### The canary split, stated plainly
+
+During a canary window the stable and the canary sit behind the same `:8000`. kube-proxy splits
+the traffic between them, not a traffic router, so the split has four properties (D34):
+
+- **It is set by the replica ratio.** The `api` Service selects both pods, and kube-proxy sends
+  each new connection to one ready pod at random. The canary's expected share is
+  `canaryReplicas / (1 + canaryReplicas)`: about half at the single canary replica the 4GB host
+  has room for. There is no percentage to set.
+- **It is per connection, not per request.** A client that keeps its connection open sends every
+  request on it to the pod that connection first reached. The repository's own simulator does
+  this: it holds one `httpx.Client`, so during a window a simulator run drives one pod, not both.
+  "About half" describes fresh connections, each an independent draw, with no guarantee over any
+  finite number of them. `smoke.sh` asserts only that at least one of twenty fresh connections
+  reached the canary.
+- **Rollback is human-triggered in v0.** Nothing watches the canary's health and pulls it. A bad
+  canary serves its share of connections until a human closes the window, a pipeline deploy
+  closes it, or the 45-minute TTL does. Metric-driven promote and rollback are v1
+  ([`docs/PHASE3.md`](docs/PHASE3.md)).
+- **The `api` metrics job mixes the two pods.** It scrapes `api:8000` through the same Service,
+  so during a window each scrape reaches the stable or the canary. Their samples interleave in one
+  series under one `instance` label, so counters step backwards between pods and `rate()` reads
+  that as a reset. `api_canary` is the canary alone, and v0 has no stable-only job. Dashboard
+  panels that select no job sum the mixed series with `api_canary`'s. That covers the
+  *mlobs — API & Inference* panels, and the primary series of the latency and prediction-rate
+  panels on *mlobs — Model Comparison*. During a window their rates over-count, their latency
+  quantiles blend the two pods, and none of them can be read as either pod. Read the canary from
+  `job="api_canary"`, and read `job="api"` as neither.
 
 ## Stack
 
