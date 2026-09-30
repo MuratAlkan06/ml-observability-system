@@ -332,10 +332,15 @@ jobs:
     # always run; only pull requests are filtered. operator/ joined the filter
     # in Phase 3 O0: the operator's end-to-end tests run on k3d, not on kind
     # (D35) — since O2 in OperatorE2E and, with the stack, in K3sSmoke, both
-    # gated here.
+    # gated here. prometheus/ joined in O3: apply.sh mounts
+    # prometheus/prometheus.yml as the scrape config and smoke.sh reads its job
+    # list, so a change there alone changes what both rehearsals deploy and
+    # assert. The second output, `rehearsal`, gates RollbackRehearsal on the
+    # same paths and on this file, where that job is defined.
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.filter.outputs.run }}
+      rehearsal: ${{ steps.filter.outputs.rehearsal }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -347,22 +352,40 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "ok: event ${EVENT_NAME} always runs K3sSmoke"
+            echo "rehearsal=true" >> "$GITHUB_OUTPUT"
+            echo "ok: event ${EVENT_NAME} always runs K3sSmoke and RollbackRehearsal"
             exit 0
           fi
           changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           # Same explicit-status discipline as DocsGate: a bare `! grep` would
           # read a grep error (status 2) as "nothing matched" and skip the job.
           status=0
-          printf '%s\n' "$changed" | grep -qE '^(deploy/k3s/|docker/|operator/)' || status=$?
+          printf '%s\n' "$changed" | grep -qE '^(deploy/k3s/|docker/|operator/|prometheus/)' || status=$?
           case "$status" in
             0)
               echo "run=true" >> "$GITHUB_OUTPUT"
-              echo "ok: deploy/k3s, docker or operator paths changed — K3sSmoke will run"
+              echo "ok: deploy/k3s, docker, operator or prometheus paths changed — K3sSmoke will run"
               ;;
             1)
               echo "run=false" >> "$GITHUB_OUTPUT"
-              echo "ok: no deploy/k3s, docker or operator changes — K3sSmoke skipped"
+              echo "ok: no deploy/k3s, docker, operator or prometheus changes — K3sSmoke skipped"
+              ;;
+            *)
+              echo "::error::grep exited with status $status"
+              exit 1
+              ;;
+          esac
+          status=0
+          printf '%s\n' "$changed" \
+            | grep -qE '^(deploy/k3s/|docker/|operator/|prometheus/|\.github/workflows/ci\.yml$)' || status=$?
+          case "$status" in
+            0)
+              echo "rehearsal=true" >> "$GITHUB_OUTPUT"
+              echo "ok: deploy/k3s, docker, operator, prometheus or ci.yml changed — RollbackRehearsal will run"
+              ;;
+            1)
+              echo "rehearsal=false" >> "$GITHUB_OUTPUT"
+              echo "ok: none of deploy/k3s, docker, operator, prometheus or ci.yml changed — RollbackRehearsal skipped"
               ;;
             *)
               echo "::error::grep exited with status $status"
@@ -858,6 +881,196 @@ jobs:
           kubectl -n mlobs get servingdeployment api -o yaml || true
           kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -40 || true
           kubectl -n mlobs logs deployment/operator --tail=100 || true
+
+      - name: Delete cluster
+        if: always()
+        run: k3d cluster delete "$CLUSTER_NAME" || true
+
+  RollbackRehearsal:
+    name: D36 rollback rehearsal (k3d)
+    # Phase 3 O3 (D36): undoing the operator, rehearsed in D36's order before
+    # O4 needs it on the host. deploy/k3s/rehearse-rollback.sh is the whole
+    # check and runs the same against a local k3d cluster; this job only
+    # builds and imports what it needs. The script deploys the pre-cutover
+    # tree through that tree's own apply.sh, cuts over to this one the way
+    # #68 will on the host, so that the operator adopts deployment/api in
+    # place, and opens a canary window. Then it runs D36's six steps — canary
+    # to 0 by host patch, the ServingDeployment deleted, deployment/api
+    # garbage-collected to a bound, the operator scaled to 0, the pre-cutover
+    # tree redeployed through its own apply.sh, its smoke.sh green — and
+    # asserts each on the cluster state it leaves: conditions, replica
+    # counts, owners and uids, and the scripts' fixed lines.
+    #
+    # PRE_CUTOVER_SHA stands for the SHA the host runs before O4's cutover:
+    # 16a8c86, the last deploy on record in the Deploy workflow's history.
+    # If O4 records a different pre-cutover SHA, this pin moves with it.
+    #
+    # The cluster is K3sSmoke's, D34 pair included: the pre-cutover tree has
+    # to come back on a k3s that already carries the flags, because the host
+    # keeps them after a rollback. Gated by K3sPaths' `rehearsal` output, and
+    # credential-less like K3sSmoke: images built locally, never pushed.
+    needs: K3sPaths
+    if: needs.K3sPaths.outputs.rehearsal == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: rollback-rehearsal-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      K3D_VERSION: v5.9.0
+      K3S_IMAGE: rancher/k3s:v1.36.4-k3s1
+      CLUSTER_NAME: mlobs-rollback
+      IMAGE_PREFIX: docker.io/library
+      IMAGE_TAG: ${{ github.sha }}
+      PRE_CUTOVER_SHA: 16a8c860af1fdc89bb7db96f497aeb542e1b40c9
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The script extracts the pre-cutover tree from history with
+          # `git archive`, so the history has to be here.
+          fetch-depth: 0
+
+      - name: Derive the canary tag
+        run: |
+          canary_tag="$(printf '%s' "${IMAGE_TAG}-canary" | sha1sum | cut -c1-40)"
+          echo "CANARY_TAG=${canary_tag}" >> "$GITHUB_ENV"
+          echo "ok: pre-cutover ${PRE_CUTOVER_SHA}, deploy ${IMAGE_TAG}, canary ${canary_tag}"
+
+      - name: Reclaim runner disk
+        # As in K3sSmoke: two torch images, each stored twice.
+        run: |
+          before=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          sudo rm -rf /usr/local/lib/android       # Android SDK and NDK
+          sudo rm -rf /usr/share/dotnet            # .NET SDK
+          sudo rm -rf /opt/ghc /usr/local/.ghcup   # Haskell: GHC, Stack, ghcup
+          sudo rm -rf /usr/share/swift             # Swift toolchain
+          sudo rm -rf /usr/local/share/powershell  # PowerShell
+          after=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "ok: reclaimed $((after - before))G, ${after}G now free"
+
+      - name: Assert free disk
+        run: |
+          avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          if [ "$avail" -lt 8 ]; then
+            echo "::error::only ${avail}G free — the five image builds need more"
+            exit 1
+          fi
+          echo "ok: ${avail}G free (>= 8G)"
+
+      - name: Install k3d
+        # The same pinned release asset as K3sSmoke.
+        run: |
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Load br_netfilter on the runner
+        # As in K3sSmoke: with network policy off, the other half of the D34
+        # pair, nothing inside a k3d node loads it, and no pod reaches a
+        # Service without it.
+        run: |
+          sudo modprobe br_netfilter
+          test -e /proc/sys/net/bridge/bridge-nf-call-iptables
+          echo "ok: br_netfilter loaded; bridge-nf-call-iptables=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)"
+
+      - name: Create k3d cluster
+        # K3sSmoke's cluster, flag for flag: the host's add-ons disabled, the
+        # D34 pair, and the api's port and grafana's published where smoke.sh
+        # looks. The pre-cutover tree's hostPort 8000 is reached through the
+        # same -p mapping as the NodePort after it.
+        run: |
+          k3d cluster create "$CLUSTER_NAME" \
+            --image "$K3S_IMAGE" \
+            -p '8000:8000@server:0' \
+            -p '3000:3000@server:0' \
+            --k3s-arg '--disable=traefik@server:*' \
+            --k3s-arg '--disable=servicelb@server:*' \
+            --k3s-arg '--disable=metrics-server@server:*' \
+            --k3s-arg '--service-node-port-range=8000-8000@server:*' \
+            --k3s-arg '--disable-network-policy@server:*' \
+            --wait \
+            --timeout 300s
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+
+      - name: Cluster DNS and Service routing answer
+        # K3sSmoke's early check: a pod resolves a Service by name and opens
+        # it, so a routing fault fails here rather than minutes into a deploy.
+        run: |
+          kubectl -n kube-system rollout status deployment/coredns --timeout=180s
+          kubectl run net-probe --namespace default --image=busybox:1.37 --restart=Never \
+            --command -- sh -c 'nslookup kubernetes.default.svc.cluster.local && nc -z -w 5 kubernetes.default.svc.cluster.local 443'
+          if ! kubectl wait --namespace default pod/net-probe \
+                --for=jsonpath='{.status.phase}'=Succeeded --timeout=120s; then
+            kubectl --namespace default logs pod/net-probe || true
+            echo "::error::a pod could not resolve and reach a Service by name"
+            exit 1
+          fi
+          kubectl --namespace default delete pod/net-probe --wait=false
+          echo "ok: cluster DNS resolves Service names and Service routing reaches the endpoint"
+
+      - name: Build service images
+        # One build of each image, under this commit's tag; the pre-cutover
+        # tag and the canary tag name the same builds. The pre-cutover tree is
+        # deployed with these because every input its Dockerfiles copy —
+        # docker/, src/ and requirements/ — is the same in both trees, which
+        # the last lines check and say. If that stops being true, the run
+        # says so in a notice: the rehearsal then deploys the old manifests
+        # with this commit's images, which still rehearses the boundary D36
+        # crosses — owners, Services, the operator — but not the old images.
+        run: |
+          docker build -f docker/api.Dockerfile           -t "mlobs-api:${IMAGE_TAG}" .
+          docker build -f docker/consumer.Dockerfile      -t "mlobs-consumer:${IMAGE_TAG}" .
+          docker build -f docker/drift.Dockerfile         -t "mlobs-drift:${IMAGE_TAG}" .
+          docker build -f docker/shadow_scorer.Dockerfile -t "mlobs-shadow-scorer:${IMAGE_TAG}" .
+          docker build -t "mlobs-operator:${IMAGE_TAG}" operator
+          for svc in api consumer drift shadow-scorer; do
+            docker tag "mlobs-${svc}:${IMAGE_TAG}" "mlobs-${svc}:${PRE_CUTOVER_SHA}"
+          done
+          docker tag "mlobs-api:${IMAGE_TAG}" "mlobs-api:${CANARY_TAG}"
+          docker images --filter reference='mlobs-*' \
+            --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          if git diff --quiet "$PRE_CUTOVER_SHA" HEAD -- docker src requirements; then
+            echo "ok: docker/, src/ and requirements/ unchanged since ${PRE_CUTOVER_SHA}: these builds are that tree's images"
+          else
+            echo "::notice::docker/, src/ or requirements/ changed since ${PRE_CUTOVER_SHA}: the pre-cutover tag carries this commit's builds"
+          fi
+
+      - name: Prune build cache
+        run: |
+          docker builder prune -f
+          df -h /
+
+      - name: Import images into the cluster
+        run: |
+          k3d image import -c "$CLUSTER_NAME" \
+            "mlobs-api:${IMAGE_TAG}" "mlobs-consumer:${IMAGE_TAG}" \
+            "mlobs-drift:${IMAGE_TAG}" "mlobs-shadow-scorer:${IMAGE_TAG}" \
+            "mlobs-operator:${IMAGE_TAG}" \
+            "mlobs-api:${PRE_CUTOVER_SHA}" "mlobs-consumer:${PRE_CUTOVER_SHA}" \
+            "mlobs-drift:${PRE_CUTOVER_SHA}" "mlobs-shadow-scorer:${PRE_CUTOVER_SHA}" \
+            "mlobs-api:${CANARY_TAG}"
+
+      - name: Rehearse the D36 rollback
+        run: deploy/k3s/rehearse-rollback.sh
+
+      - name: Cluster diagnostics
+        if: failure()
+        # Cluster state only; `describe` renders secret-backed env vars as a
+        # reference to the key, never the value.
+        run: |
+          kubectl -n mlobs get all -o wide || true
+          kubectl -n mlobs get servingdeployment api -o yaml || true
+          kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl -n mlobs describe deployment api || true
+          kubectl -n mlobs describe pods -l app=api | tail -80 || true
+          kubectl -n mlobs logs deployment/operator --tail=100 || true
+          kubectl -n mlobs get service api -o yaml || true
+
+      - name: Disk report
+        if: always()
+        run: df -h /
 
       - name: Delete cluster
         if: always()

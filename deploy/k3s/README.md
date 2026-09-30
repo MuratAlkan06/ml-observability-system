@@ -18,9 +18,10 @@ and the record of the on-host cutover (P2b).
 
 ```
 deploy/k3s/
-  manifests/        plain YAML, applied with kubectl apply -f
-  apply.sh          render + deploy + wait + smoke
-  smoke.sh          post-deploy / post-rollback check, runs standalone
+  manifests/            plain YAML, applied with kubectl apply -f
+  apply.sh              render + deploy + wait + smoke
+  smoke.sh              post-deploy / post-rollback check, runs standalone
+  rehearse-rollback.sh  D36's rollback across the operator boundary, on k3d
 ```
 
 Nine workloads in namespace `mlobs`: `api`, `grafana`, `postgres`, `redis`,
@@ -285,6 +286,48 @@ STATE_TIMEOUT_SECONDS=300 deploy/k3s/smoke.sh   # ends "ok: smoke passed (window
 Any `apply.sh` run then closes the window on its fixed line, and its own
 `smoke.sh` ends in the steady state. The window's 45-minute TTL applies here
 too.
+
+### The D36 rollback
+
+`rehearse-rollback.sh` rehearses undoing the operator (D36) the way CI's
+`RollbackRehearsal` job runs it. It deploys the pre-cutover tree through that
+tree's own `apply.sh`, cuts over to this one as O4 will on the host (issue
+#68), so that the operator adopts `deployment/api` in place, and opens a canary
+window. Then it runs D36's six steps and asserts each on the state it leaves:
+the canary to 0 by host patch, the `ServingDeployment` deleted,
+`deployment/api` garbage-collected to a bound, the operator scaled to 0, the
+pre-cutover tree redeployed by its own `apply.sh`, and its `smoke.sh` green.
+The host procedure it rehearses is in [`docs/RUNBOOK.md`](../../docs/RUNBOOK.md).
+
+It needs a cluster that has had nothing deployed — it refuses one that
+already holds the `mlobs` namespace — so on the cluster from step 2 it runs in
+place of step 5. Besides the five images of step 3 it needs two more tags on
+the same builds: the pre-cutover SHA, which the job pins to the SHA the host
+ran before O4, and a canary tag. The pre-cutover tree is read from git history
+with `git archive`, so a shallow clone has to be deepened first.
+
+```bash
+PRE=16a8c860af1fdc89bb7db96f497aeb542e1b40c9   # RollbackRehearsal's PRE_CUTOVER_SHA
+CANARY_TAG="$(printf '%s' "${TAG}-canary" | shasum | cut -c1-40)"
+for svc in api consumer drift shadow-scorer; do
+  docker tag "mlobs-${svc}:${TAG}" "mlobs-${svc}:${PRE}"
+done
+docker tag "mlobs-api:${TAG}" "mlobs-api:${CANARY_TAG}"
+k3d image import -c mlobs-dev "mlobs-api:${PRE}" "mlobs-consumer:${PRE}" \
+  "mlobs-drift:${PRE}" "mlobs-shadow-scorer:${PRE}" "mlobs-api:${CANARY_TAG}"
+IMAGE_PREFIX=docker.io/library PRE_CUTOVER_SHA="${PRE}" IMAGE_TAG="${TAG}" \
+  CANARY_TAG="${CANARY_TAG}" deploy/k3s/rehearse-rollback.sh
+# ends "ok: D36 rollback rehearsal passed"
+```
+
+A machine already running the Compose stack holds `:8000`, `:3000` and
+`:9090`. Publish the cluster on other ports (`-p '18000:8000@server:0'`,
+`-p '13000:3000@server:0'`) and point both trees' `smoke.sh` there through the
+environment the rehearsal passes on: `API_URL=http://127.0.0.1:18000`,
+`GRAFANA_URL=http://127.0.0.1:13000` and `PROMETHEUS_LOCAL_PORT=19090`.
+Without the last one, the port-forward to the cluster's Prometheus cannot bind
+`:9090`, and `smoke.sh`'s readiness probe is answered by the Compose
+Prometheus instead.
 
 ## Migration record and rehearsal results (2026-09-27)
 
