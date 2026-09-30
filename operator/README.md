@@ -76,6 +76,11 @@ The operator's whole grant is the one namespaced Role in
 only write on a StatefulSet is `patch` on the scale subresource of
 `shadow-scorer`, and it only ever sends the literal replica counts 0 and 1.
 
+Running a window on the host is covered in
+[`docs/RUNBOOK.md`](../docs/RUNBOOK.md): the TTL's arithmetic, the cost of
+the stable-first close, and taking the operator back out (D36, rehearsed in
+CI by `deploy/k3s/rehearse-rollback.sh`).
+
 ## Labels
 
 The stable and the canary share `app: api`; the canary adds `role: canary`.
