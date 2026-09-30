@@ -321,6 +321,9 @@ that also gives its k3s the node-port flags. Until then a pipeline deploy to the
 `apply.sh`'s preflight, before it changes anything, and the running stack stays as it is.
 Opening and closing a window, the 45-minute TTL and its arithmetic, and undoing the operator (D36,
 rehearsed in CI by the `RollbackRehearsal` job) are in the [operator runbook](docs/RUNBOOK.md).
+Why the phase builds its own operator rather than adopting Argo Rollouts or KServe, with what each
+would have bought and what would change the answer, is in
+[docs/WHY-NOT-ARGO-KSERVE.md](docs/WHY-NOT-ARGO-KSERVE.md).
 
 That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
