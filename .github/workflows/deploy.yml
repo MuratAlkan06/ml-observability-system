@@ -140,7 +140,7 @@ jobs:
           set -euo pipefail
           accept='application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json'
           missing=0
-          for svc in api consumer drift; do
+          for svc in api consumer drift operator; do
             repo="${GHCR_OWNER}/mlobs-${svc}"
             token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty')" || token=""
             if [ -z "$token" ]; then
