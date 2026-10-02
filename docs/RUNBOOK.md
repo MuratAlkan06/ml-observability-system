@@ -12,6 +12,8 @@
 > `/etc/rancher/k3s/config.yaml`, the `hostPort` gone from `deployment/api`,
 > and a post-O2 SHA deployed, so that the operator has adopted the api. #68
 > owns that cutover and its own preflights, and none of it is repeated here.
+> Its abort criteria are the exception. They sit below, beside the D36
+> rollback they lead to.
 
 Some steps run on the host and some through the pipeline. **Host** steps run
 in an SSM session on the instance, as `ubuntu`, from
@@ -265,6 +267,212 @@ and Slack alerting comes from the drift job alone. Two rules would cover it:
 
 These are candidates for the phase-close hardening pass (#60), not a
 commitment of this slice.
+
+## Abort criteria (O4 cutover window)
+
+These are the lines #68's cutover and its one live canary window are held
+to. Each names a check and what follows when it fails. A check that cannot be
+run counts as failed. Abort first and diagnose after. Record every abort on
+#68, with the line that tripped it and the time.
+
+There are two ways back, and they differ:
+
+- **From the cutover**, the way back depends on how far it got (the table
+  below). D36 is its full form.
+- **From a canary window**, the way back is the close-window patch. Full D36
+  only when the operator itself is at fault, as D36's "When" says. A stable
+  that is down is the stable-first guard's case (above), fixed through the
+  pipeline.
+
+### Before the window: do not start
+
+All four hold before #68's step 1, or nothing starts. Nothing has changed
+yet, so there is nothing to undo.
+
+1. **The `pg_dump` preflight.** NO-GO if the dump exits non-zero, if the file
+   is empty, or if `grep -c '^COPY public\.' <dump>` is not 3: `sql/` defines
+   `predictions`, `shadow_predictions` and `drift_runs`, and no other table.
+   NO-GO if a live count is below the P2b baseline: predictions 8386,
+   shadow_predictions 3628, drift_runs 18884 (`deploy/k3s/README.md`,
+   "Migration record"). Nothing in `src/` or `sql/` deletes rows, so the
+   counts can only have grown.
+
+   ```bash
+   kubectl -n mlobs exec deployment/postgres -- psql -U mlobs -d mlobs -tAc \
+     "SELECT (SELECT count(*) FROM predictions), (SELECT count(*) FROM shadow_predictions), (SELECT count(*) FROM drift_runs)"
+   ```
+
+   Record the three counts on #68, with the dump's path and size.
+2. **The dispatch SHA is published.** `gh run list --branch main --commit <sha>`
+   shows the `CI` run for that push `completed` with `success`. NO-GO on
+   `cancelled`, which happens when merges land close together (#68), or on no
+   run. The SHA is `8dc1a82` or a later commit on `main`: the first post-O2
+   SHA with a completed publish. The Deploy workflow's GHCR preflight checks
+   `mlobs-operator` with the other three images, but it catches a missing
+   image only by failing the dispatch.
+3. **The way back exists.** The pre-cutover SHA, from `git rev-parse HEAD` in
+   the host checkout, is on #68, and D36's "Before you start" holds for it:
+   its shadow tarball is inside S3's 60 days. NO-GO otherwise. Without it, D36
+   step 5 has nothing to dispatch.
+4. **The measured window rehearsal has passed.** PHASE3.md's O4 acceptance:
+   two api pods, the shadow at 0, 5 rps, `MemAvailable` at or above 400MB and
+   zero OOM kills. Read the bar as 409,600 kB, the 400 MiB the P2b rehearsal
+   read D26's bar in, and sample every 30 s as it did:
+
+   ```bash
+   grep MemAvailable /proc/meminfo                     # every sample >= 409600 kB
+   sudo dmesg -T | grep -iE 'out of memory|oom-kill'   # no line from the run
+   ```
+
+   NO-GO on a miss: no live window opens (item 4 of "Before opening a
+   window"). If the rehearsal runs on the cut-over stack, a miss closes its
+   window and ends the session there. The cutover stays, in steady state, and
+   the live window waits.
+
+### During the cutover: abort and go back
+
+The steps are #68's handoff note, items 1–3.
+
+1. **k3s after the D34 pair.** GO within 5 minutes of the restart:
+   `systemctl is-active k3s` reads `active`, `kubectl get nodes` reads `Ready`,
+   and `lsmod | grep br_netfilter` shows the module. Then the pre-cutover
+   `deploy/k3s/smoke.sh` ends `ok: smoke passed`. NO-GO at 5 minutes, on k3s
+   restarting in a loop (`sudo journalctl -u k3s -n 50`), or on a red smoke.
+   The node was Ready 3 s after P2b's install.
+2. **The `hostPort` patch.** It costs one Recreate bounce, and `:8000` is then
+   dark until the dispatch's NodePort Service lands (#68).
+   - GO: `kubectl -n mlobs rollout status deployment/api --timeout=180s`
+     completes (180 s is `apply.sh`'s `ROLLOUT_TIMEOUT_SECONDS`), and
+     `kubectl -n mlobs get deployment api -o jsonpath='{..hostPort}'` prints
+     nothing. Dispatch at once.
+   - NO-GO: the rollout has not completed at 180 s.
+   - **The dark bound.** `curl -fsS http://127.0.0.1:8000/health` answers
+     within 30 minutes of the patch, about twice the longest deploy run on
+     record (13 min, run 36517554863, its approval wait included). NO-GO at
+     30 minutes, whatever the run is doing.
+3. **Adoption.** Before dispatching, record
+   `kubectl -n mlobs get deployment api -o jsonpath='{.metadata.uid}'`.
+   - GO: the conditions command at the top of this runbook shows
+     `Ready=True StableAvailable`, the events show `Adopted`, the uid is
+     unchanged, and `{.metadata.ownerReferences[0].kind}` on
+     `deployment/api` reads `ServingDeployment`.
+   - NO-GO: `Ready=False AdoptionFailed`; a Warning `AdoptionFailed` event,
+     whose message names the owner already there; or a new uid.
+4. **The pipeline deploy.** NO-GO: the run fails anywhere, at a preflight, an
+   `apply.sh` `die` line or `smoke.sh`.
+5. **State-aware smoke.** GO: the run ends `ok: smoke passed (steady state)`,
+   and `deploy/k3s/smoke.sh` on the host ends the same. NO-GO: either is red,
+   or names any other state.
+
+**The way back, by how far the cutover got:**
+
+| How far | How to tell | The way back |
+|---|---|---|
+| k3s restarted, `deployment/api` unpatched | `kubectl -n mlobs get deployment api -o jsonpath='{..hostPort}'` prints `8000`, or k3s is down | Take the D34 pair out of `/etc/rancher/k3s/config.yaml`, restart k3s, run the pre-cutover `smoke.sh` |
+| `hostPort` patched, no ServingDeployment | `kubectl -n mlobs get servingdeployment api` reports NotFound, or no such resource type | D36 step 4 if `deployment/operator` exists, then steps 5–6 |
+| A ServingDeployment exists | the same command returns it | D36 from step 1 |
+
+- **After a failed adoption, D36 step 3 has nothing to collect.**
+  `deployment/api` never took the ServingDeployment's ownerReference, so
+  garbage collection leaves it. Check that
+  `kubectl -n mlobs get deployment api -o jsonpath='{.metadata.ownerReferences}'`
+  names no ServingDeployment, and go on to step 4.
+- **The second row and the failed adoption are not rehearsed.** The
+  rehearsal's step 5 recreates a garbage-collected `deployment/api`. Here the
+  pre-cutover `apply.sh` applies `20-api.yaml` over the object it once
+  created. At step 6, also check that `{..hostPort}` prints `8000` again.
+
+### During the live canary window: close it
+
+Closing is the close-window patch ("Closing a window, and promoting"), then
+`deploy/k3s/smoke.sh` ending `ok: smoke passed (steady state)`. A close that
+stalls on the stable-first guard is that section's case. A close that does
+not converge with `deployment/api` Available means the operator is at fault:
+D36 from step 1.
+
+**Where to read the canary.** No dashboard panel separates it. The
+*mlobs — API & Inference* panels select no job, so during a window they blend
+the two pods (README, "The canary split, stated plainly"). Every check below
+is a Prometheus query on `job="api_canary"`, through the port-forward in the
+TTL section or in Grafana's Explore against the Prometheus data source. Run
+them every 5 minutes from the open.
+
+**The latency reference**, recorded on #68 before the open patch: the
+`api_canary` p95 the measured window rehearsal read, if it read one.
+Otherwise `job="api"`'s p95 in steady state, while it is the one stable pod:
+
+```promql
+histogram_quantile(0.95, sum(rate(mlobs_http_request_duration_seconds_bucket{job="api",endpoint="/predict"}[10m])) by (le))
+```
+
+**No canary traffic is not a pass.** If
+`sum(rate(mlobs_http_requests_total{job="api_canary",endpoint="/predict"}[5m]))`
+is 0, checks 2 and 3 read nothing. A client that holds one connection drives
+one pod, and the simulator does (README). Drive fresh connections until that
+rate is above 0.
+
+Close the window on any of these:
+
+1. **The canary is not serving.** After the open's `smoke.sh` passed in the
+   window state, `up{job="api_canary"}` reads 0, or
+   `kubectl -n mlobs get deployment api-canary` is not `1/1`.
+2. **Canary errors.** Any 5xx:
+   `sum(increase(mlobs_http_requests_total{job="api_canary",endpoint="/predict",status=~"5.."}[5m])) > 0`.
+   The stable's measured runs record zero errors (README, "Load test").
+3. **Canary latency.** On two checks in a row,
+   `histogram_quantile(0.95, sum(rate(mlobs_http_request_duration_seconds_bucket{job="api_canary",endpoint="/predict"}[10m])) by (le))`
+   is above 1.25 times the reference. The margin sits over the ~14% the
+   README measured between two identical 60 s runs ("Load test", its
+   methodology note). Its ≤10% bar was read on matched 120 s windows, which a
+   live window is not.
+4. **The window state breaks.** While `deployment/api-canary` has a pod:
+   `CanaryActive` is not `True WindowOpen`; `ShadowPaused` is not
+   `True ShadowScaledToZero`; `kubectl -n mlobs get statefulset shadow-scorer`
+   is not `0/0`; or `STATE_TIMEOUT_SECONDS=300 deploy/k3s/smoke.sh` does not
+   end `ok: smoke passed (window state)`. A shadow beside the canary is the
+   state D26's bar rules out.
+5. **Memory.** `MemAvailable` below 409,600 kB on two samples in a row, 30 s
+   apart, or any OOM line in `sudo dmesg -T` since the open (the commands in
+   the rehearsal gate above). On an OOM kill, close at once. Do not wait for
+   a second sample.
+6. **The TTL.** 45 minutes is the ceiling, not the plan. The deadline is in
+   `CanaryActive`'s message, `canary window open until <time>`. Above about
+   6.2 rps it comes sooner: `50000 / (3 × rps)` seconds ("The 45-minute TTL,
+   and its arithmetic"). Close or promote before it. The operator enforces it
+   if nobody does ("When the TTL lapses"). If `CanaryActive` still reads True
+   a minute past the deadline, the operator is not enforcing it: send the
+   close patch, and if that does not converge, D36.
+
+### No EBS snapshot before the cutover (D30)
+
+O4 takes no EBS snapshot: PHASE3.md's O4 acceptance rules it out, and this is
+the reasoning, recorded against D30. D30 kept `snap-0f365806e0eaf9fb6` as "the
+one rollback floor that does not depend on the pipeline under test", and
+retired it once a deploy and its rollback had run green. Its deletion is
+recorded on #49. O4 starts from that retired position:
+
+- **The way back does not need one.** The pipeline has a deploy and a
+  rollback on record (#49), and D36 is rehearsed green in CI (O3). Nothing in
+  the cutover or in D36 deletes the Postgres PVC, and `sql/` is the same on
+  both sides of the boundary.
+- **The data is covered without one.** The Postgres PVC is the stack's one
+  piece of state on disk (D20). The `pg_dump` preflight covers it, through
+  D25's restore path. Everything else is rebuilt from the SHA: the GHCR
+  images, which do not expire; the shadow tarball in S3; the manifests in
+  git.
+- **It would not cover the stream.** Redis runs with `--appendonly no` (D20),
+  so a disk snapshot holds neither the stream nor its consumer groups'
+  positions. Nor does the dump. The consumer recovers by redelivery, not from
+  a durable stream, so a snapshot adds nothing there.
+- **A consistent one costs a stop.** P2b's was taken with the instance
+  stopped. A snapshot of the running host is crash-consistent only, with
+  Postgres caught mid-write, which the dump already does better. A stopped
+  one adds a full outage and a host restart to the window. The storage is
+  cheap, about $1.50 a month for 30 GiB (#49). The stop is not.
+
+The residual, stated plainly: a dump kept on the instance's own volume does
+not survive the loss of that volume. Nothing in the cutover touches the
+volume.
 
 ## Rolling back across the boundary (D36)
 
