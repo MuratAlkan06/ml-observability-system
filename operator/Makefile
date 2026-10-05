@@ -45,13 +45,14 @@ help: ## Display this help.
 
 # The CRD and the Role are not kept in a kustomize tree here: they live
 # flattened under deploy/k3s/manifests/, and hack/manifests.sh splices
-# controller-gen's output into them below a marker line (docs/PLAN.md D31).
+# controller-gen's output into them below a marker line (docs/PLAN.md D31). The
+# operator chart's crds/ holds a byte-exact copy of the flattened CRD (D38).
 .PHONY: manifests
-manifests: controller-gen ## Regenerate the CRD and Role in deploy/k3s/manifests/ from the Go source.
+manifests: controller-gen ## Regenerate the CRD and Role in deploy/k3s/manifests/, and the chart's CRD copy, from the Go source.
 	CONTROLLER_GEN="$(CONTROLLER_GEN)" hack/manifests.sh write
 
 .PHONY: verify-manifests
-verify-manifests: controller-gen ## Fail if the flattened CRD or Role differ from controller-gen's output.
+verify-manifests: controller-gen ## Fail if the flattened CRD or Role, or the chart's CRD copy, differ from controller-gen's output.
 	CONTROLLER_GEN="$(CONTROLLER_GEN)" hack/manifests.sh verify
 
 .PHONY: generate

@@ -8,6 +8,11 @@ name: Operator
 # only filter that skips them outright. The operator's end-to-end runs on k3d
 # belong to ci.yml, not here (D35): OperatorE2E and K3sSmoke, behind the
 # K3sPaths filter there.
+#
+# Phase 3 H1 added the operator chart's two checks, HelmParity and HelmLint,
+# and deploy/helm/ to the paths below (D38). The chart is a projection of the
+# flattened manifests this workflow already guards, so a change on either
+# side runs both.
 
 on:
   push:
@@ -15,11 +20,13 @@ on:
     paths:
       - "operator/**"
       - "deploy/k3s/manifests/**"
+      - "deploy/helm/**"
       - ".github/workflows/operator.yml"
   pull_request:
     paths:
       - "operator/**"
       - "deploy/k3s/manifests/**"
+      - "deploy/helm/**"
       - ".github/workflows/operator.yml"
   workflow_dispatch:
 
@@ -36,6 +43,14 @@ concurrency:
 defaults:
   run:
     working-directory: operator
+
+# Helm, pinned to an exact 3.x patch and to its release checksum (D38): the
+# parity is byte-level, so the renderer is pinned like a compiler. The same
+# pin as OperatorE2E in ci.yml; the two move together, and a Helm 4 move is a
+# named revisit, never a silent drift.
+env:
+  HELM_VERSION: v3.22.0
+  HELM_SHA256: 1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
 
 jobs:
   GoLint:
@@ -105,7 +120,9 @@ jobs:
     # The CRD and the Role under deploy/k3s/manifests/ are controller-gen output
     # spliced below a marker line; this regenerates them into a scratch
     # directory and fails on any diff (D31). It is the check that stands in for
-    # the kustomize tree the scaffold came with.
+    # the kustomize tree the scaffold came with. Since H1 it holds a third
+    # projection of the same Go source to the same bytes: the operator chart's
+    # crds/ copy, whole-file, and fails if crds/ holds any other file (D38).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -117,3 +134,80 @@ jobs:
           cache-dependency-path: operator/go.sum
       - name: Verify flattened manifests
         run: make verify-manifests
+
+  HelmParity:
+    name: Helm chart parity
+    # Phase 3 H1 (D38): the operator chart against the flattened manifests it
+    # packages, which stay the authority. operator/hack/helm-parity.sh is the
+    # whole check and runs the same on a laptop: `helm template -n mlobs` at a
+    # sentinel prefix and a 40-hex sentinel tag, without --include-crds (the
+    # CRD is OperatorManifestSync's), against 02-operator-rbac.yaml and
+    # 03-operator.yaml with IMAGE_PREFIX and IMAGE_TAG sed-rendered to the
+    # same sentinels. Only Helm's `# Source:` lines are removed, and every
+    # document must match byte for byte; the script's header explains why the
+    # documents are compared in a canonical order rather than Helm's. Then one
+    # negative render per guard, each asserted on its fixed line: a non-40-hex
+    # image.tag, and a release namespace other than mlobs. It also fails on
+    # any ServingDeployment under deploy/helm/.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Helm (pinned)
+        run: |
+          curl -fsSL --retry 2 -o "${RUNNER_TEMP}/helm.tar.gz" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          version="$(helm version --template '{{.Version}}')"
+          if [ "$version" != "$HELM_VERSION" ]; then
+            echo "::error::helm reports ${version}, expected ${HELM_VERSION} (D38)"
+            exit 1
+          fi
+          echo "ok: helm ${version}"
+      - name: Chart parity and guard refusals
+        run: operator/hack/helm-parity.sh
+
+  HelmLint:
+    name: Helm chart lint
+    # `helm lint` on the pinned Helm, invoked like every render path with -n
+    # mlobs and the sentinel values (D38); without them the guards fail the
+    # lint, by design. Not --strict, and that is the acceptance D38 states:
+    # lint's recommended-label warnings are accepted, because
+    # app.kubernetes.io/* labels on the templates would break byte-parity
+    # with the flattened manifests. At the 3.22.0 pin lint raises no warning
+    # for this chart; its one finding, "[INFO] Chart.yaml: icon is
+    # recommended", is accepted too. An error still fails the job.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    env:
+      SENTINEL_PREFIX: sentinel.invalid/helm-parity
+      SENTINEL_TAG: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Helm (pinned)
+        run: |
+          curl -fsSL --retry 2 -o "${RUNNER_TEMP}/helm.tar.gz" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          version="$(helm version --template '{{.Version}}')"
+          if [ "$version" != "$HELM_VERSION" ]; then
+            echo "::error::helm reports ${version}, expected ${HELM_VERSION} (D38)"
+            exit 1
+          fi
+          echo "ok: helm ${version}"
+      - name: Lint
+        run: |
+          helm lint deploy/helm/mlobs-operator --namespace mlobs \
+            --set image.prefix="$SENTINEL_PREFIX" --set image.tag="$SENTINEL_TAG"
