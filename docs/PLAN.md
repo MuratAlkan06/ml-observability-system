@@ -1202,3 +1202,11 @@ retention jobs, Alembic.
   still says "source of truth". And the history is measurement: deleting it would throw away
   the before-and-after that makes the migration legible, where relabelling keeps every number
   inseparable from its methodology.
+
+> **D38 erratum (2026-10-05, H1):** Helm 3.22.0 reorders rendered documents by kind into install
+> order and moves comment-only documents last, for any correct chart, so D38's "exact diff after
+> stripping only `# Source:` lines" cannot come out empty as written. `HelmParity` compares the
+> multiset of documents instead — each byte-exact, under a deterministic sort, stripping only
+> Helm's own anchored Source lines on the chart side; the flattened file's own Source comment is
+> kept and compared. Equal-or-stronger detection, reproduced independently at H1 (PR #94); no
+> frozen text edited.
