@@ -731,6 +731,8 @@ operator rolls the stable back (`infra/README.md`, "Rolling back").
    Then approve the run. That tree's `apply.sh` recreates `deployment/api`
    from its `20-api.yaml`, as a new object with no owner and with
    `hostPort: 8000`, and turns `service/api` back into a ClusterIP.
+   Before that, the run's GHCR preflight skips the operator image for a tree
+   that predates the operator, and logs `ok: operator image not required` (#88).
 6. **`smoke.sh` green.** The run's output ends `ok: smoke passed`: the
    pre-cutover `smoke.sh`, which is not state-aware, so the line has no state
    suffix. Then run `deploy/k3s/smoke.sh` on the host on its own. The checkout

@@ -140,8 +140,17 @@ jobs:
           set -euo pipefail
           accept='application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json'
           missing=0
+          # The operator image exists only for trees that ship the operator, and
+          # D36's way back dispatches one that predates it. The tree at SHA
+          # decides. ls-tree prints nothing for an absent path and fails on a
+          # bad object, so a failed read fails the step rather than skip a check.
+          operator_manifest="$(git ls-tree --full-tree --name-only "$SHA" -- deploy/k3s/manifests/03-operator.yaml)"
           for svc in api consumer drift operator; do
             repo="${GHCR_OWNER}/mlobs-${svc}"
+            if [ "$svc" = "operator" ] && [ -z "$operator_manifest" ]; then
+              echo "ok: operator image not required — ${SHA}'s tree has no deploy/k3s/manifests/03-operator.yaml"
+              continue
+            fi
             token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty')" || token=""
             if [ -z "$token" ]; then
               echo "::error::could not get an anonymous pull token for ghcr.io/${repo}"
