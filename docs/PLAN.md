@@ -1042,3 +1042,163 @@ retention jobs, Alembic.
 > `apply.sh` below the pipeline, a gap `docs/RUNBOOK.md` documents ("What the rehearsal proves,
 > and what it does not"). The pipeline half of D36's way back is therefore tested only live, and
 > has exactly one completed live test on record: that re-run (issue #68); no frozen text edited.
+
+# Phase 3 P3 (revised) — ADR summary (D38–D40)
+
+> FROZEN (owner ruling 2026-10-05 recorded in D39). Decisions for the revised P3 stretch —
+> Helm packaging of the operator, the ephemeral EKS demonstration, Compose retirement
+> (`docs/PHASE2.md` P3 erratum; the contract is `docs/PHASE3.md`, slices H1–H3). The first
+> draft of this block was gated FREEZE WITH AMENDMENTS on eight findings; all eight are
+> integrated here, and the one item the gate left open — where the live day's de-scope valve
+> sits — is owner-ruled 2026-10-05 and recorded in D39. Budget, honestly: H1 ≈ 1 weekend,
+> H2 ≈ 1, H3 ≈ 0.5 — ≈ 2.5 against the roughly 1–2.5 weekends left of the 4–6 band, so the
+> phase may close up to half a weekend over it; the owner accepts that rather than cut the
+> live demonstration (the D39 ruling). Everything above is untouched; this block appends only.
+
+- **D38 The chart covers the operator and nothing else; the flattened manifests stay the
+  authority:** a Helm chart at `deploy/helm/mlobs-operator/` (version 0.1.0) packages exactly
+  what `01-servingdeployment-crd.yaml`, `02-operator-rbac.yaml` and `03-operator.yaml` already
+  describe: the CRD as a byte-exact copy under `crds/`, the RBAC and the operator Deployment
+  as templates. Two value seams and no third: `image.prefix`, default `ghcr.io/muratalkan06`,
+  and `image.tag`, no default, guarded in the template — `fail` unless the value passes
+  `regexMatch "^[0-9a-f]{40}$"` — the schema's and the SSM document's pattern (D29). The
+  namespace is not a value: a second guard fails any render where
+  `ne .Release.Namespace "mlobs"`, and the pin is load-bearing twice — the binary's
+  leader-election namespace is a literal and the D33 Role is shaped for `mlobs`, and the
+  templates hard-code `metadata.namespace: mlobs` for byte-parity, so a stray `-n other` would
+  split the objects from Helm's release bookkeeping. The flattened manifests stay
+  authoritative: zero Helm in the k3s path, on the host or in the pipeline; the chart exists
+  for D39's install and as the packaging evidence D17 deferred to P3. CI holds it to that. A
+  `HelmParity` job renders the chart — `helm template -n mlobs`, a sentinel prefix, a 40-hex
+  sentinel tag — against the flattened operator manifests with their `IMAGE_PREFIX` and
+  `IMAGE_TAG` placeholders sed-rendered to the same sentinels, and fails on any diff; the diff
+  is exact after stripping only `# Source:` lines, because the templates emit byte-identical
+  manifests — no Helm-added labels, with `helm lint`'s recommended-label warnings accepted and
+  stated. The parity render does not pass `--include-crds`: the CRD's parity is the sync
+  check's job — `OperatorManifestSync` extends to the chart's `crds/` copy, byte-exact
+  whole-file on both copies, three checked projections of one Go source. Helm's `crds/`
+  contract is stated plainly: install-only — Helm never upgrades it and never deletes it — and
+  this chart has no CRD upgrade path at 0.1.0; CRD evolution ships through the flattened
+  manifests. Each guard carries one negative test with a fixed failure line (a non-40-hex tag;
+  a non-`mlobs` release namespace); every render path — parity, lint, the e2e install — is
+  invoked with `-n mlobs` and the sentinel values; `OperatorE2E` gains a chart-install phase;
+  `deploy/helm/` joins the `K3sPaths` filter. The chart ships NO `ServingDeployment`: D32's
+  writer set is frozen at three, and a chart-rendered CR would be a fourth. Helm itself is
+  pinned to an exact 3.x patch — the 3.22 line, 3.22.0 current at this freeze — at both pin
+  sites, CI and the owner script, and asserted on a fixed line in H2's evidence. Helm 4 is not
+  adopted, and the cost is stated: 3.22 is the final Helm 3 minor, security-patched only into
+  early 2027, so the pin is a renderer pin for byte-parity that outlives this phase by months,
+  not years, and a Helm 4 move is a named revisit, never a silent drift. *Rejected:* the chart
+  as authority, with the flattened manifests generated from it; a full-stack chart; the CR in
+  the chart; `values.namespace`. *Why:* chart-as-authority inverts D31 days after its
+  execution and reopens the two-descriptions hazard the sync check exists to close. A
+  full-stack chart recreates the D21 copies — the scrape config and the provisioning files as
+  chart data — that `apply.sh` builds from the canonical files precisely to avoid. The CR in
+  the chart is the fourth spec writer D32 forbids. And `values.namespace` is multi-tenancy
+  half-done: the D33 addendum's namespace-wide read grant stays deliberately closed, and
+  single-namespace is recorded as the chart's non-goal rather than parameterised into a
+  promise.
+- **D39 The EKS demonstration — ephemeral, owner-run, identity named, bounded by time, and
+  honest about what it shows:** `eksctl`, pinned exact (the 0.230.x line current at this
+  freeze; the patch is fixed at H2 start and asserted on a fixed line) and installed with the
+  k3d pattern — a pinned version fetched by the script, never "latest" — creates an ephemeral
+  EKS cluster at Kubernetes 1.36, the D19/D35 band, verified available in standard support and
+  re-verified, with the $0.10/h control-plane rate, on the demo day as an evidence line; in
+  us-west-2, from a committed config at `deploy/eks/`: one `t3.medium` managed node, public
+  subnets, `vpc.nat.gateway: Disable`, `withOIDC: false` and control-plane logging off — the
+  last two pinned so the sweep's IAM OIDC-provider and CloudWatch log-group lines are
+  expected-absent by construction. The cluster name carries a per-run nonce. The creating
+  identity is named: a non-root admin IAM principal the owner designates at H2 start — EKS
+  permanently binds cluster-creator admin, and root is ruled out by the repo's credential
+  posture (D13, D24, D29); the script pins `AWS_PROFILE`, uses a dedicated scratch
+  `--kubeconfig` deleted at teardown, and the evidence transcript OPENS with
+  `aws sts get-caller-identity` on a fixed line. Terraform is rejected for this cluster, and
+  `infra/ec2` with its state is untouched — asserted after teardown by
+  `terraform -chdir=infra/ec2 plan` exiting 0. Every image is public GHCR (D18): the shadow
+  never travels, no new S3 grant exists, D28 is frozen; the run's three GHCR pulls — the
+  operator image, and the api image at both SHAs — are preflighted with deploy.yml's
+  anonymous-token manifest check BEFORE cluster create (redis is the pinned public library
+  image the manifest already names). The demo applies `00-namespace.yaml` and `11-redis.yaml`
+  VERBATIM from `deploy/k3s/manifests` — reuse, not copies; the api's redis-ready
+  initContainer needs redis — installs the chart, applies the CR (`40-servingdeployment.yaml`,
+  rendered as `apply.sh` renders it) at a real `main` SHA, and the canary patch names a second
+  real `main` SHA. The demonstrated sequence, on fixed lines plus kubectl outputs: operator
+  Ready and the Lease held; `deployment/api` created and controlled at the rendered image,
+  `Ready` at `observedGeneration == generation`; `/health` and `/predict` through
+  port-forwards; a window opened; the canary observed serving; the constant close patch and
+  steady again; then the D36-shaped teardown — CR delete, `deployment/api` garbage-collected
+  through its ownerReference, `helm uninstall`, then the CRD deleted explicitly, since Helm's
+  install-only `crds/` contract (D38) means uninstall never removes it — then
+  `eksctl delete cluster --wait`, then the orphan sweep. `ShadowPaused` False with reason
+  `ShadowNotFound` is recorded as expected: no shadow StatefulSet exists on EKS. **What
+  "canary observed serving" means here, exactly:** on EKS neither `svc/api` nor
+  `svc/api-canary` exists — `20-api.yaml` (since O2 the api Service) is excluded, its
+  `nodePort: 8000` sits outside EKS's fixed NodePort range, and the operator's Role holds no
+  Services grant (D33) — and a port-forward pins one pod, so D34's per-connection split
+  structurally cannot be demonstrated on EKS; stated plainly, it remains proven by K3sSmoke
+  and the live host. The claim is therefore pod-scoped: `kubectl port-forward
+  deployment/api-canary`, a POST `/predict` returning 200 with `request_id`, `label` and
+  `confidence`, and the canary's own `mlobs_predictions_total` incrementing across that
+  forward; plus `CanaryActive` True at the current generation on the CR. `smoke.sh` does NOT
+  run on EKS — its state classifier requires the shadow StatefulSet and the nine-workload
+  stack — so the demo script carries its own fixed-line assertions, labelled as the demo's,
+  not smoke's. Stated, not redemonstrated: the D34 split and NodePort are k3s properties; the
+  45-minute TTL and the D26 bar are not re-run. The node arithmetic is recorded and complete:
+  two api pods at 1Gi requests, the operator at 64Mi and redis at 32Mi sum to ≈2.1Gi, EKS
+  system pods add ≈0.2Gi — ≈2.3Gi against a t3.medium's ~3.3Gi allocatable, which fits, and
+  O4's live window measurement bounds real usage; `t3.large` is the one sanctioned deviation.
+  **The enforced bound is time; the dollars are arithmetic:** the run is an owner-run local
+  script, repeatable, NOT CI. If the live day runs long, the pre-decided de-scope line is the
+  WINDOW SEGMENT: at T+2h from cluster-create the demo reduces to chart install → CR `Ready`
+  at generation → stable serving through the port-forward → teardown and sweep. H1's
+  chart-install e2e phase was considered as the valve and rejected — first contact with a
+  chart install needs its rehearsal. Owner ruling at this freeze (2026-10-05): option (a) —
+  the full scope stands, the overrun risk (at most half a weekend over the band) is accepted,
+  and the T+2h window-segment cut is the pre-decided line. Independent of demo state, the
+  script traps to teardown-first at a hard T+3h from create. The cost line reads "3h wall
+  clock × verified rates, verified next day": ≈$0.145/h — the $0.10 control plane plus the
+  t3.medium — under $0.50 expected, with $1 the expected-worst arithmetic, not a mechanism.
+  **The orphan sweep, pinned:** it filters ONLY the three cluster-scoped tag families —
+  `alpha.eksctl.io/cluster-name`, `eks:cluster-name`, `kubernetes.io/cluster/<name>` — and
+  NEVER project-level tags: a `project=mlobs` sweep would enumerate the live P1 host, and the
+  terraform exit-0 line above is the recorded backstop. It checks, each on a fixed line: EC2
+  instances, with terminated-but-still-listed instances filtered out; security groups; ENIs —
+  the DependencyViolation class; launch templates; CloudFormation stacks in terminal failure
+  states; and the CloudWatch log-group and IAM OIDC-provider lines, expected-absent by
+  construction. The evidence gains a T+24h line: the sweep re-run all-absent, plus a billing
+  check, recorded. *Rejected:* a Terraform root for the ephemeral cluster; a workflow with a
+  new OIDC role; the full stack on EKS; a LoadBalancer or NodePort exposure. *Why:* a second
+  root means a second state for a cluster whose whole value is leaving nothing behind, and
+  `eksctl create`/`delete` against a committed config is the pinned-tool pattern this repo
+  already trusts in CI. A workflow needs an OIDC role that can create and destroy VPCs,
+  clusters and instances — a grant surface out of all proportion to a demo, where D13 and D29
+  hold the existing roles to read, plan and one fixed SSM document. The full stack on EKS
+  re-demonstrates what K3sSmoke and the live host already prove, at torch-image cost, and the
+  shadow cannot travel (D18, D28). And an exposure Service opens an inbound surface on a
+  throwaway cluster for an audience of one — the port-forward is the honest shape of a demo
+  whose only consumer is its operator.
+- **D40 Compose retires in its own slice, with the sweep enumerated:** `docker-compose.yml`
+  is deleted — the change D27 deferred to P3 and sized as its own slice — and the retirement
+  is recorded with the last SHA that ships the file. Nothing functional breaks: no CI job and
+  no script invokes Compose, verified by sweep; what remains is text, and the slice enumerates
+  the textual class rather than trusting CI to find it. The nine manifest provenance headers
+  ("Compose source of truth: the `<svc>` service in docker-compose.yml") are retargeted to
+  "docker-compose.yml at <last-shipping-SHA>" — provenance kept, pointer made historical.
+  `.env.example` stays — it documents the same gitignored `.env` that `apply.sh` reads — and
+  its compose-up/-down instructions are retargeted, as are `sql/migrations/002_shadow.sql`'s
+  Compose exec procedure and `docker/drift.Dockerfile`'s Compose-mount comment, each to its
+  k3s-era equivalent. README's Quick start becomes the k3d recipe, pointing at
+  `deploy/k3s/README.md`; the Compose-era Reproduce block is relabelled historical
+  methodology; the measured Compose-era numbers keep their labels, byte-unchanged
+  (`PRINCIPLES.md` §6 — the runtime is part of the methodology). `deploy/k3s/README.md`'s
+  paragraph naming the Compose file the source of truth for what each service is, is updated:
+  that truth now lives at the recorded SHA, not in the tree. D25's fallback-runtime clause
+  ends with the file; the host's Docker engine is untouched. *Rejected:* retiring at O4;
+  keeping the file dormant; deleting the Compose-era history or its numbers. *Why:* O4 was a
+  gated live cutover, and bundling an unrelated deletion into it would have mixed two risks
+  under one abort path — removing Compose is a change with its own risk and therefore its own
+  slice, D27's words now executed. A dormant file is the D21 hazard in file form: a second
+  description of the stack that no longer describes it, drifting silently under a header that
+  still says "source of truth". And the history is measurement: deleting it would throw away
+  the before-and-after that makes the migration legible, where relabelling keeps every number
+  inseparable from its methodology.
