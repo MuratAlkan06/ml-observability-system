@@ -140,7 +140,10 @@ make build      # bin/manager
 
 The end-to-end check, as CI's `OperatorE2E` job runs it, from the repository
 root. The cluster is started without the D34 pair on purpose: the check's first
-assertion is that `apply.sh`'s preflight refuses it.
+assertion is that `apply.sh`'s preflight refuses it. It then installs the
+operator twice, from the flattened manifests and then from the chart at
+`deploy/helm/mlobs-operator` (D38), so it needs `helm` on `PATH`; CI pins
+v3.22.0.
 
 ```bash
 k3d cluster create mlobs-e2e --image rancher/k3s:v1.36.4-k3s1 \
