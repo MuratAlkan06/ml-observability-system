@@ -1,0 +1,23 @@
+{{- /*
+The chart's two guards (docs/PLAN.md D38). This file renders to nothing: it
+fails any render, on every path (template, lint, install), whose values the
+flattened manifests would never be rendered with.
+
+1. image.tag has no default and must be a 40-character lowercase hex commit
+   SHA, the pattern the CRD's imageTag and the SSM deploy document already
+   hold a tag to (D29).
+2. The release namespace must be mlobs. It is not a value: the templates name
+   metadata.namespace mlobs literally, for byte-parity with the flattened
+   manifests; the binary's leader-election namespace is a literal; and the
+   Role is shaped for mlobs (D33). A release anywhere else would split the
+   objects from Helm's release bookkeeping, so it is refused.
+
+Each message is a fixed line: operator/hack/helm-parity.sh renders one
+negative case per guard and asserts its message verbatim.
+*/ -}}
+{{- if not (regexMatch "^[0-9a-f]{40}$" (toString .Values.image.tag)) }}
+{{- fail "image.tag must be a 40-character lowercase hex commit SHA" }}
+{{- end }}
+{{- if ne .Release.Namespace "mlobs" }}
+{{- fail "the release namespace must be mlobs (install with -n mlobs)" }}
+{{- end }}

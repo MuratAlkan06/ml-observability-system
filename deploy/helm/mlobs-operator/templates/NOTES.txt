@@ -1,0 +1,18 @@
+{{ .Chart.Name }} {{ .Chart.Version }}: the ServingDeployment operator in {{ .Release.Namespace }}, at
+{{ .Values.image.prefix }}/mlobs-operator:{{ .Values.image.tag }}.
+
+The operator only. The chart ships no ServingDeployment (D32's writer set
+is three): apply deploy/k3s/manifests/40-servingdeployment.yaml, rendered as
+apply.sh renders it, to give the operator something to run.
+
+The CRD is install-only. Helm created servingdeployments.serving.mlobs.dev
+from crds/ if it was absent, and never upgrades or deletes it: helm
+uninstall leaves it, and every ServingDeployment, in place. Delete it
+explicitly, last, with kubectl delete crd servingdeployments.serving.mlobs.dev.
+This chart has no CRD upgrade path at 0.1.0; CRD changes ship through
+deploy/k3s/manifests/01-servingdeployment-crd.yaml.
+
+One namespace: the chart renders only into mlobs. That is its non-goal,
+not a missing value.
+
+The two value seams: image.prefix and image.tag. See the chart's README.md.
