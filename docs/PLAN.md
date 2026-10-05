@@ -1015,3 +1015,30 @@ retention jobs, Alembic.
 > would sit silently unenforced until the controller returns, and re-enabling it means revisiting
 > the range. Verified against a real v1.36.4 cluster at O2 (issue #66, PR #81); no frozen text
 > edited.
+
+> **D30 addendum (2026-10-05, O4):** a pre-cutover EBS snapshot was considered at O4 and ruled
+> out, per the O4 acceptance in `docs/PHASE3.md`; the reasoning is recorded in `docs/RUNBOOK.md`,
+> "No EBS snapshot before the cutover (D30)" (issue #68). No frozen text edited.
+
+> **D34 note (2026-10-05, O4):** the exact 8000-8000 range forecloses any staged or
+> scratch-NodePort cutover path. No NodePort other than 8000 is admissible, so the api Service
+> cannot land anywhere first, and 8000 is the live api's `hostPort` until the one-time patch (D19
+> erratum above) takes it out. A cutover therefore necessarily has a dark window, from that patch
+> until the dispatch's NodePort Service lands. Its cost is accepted and recorded, not engineered
+> away: the 15-minute trip in `docs/RUNBOOK.md`'s abort criteria, which is the 30-minute dark
+> ceiling less the longest way back on record (13 minutes, a floor on the worst case and not a
+> bound). The live cutover stayed inside it, dark about 11 minutes. Owner-ruled 2026-10-02 in the
+> review of O4's abort criteria, which merged with #87 (issue #68); no frozen text edited.
+
+> **Incident (2026-10-05, O4):** #87's operator-image preflight made every pre-operator SHA
+> undeployable, D36's way-back target `16a8c86` included: it checked `mlobs-operator` at every
+> target SHA, and no operator image exists for a SHA that predates the operator. Found live at
+> D36 step 5 — the dispatch of `16a8c86` (run 37276462319) failed the preflight before touching
+> the host — and service was restored by a forward dispatch of `d30bcdf` (run 37276684801), dark
+> about 10 minutes, inside the 15-minute trip. Fixed by #88, merged as `2554597`: the check is
+> keyed on the tree, applying only when the target SHA ships `03-operator.yaml`, and a tree that
+> ships it without a published image still fails. The fixed path then carried the completed live
+> D36 re-run (run 37339612097). CI's `RollbackRehearsal` could not have caught it: it drives
+> `apply.sh` below the pipeline, a gap `docs/RUNBOOK.md` documents ("What the rehearsal proves,
+> and what it does not"). The pipeline half of D36's way back is therefore tested only live, and
+> has exactly one completed live test on record: that re-run (issue #68); no frozen text edited.
