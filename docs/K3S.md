@@ -67,7 +67,10 @@ test.
 - **P3 — EKS and Helm.** Plain manifests are the right size for one
   instantiation (D17). P3's ephemeral EKS run is where a chart has something to
   prove; revisit D17 there, including whether these manifests become the
-  chart's source or give way to it.
+  chart's source or give way to it. D38 settled the chart half in Phase 3
+  H1: these manifests stay the authority, and the operator chart at
+  `deploy/helm/mlobs-operator/` is a CI-checked projection of three of them
+  (`01-` to `03-`), with no Helm in the k3s path. The EKS run is H2 (D39).
 - **Compose retirement — at P3 close.** Compose stays on the host as the
   fallback runtime (D25) and in the README quick start for local development.
   Retiring `docker-compose.yml` is a change with its own risk (D27), decided at

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: mlobs-operator
+description: >-
+  The ServingDeployment operator of ml-observability-system, packaged from the
+  flattened manifests in deploy/k3s/manifests/, which stay authoritative
+  (docs/PLAN.md D38). The operator only; no ServingDeployment.
+type: application
+version: 0.1.0

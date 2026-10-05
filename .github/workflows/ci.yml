@@ -335,8 +335,10 @@ jobs:
     # gated here. prometheus/ joined in O3: apply.sh mounts
     # prometheus/prometheus.yml as the scrape config and smoke.sh reads its job
     # list, so a change there alone changes what both rehearsals deploy and
-    # assert. The second output, `rehearsal`, gates RollbackRehearsal on the
-    # same paths and on this file, where that job is defined.
+    # assert. deploy/helm/ joined `run` in Phase 3 H1 (D38): OperatorE2E
+    # installs the operator from that chart too. The second output,
+    # `rehearsal`, gates RollbackRehearsal on the same paths but deploy/helm/,
+    # which that job never installs, and on this file, where it is defined.
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.filter.outputs.run }}
@@ -360,15 +362,15 @@ jobs:
           # Same explicit-status discipline as DocsGate: a bare `! grep` would
           # read a grep error (status 2) as "nothing matched" and skip the job.
           status=0
-          printf '%s\n' "$changed" | grep -qE '^(deploy/k3s/|docker/|operator/|prometheus/)' || status=$?
+          printf '%s\n' "$changed" | grep -qE '^(deploy/k3s/|deploy/helm/|docker/|operator/|prometheus/)' || status=$?
           case "$status" in
             0)
               echo "run=true" >> "$GITHUB_OUTPUT"
-              echo "ok: deploy/k3s, docker, operator or prometheus paths changed — K3sSmoke will run"
+              echo "ok: deploy/k3s, deploy/helm, docker, operator or prometheus paths changed — K3sSmoke will run"
               ;;
             1)
               echo "run=false" >> "$GITHUB_OUTPUT"
-              echo "ok: no deploy/k3s, docker, operator or prometheus changes — K3sSmoke skipped"
+              echo "ok: no deploy/k3s, deploy/helm, docker, operator or prometheus changes — K3sSmoke skipped"
               ;;
             *)
               echo "::error::grep exited with status $status"
@@ -820,6 +822,13 @@ jobs:
     # anything, and that runs here against the real pinned k3s. Nothing below
     # sets the range, so the pair's other half has no place here either.
     #
+    # Since Phase 3 H1 (D38) the script installs the operator twice on this
+    # one cluster: from the flattened manifests, then, once that install is
+    # taken down to its CRD, from the chart at deploy/helm/mlobs-operator with
+    # `helm install -n mlobs` at the same prefix and tag, with the same
+    # assertions. Helm is pinned here exactly as in operator.yml's HelmParity;
+    # the two pins move together.
+    #
     # Gated by the same path filter as K3sSmoke, and credential-less like it.
     needs: K3sPaths
     if: needs.K3sPaths.outputs.run == 'true'
@@ -835,6 +844,8 @@ jobs:
       CLUSTER_NAME: mlobs-e2e
       IMAGE_PREFIX: docker.io/library
       IMAGE_TAG: ${{ github.sha }}
+      HELM_VERSION: v3.22.0
+      HELM_SHA256: 1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
     steps:
       - uses: actions/checkout@v7
 
@@ -845,6 +856,21 @@ jobs:
             "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
           sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
           k3d version
+
+      - name: Install Helm (pinned)
+        # The same pinned release asset and checksum as HelmParity.
+        run: |
+          curl -fsSL --retry 2 -o "${RUNNER_TEMP}/helm.tar.gz" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+          version="$(helm version --template '{{.Version}}')"
+          if [ "$version" != "$HELM_VERSION" ]; then
+            echo "::error::helm reports ${version}, expected ${HELM_VERSION} (D38)"
+            exit 1
+          fi
+          echo "ok: helm ${version}"
 
       - name: Create k3d cluster
         # The host's add-ons disabled as in K3sSmoke; the node-port range left
@@ -881,6 +907,7 @@ jobs:
           kubectl -n mlobs get servingdeployment api -o yaml || true
           kubectl -n mlobs get events --sort-by=.lastTimestamp | tail -40 || true
           kubectl -n mlobs logs deployment/operator --tail=100 || true
+          helm list --all-namespaces --all || true
 
       - name: Delete cluster
         if: always()

@@ -1,0 +1,12 @@
+# The chart's two value seams, and no third (docs/PLAN.md D38). They fill the
+# placeholders apply.sh renders in deploy/k3s/manifests/03-operator.yaml:
+# IMAGE_PREFIX and IMAGE_TAG. The namespace is not a value: the chart renders
+# only into mlobs (templates/guards.yaml).
+image:
+  # Registry and owner of the mlobs images. The operator runs
+  # <prefix>/mlobs-operator:<tag>, and writes the api image it manages as
+  # <prefix>/mlobs-api:<the ServingDeployment's tag> (its --image-prefix).
+  prefix: ghcr.io/muratalkan06
+  # tag has no default. It is required, a 40-character lowercase hex commit
+  # SHA, the operator image's per-SHA tag; any other value fails the render
+  # (templates/guards.yaml). Pass it with --set image.tag=<sha>.

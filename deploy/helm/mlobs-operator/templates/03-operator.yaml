@@ -1,0 +1,81 @@
+# The ServingDeployment operator — Phase 3 O2 (docs/PLAN.md D31, D33).
+#
+# Source: operator/ in this repository; GhcrPublish pushes its image as
+# mlobs-operator beside the service images, under the same per-SHA tag, and
+# apply.sh renders the same image prefix and tag here as everywhere else.
+#
+# It runs as the `operator` ServiceAccount of 02-operator-rbac.yaml, whose one
+# namespaced Role is the whole of its grant (D33 and its O2 addendum).
+# apply.sh applies this after the CRD is Established and waits for its rollout
+# before it applies the ServingDeployment (D32's deploy sequence).
+#
+# Leader election is on, through a Lease in mlobs; one replica holds it (D35).
+# Metrics bind to loopback with authn/authz off: nothing off the pod reads
+# them in v0, and serving them to the cluster would need the cluster-scoped
+# review grants D33 rules out.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: mlobs
+  labels:
+    app: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operator
+  template:
+    metadata:
+      labels:
+        app: operator
+    spec:
+      serviceAccountName: operator
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: {{ .Values.image.prefix }}/mlobs-operator:{{ .Values.image.tag }}
+          # IfNotPresent for the same reason as the service images: a local
+          # build imported into containerd is used as-is.
+          imagePullPolicy: IfNotPresent
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=127.0.0.1:8080
+            - --metrics-secure=false
+            # The operator writes the api image as <prefix>/mlobs-api:<tag>;
+            # the prefix is the one apply.sh renders into every image here.
+            - --image-prefix={{ .Values.image.prefix }}
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # A memory request like every workload here (D22), and no limit:
+          # a limit beyond D8's two would be a guess.
+          resources:
+            requests:
+              memory: 64Mi

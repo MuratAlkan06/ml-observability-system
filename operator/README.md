@@ -129,8 +129,9 @@ assets. The band moves only together with a k3s bump (D35).
 ## Develop
 
 ```bash
-make manifests  # CRD + Role, spliced into deploy/k3s/manifests/01-, 02-
-make verify-manifests  # the CI sync check: fails if those drift from the Go source
+make manifests  # CRD + Role, spliced into deploy/k3s/manifests/01-, 02-, and the chart's CRD copy
+make verify-manifests  # the CI sync check: fails if those three drift from the Go source
+hack/helm-parity.sh  # CI's HelmParity: the operator chart against 02- and 03- (Helm 3.22.0)
 make generate   # DeepCopy methods (controller-gen object)
 make lint       # golangci-lint, custom-built with the logcheck plugin
 make test       # envtest: a real kube-apiserver and etcd, 1.36.x
@@ -139,7 +140,10 @@ make build      # bin/manager
 
 The end-to-end check, as CI's `OperatorE2E` job runs it, from the repository
 root. The cluster is started without the D34 pair on purpose: the check's first
-assertion is that `apply.sh`'s preflight refuses it.
+assertion is that `apply.sh`'s preflight refuses it. It then installs the
+operator twice, from the flattened manifests and then from the chart at
+`deploy/helm/mlobs-operator` (D38), so it needs `helm` on `PATH`; CI pins
+v3.22.0.
 
 ```bash
 k3d cluster create mlobs-e2e --image rancher/k3s:v1.36.4-k3s1 \
