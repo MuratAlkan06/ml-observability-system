@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# Fake aws for deploy/eks/test (docs/PLAN.md D39). It answers the identity and
+# version reads, and every sweep query from FAKE_STATE/inventory — one
+# resource per line, "<kind> <id> <state> <key=value>..." — by evaluating the
+# query's own filters: EC2 --filters (tag:<key>, tag-key, instance-state-name,
+# ANDed), the tagging API's --tag-filters (ANDed), and the Key/Value tests in a
+# --query tag match (ORed, as the sweep's JMESPath writes them). A resource is
+# returned only if the filters the script sent select it, so a project-tagged
+# resource in the inventory stays out of the sweep unless the script asks for
+# it. Anything it does not model fails with exit 255. Knobs:
+#   FAKE_IDENTITY_ARN   the caller's ARN (a non-root IAM user by default)
+#   FAKE_EKS_STATUS     EKS 1.36's versionStatus (STANDARD_SUPPORT)
+#   FAKE_AWS_FAIL_ON    calls containing this string fail (exit 254)
+set -euo pipefail
+: "${FAKE_STATE:?fake aws: FAKE_STATE is not set}"
+S="$FAKE_STATE"
+INV="$S/inventory"
+printf 'aws\t%s\n' "$*" >>"$S/calls.log"
+touch "$INV"
+
+die() { echo "fake aws: $1" >&2; exit 255; }
+
+if [ -n "${FAKE_AWS_FAIL_ON:-}" ]; then
+  case "$*" in
+    *"$FAKE_AWS_FAIL_ON"*) echo "An error occurred (UnauthorizedOperation) when calling the operation" >&2; exit 254 ;;
+  esac
+fi
+
+service="${1:-}" op="${2:-}"
+shift 2 || true
+specs="" query="" id=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --filters)
+      shift
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        name="${1#Name=}"
+        name="${name%%,Values=*}"
+        values="${1#*,Values=}"
+        case "$name" in
+          tag:*) specs="${specs};tag|${name#tag:}|${values}" ;;
+          tag-key) specs="${specs};tagkey||${values}" ;;
+          instance-state-name) specs="${specs};state||${values}" ;;
+          *) die "unsupported filter ${name}" ;;
+        esac
+        shift
+      done
+      ;;
+    --tag-filters)
+      shift
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        case "$1" in
+          Key=*,Values=*) key="${1#Key=}"; specs="${specs};tag|${key%%,Values=*}|${1#*,Values=}" ;;
+          Key=*) specs="${specs};tagkey||${1#Key=}" ;;
+          *) die "unsupported tag filter $1" ;;
+        esac
+        shift
+      done
+      ;;
+    --query) query="$2"; shift 2 ;;
+    --role-name | --open-id-connect-provider-arn) id="$2"; shift 2 ;;
+    --region | --output | --cluster-versions | --resource-type-filters | --log-group-name-prefix) shift 2 ;;
+    *) die "unsupported argument $1" ;;
+  esac
+done
+
+# The Key/Value tests of a JMESPath tag match, as specs.
+query_specs() {
+  printf '%s' "$query" | grep -oE "Key=='[^']*'( && Value=='[^']*')?" \
+    | sed -E "s/^Key=='([^']*)' && Value=='([^']*)'\$/tag|\1|\2/; s/^Key=='([^']*)'\$/tagkey||\1/" \
+    | tr '\n' ';'
+}
+
+# select KIND MODE SPECS [ID] [WITH_STATE]: the matching inventory ids,
+# tab-separated, as --output text prints a list.
+select_ids() {
+  awk -v kind="$1" -v mode="$2" -v specs="$3" -v only="${4:-}" -v with_state="${5:-0}" '
+    BEGIN { n = split(specs, spec, ";") }
+    $1 == kind && (only == "" || $2 == only) {
+      ok = (mode == "and") ? 1 : 0
+      for (i = 1; i <= n; i++) {
+        if (spec[i] == "") continue
+        split(spec[i], p, "|")
+        nv = split(p[3], vals, ",")
+        hit = 0
+        if (p[1] == "state") {
+          for (j = 1; j <= nv; j++) if ($3 == vals[j]) hit = 1
+        } else {
+          for (t = 4; t <= NF; t++) {
+            eq = index($t, "=")
+            k = substr($t, 1, eq - 1)
+            v = substr($t, eq + 1)
+            if (p[1] == "tag" && k == p[2]) for (j = 1; j <= nv; j++) if (v == vals[j]) hit = 1
+            if (p[1] == "tagkey") for (j = 1; j <= nv; j++) if (k == vals[j]) hit = 1
+          }
+        }
+        if (mode == "and" && !hit) ok = 0
+        if (mode == "or" && hit) ok = 1
+      }
+      if (ok) printf "%s%s", (found++ ? "\t" : ""), (with_state ? $2 ":" $3 : $2)
+    }
+    END { print "" }' "$INV"
+}
+
+case "${service} ${op}" in
+  "sts get-caller-identity")
+    printf '%s\t123456789012\n' "${FAKE_IDENTITY_ARN:-arn:aws:iam::123456789012:user/mlobs-demo-admin}"
+    ;;
+  "eks describe-cluster-versions")
+    printf '1.36\t%s\t2027-08-01T00:00:00+00:00\t1.36.2\n' "${FAKE_EKS_STATUS:-STANDARD_SUPPORT}"
+    ;;
+  "ec2 describe-instances") select_ids instance and "$specs" ;;
+  "ec2 describe-security-groups") select_ids sg and "$specs" ;;
+  "ec2 describe-network-interfaces") select_ids eni and "$specs" ;;
+  "ec2 describe-launch-templates") select_ids lt and "$specs" ;;
+  "ec2 describe-vpcs") select_ids vpc and "$specs" ;;
+  "resourcegroupstaggingapi get-resources") select_ids lb and "$specs" ;;
+  "cloudformation describe-stacks") select_ids stack or "$(query_specs)" "" 1 ;;
+  "iam list-roles") select_ids role and "" ;;
+  "iam list-role-tags") select_ids role or "$(query_specs)" "$id" ;;
+  "iam list-open-id-connect-providers") select_ids oidc and "" ;;
+  "iam list-open-id-connect-provider-tags") select_ids oidc or "$(query_specs)" "$id" ;;
+  "logs describe-log-groups")
+    select_ids loggroup and "" "$(printf '%s' "$query" | sed -n "s/.*logGroupName=='\([^']*\)'.*/\1/p")"
+    ;;
+  *)
+    die "unexpected call: ${service} ${op}"
+    ;;
+esac

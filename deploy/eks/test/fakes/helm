@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Fake helm for deploy/eks/test (docs/PLAN.md D38, D39): the pinned version,
+# and an install and uninstall of the operator chart into mlobs whose effects
+# the fake kubectl reads — the operator image, and the CRD from crds/, which
+# uninstall leaves in place as Helm's install-only contract does.
+set -euo pipefail
+: "${FAKE_STATE:?fake helm: FAKE_STATE is not set}"
+S="$FAKE_STATE"
+printf 'helm\t%s\n' "$*" >>"$S/calls.log"
+
+die() { echo "fake helm: $1" >&2; exit 1; }
+
+case "${1:-}" in
+  version)
+    echo v3.22.0
+    ;;
+  install)
+    [ -n "${KUBECONFIG:-}" ] && [ -s "$KUBECONFIG" ] || die "no scratch kubeconfig"
+    [ "${2:-}" = mlobs-operator ] || die "unexpected release ${2:-}"
+    [ -f "${3:-}/Chart.yaml" ] || die "no chart at ${3:-}"
+    case " $* " in *" --namespace mlobs "*) ;; *) die "install outside -n mlobs" ;; esac
+    prefix="$(printf '%s\n' "$@" | sed -n 's/^image\.prefix=//p')"
+    tag="$(printf '%s\n' "$@" | sed -n 's/^image\.tag=//p')"
+    [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || die "image.tag must be a 40-character lowercase hex commit SHA"
+    echo 1 >"$S/operator"
+    echo 1 >"$S/crd"
+    echo "${prefix}/mlobs-operator:${tag}" >"$S/opimage"
+    printf 'NAME: mlobs-operator\nNAMESPACE: mlobs\nSTATUS: deployed\nREVISION: 1\n'
+    ;;
+  uninstall)
+    [ -n "${KUBECONFIG:-}" ] && [ -s "$KUBECONFIG" ] || die "no scratch kubeconfig"
+    [ "${2:-}" = mlobs-operator ] || die "unexpected release ${2:-}"
+    echo 0 >"$S/operator"
+    echo 'release "mlobs-operator" uninstalled'
+    ;;
+  *)
+    die "unexpected call: $*"
+    ;;
+esac
