@@ -71,6 +71,7 @@ test.
   H1: these manifests stay the authority, and the operator chart at
   `deploy/helm/mlobs-operator/` is a CI-checked projection of three of them
   (`01-` to `03-`), with no Helm in the k3s path. The EKS run is H2 (D39).
+  Its config and owner-run script, never CI, are in `deploy/eks/`.
 - **Compose retirement — at P3 close.** Compose stays on the host as the
   fallback runtime (D25) and in the README quick start for local development.
   Retiring `docker-compose.yml` is a change with its own risk (D27), decided at
