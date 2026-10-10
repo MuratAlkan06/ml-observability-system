@@ -294,7 +294,7 @@ too.
 
 `rehearse-rollback.sh` rehearses undoing the operator (D36) the way CI's
 `RollbackRehearsal` job runs it. It deploys the pre-cutover tree through that
-tree's own `apply.sh`, cuts over to this one as O4 will on the host (issue
+tree's own `apply.sh`, cuts over to this one as O4 did on the host (issue
 #68), so that the operator adopts `deployment/api` in place, and opens a canary
 window. Then it runs D36's six steps and asserts each on the state it leaves:
 the canary to 0 by host patch, the `ServingDeployment` deleted,

@@ -419,7 +419,7 @@ operator v0: in-place adoption of the api, a mechanical canary window with an or
 pause and an operator-enforced 45-minute TTL, promote and rollback still human calls;
 demonstrated in CI on k3d, live on the EC2 host, and through its Helm chart on an ephemeral EKS
 cluster; Docker Compose retired (D40); see the
-[release notes].
+[release notes](https://github.com/MuratAlkan06/ml-observability-system/releases/tag/v3.0.0).
 
 **v2.0.0 — Phase 2: infrastructure, Kubernetes, gated deploys** — principles +
 CI gates, Terraform adoption of the host, the live k3s migration, and the

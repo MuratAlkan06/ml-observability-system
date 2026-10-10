@@ -39,8 +39,10 @@ Stated plainly, because the gap matters more than the coverage:
 - **It does not prove the host can be rebuilt from code.** These resources were
   imported, not created by Terraform. A real `apply` from an empty state has
   never been exercised, so "reproducible from source" is not a claim this slice
-  earns. That evidence is deferred to the P3 ephemeral cluster run, which
-  creates and destroys everything it uses.
+  earns. That evidence was deferred to the P3 ephemeral cluster run, and the
+  run did not earn it: by D39's ruling it was eksctl-based, with Terraform
+  rejected for the cluster and this root left untouched, so no Terraform
+  rebuild was exercised. The item remains open, recorded on issue #60.
 - **It does not provision the host.** The instance's `userData` is empty; Docker,
   the compose stack and the `.env` were configured over SSH by hand. Codifying
   that is out of scope here.
@@ -53,8 +55,10 @@ Stated plainly, because the gap matters more than the coverage:
   growing while the certified disk stays exactly as measured. It is a regional
   account setting, not Terraform state, which is why it is written here rather
   than added to this root. Retiring the existing unencrypted volume needs a
-  snapshot, an encrypted copy and a stop/detach/attach swap — deferred to P3,
-  once the numbers that volume carries are no longer the ones being cited.
+  snapshot, an encrypted copy and a stop/detach/attach swap. It was deferred to
+  P3, once the numbers that volume carries are no longer the ones being cited,
+  and P3 did not do it: its ephemeral run was eksctl-based by D39's ruling and
+  left this root untouched. The swap remains open, recorded on issue #60.
 - **It does not narrow the public ingress.** Ports 8000 and 3000 are open to
   `0.0.0.0/0` as found, which is why the host only runs during a demo window.
 

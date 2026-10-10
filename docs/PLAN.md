@@ -1210,3 +1210,25 @@ retention jobs, Alembic.
 > Helm's own anchored Source lines on the chart side; the flattened file's own Source comment is
 > kept and compared. Equal-or-stronger detection, reproduced independently at H1 (PR #94); no
 > frozen text edited.
+
+> **D39 addendum (2026-10-10, H2):** H2's live run departed from the frozen text in three places.
+> (a) "Owner-run": the run of 2026-10-07 was executed by the orchestrator, not the owner, under
+> the owner's ruling recorded on #92 (comment 6042713733), as the designated non-root principal
+> `mlobs-demo-admin`, the IAM user named on the transcript's opening
+> `aws sts get-caller-identity` line. (b) The `infra/ec2` plan backstop printed its documented
+> `skip:` line, because terraform was not on the run machine's PATH, so the run carries no
+> exit-0 plan of its own. The substitute is CI's `Terraform plan` on `main` after the run:
+> run 38032080898 at `f33b659`, `ok: plan is a no-op`, from a job that fails on any pending
+> change on a push to `main` (#92 comment 6097515979). (c) The cost line used measured hours,
+> "0.6h wall clock × verified rates, verified next day", rather than the frozen "3h" phrasing.
+> The departure was disclosed in PR #96 and ruled form-preserving at H2's verification: a
+> measured figure is more honest than a constant the run did not take. No frozen text edited.
+
+> **D10 note (2026-10-10, H2):** D10 deferred the evidence that the host can be rebuilt from code
+> "to P3's ephemeral apply/destroy run". The revised P3 did not earn it. D39 deliberately rejected
+> Terraform for the ephemeral cluster, which eksctl created and destroyed from its own committed
+> config, and left `infra/ec2` and its state untouched, so no apply of this root from an empty
+> state ran in P3 and D10's consequence stands as written: the host is described by code, not
+> shown to be rebuildable from it. The deferral moves to the #60 deferral record (comment
+> 6097856211), with its companion, the encrypted-root-volume swap `infra/README.md` also deferred
+> to P3; both remain open. No frozen text edited.
