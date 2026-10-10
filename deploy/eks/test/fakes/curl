@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+#
+# Fake curl for deploy/eks/test (docs/PLAN.md D39). It serves the URLs
+# deploy/eks/demo.sh fetches and nothing else:
+#   - GHCR's anonymous token and manifest HEADs; FAKE_GHCR_404 lists the
+#     "<owner>/<image>:<sha>" refs that answer 404
+#   - the AWS Price List offer file, at FAKE_EKS_RATE (0.1000000000)
+#   - the pinned helm and eksctl downloads, as bytes that are not the pinned
+#     release, so their checksum check must refuse them
+#   - 127.0.0.1:<port> through a live fake port-forward only: /health,
+#     /predict and /metrics, the last counting the canary's own predictions
+set -euo pipefail
+: "${FAKE_STATE:?fake curl: FAKE_STATE is not set}"
+S="$FAKE_STATE"
+
+url="" out="" wfmt="" method=GET fail_on_http=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) wfmt="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -H | -d | --max-time | --connect-timeout | --retry | --speed-limit | --speed-time) shift 2 ;;
+    http://* | https://*) url="$1"; shift ;;
+    --*) shift ;;
+    -*)
+      case "$1" in *f*) fail_on_http=1 ;; esac
+      shift
+      ;;
+    *) shift ;;
+  esac
+done
+printf 'curl\t%s %s\n' "$method" "$url" >>"$S/calls.log"
+
+# emit BODY CODE: curl's three outputs — the body to -o or stdout, the -w
+# code, and exit 22 for an HTTP error under -f.
+emit() {
+  if [ "$fail_on_http" = 1 ] && [ "$2" -ge 400 ]; then
+    exit 22
+  fi
+  if [ -n "$out" ]; then printf '%s' "$1" >"$out"; else printf '%s' "$1"; fi
+  if [ -n "$wfmt" ]; then printf '%s' "$2"; fi
+}
+
+price_list() {
+  local rate="${FAKE_EKS_RATE:-0.1000000000}"
+  printf '{"publicationDate":"2026-09-28T19:42:55Z","products":{'
+  printf '"DYQZA4NFAQKBU6H4":{"sku":"DYQZA4NFAQKBU6H4","attributes":{"usagetype":"USW2-AmazonEKS-Hours:perCluster"}},'
+  printf '"MBEV4FFUUBVFQGEW":{"sku":"MBEV4FFUUBVFQGEW","attributes":{"usagetype":"USW2-AmazonEKS-Hours:extendedSupport"}}},'
+  printf '"terms":{"OnDemand":{'
+  printf '"DYQZA4NFAQKBU6H4":{"DYQZA4NFAQKBU6H4.JRTCKXETXF":{"priceDimensions":{"DYQZA4NFAQKBU6H4.JRTCKXETXF.6YS6EN2CT7":{"unit":"Hours","pricePerUnit":{"USD":"%s"}}}}},' "$rate"
+  printf '"MBEV4FFUUBVFQGEW":{"MBEV4FFUUBVFQGEW.JRTCKXETXF":{"priceDimensions":{"MBEV4FFUUBVFQGEW.JRTCKXETXF.6YS6EN2CT7":{"unit":"Hours","pricePerUnit":{"USD":"0.5000000000"}}}}}}}}\n'
+}
+
+case "$url" in
+  "https://ghcr.io/token?scope=repository:"*)
+    emit '{"token":"fake-anonymous-token"}' 200
+    ;;
+  https://ghcr.io/v2/*/manifests/*)
+    ref="${url#https://ghcr.io/v2/}"
+    image="${ref%/manifests/*}:${ref##*/}"
+    case " ${FAKE_GHCR_404:-} " in
+      *" ${image} "*) emit "" 404 ;;
+      *) emit "" 200 ;;
+    esac
+    ;;
+  https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEKS/current/us-west-2/index.json)
+    emit "$(price_list)" 200
+    ;;
+  https://get.helm.sh/* | https://github.com/eksctl-io/eksctl/releases/download/*)
+    emit "these bytes are not the pinned release" 200
+    ;;
+  http://127.0.0.1:*)
+    rest="${url#http://127.0.0.1:}"
+    port="${rest%%/*}"
+    path="/${rest#*/}"
+    forward="$S/pf-${port}"
+    resource="" pid=""
+    if [ -f "$forward" ]; then read -r resource pid <"$forward" || true; fi
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      echo "curl: (7) Failed to connect to 127.0.0.1 port ${port}" >&2
+      exit 7
+    fi
+    counter="$S/predictions-${resource//\//_}"
+    count="$(cat "$counter" 2>/dev/null || echo 0)"
+    case "${method} ${path}" in
+      "GET /health")
+        emit '{"status":"ok","model_version":"fake"}' 200
+        ;;
+      "POST /predict")
+        echo $((count + 1)) >"$counter"
+        emit '{"request_id":"7f0c2e4a-9b1d-4f3e-8a6c-1d2e3f4a5b6c","label":"POSITIVE","confidence":0.9987,"model_version":"fake"}' 200
+        ;;
+      "GET /metrics")
+        emit "$(printf '# TYPE mlobs_predictions_total counter\nmlobs_predictions_total{label="POSITIVE",model_version="fake"} %s.0\n' "$count")" 200
+        ;;
+      *)
+        emit "not found" 404
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake curl: unexpected URL: ${url}" >&2
+    exit 2
+    ;;
+esac

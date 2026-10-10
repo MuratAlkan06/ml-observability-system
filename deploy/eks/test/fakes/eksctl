@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# Fake eksctl for deploy/eks/test (docs/PLAN.md D39). `create cluster` adds the
+# resources a real create leaves in the account to FAKE_STATE/inventory, tagged
+# the way eksctl and EKS tag them; `delete cluster` removes them, leaving the
+# node's instance listed as terminated, as EC2 does for a while. The fake aws
+# answers the sweep from that inventory, so the sweep in a run sweeps what the
+# run created. Knobs:
+#   FAKE_EKSCTL_CREATE_FAIL=1         create fails, leaving a rolled-back stack
+#   FAKE_EKSCTL_DELETE_LEAVES_ENI=1   delete leaves one ENI behind
+set -euo pipefail
+: "${FAKE_STATE:?fake eksctl: FAKE_STATE is not set}"
+S="$FAKE_STATE"
+INV="$S/inventory"
+printf 'eksctl\t%s\n' "$*" >>"$S/calls.log"
+
+die() { echo "fake eksctl: $1" >&2; exit 1; }
+
+advance() {
+  echo $(($(cat "$DEMO_TEST_CLOCK_FILE") + $1)) >"$DEMO_TEST_CLOCK_FILE"
+}
+
+# option VALUE-FLAG ARGS...: the value after VALUE-FLAG.
+option() {
+  local flag="$1"
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$flag" ]; then
+      printf '%s' "${2:-}"
+      return
+    fi
+    shift
+  done
+}
+
+case "${1:-} ${2:-}" in
+  "version ")
+    echo 0.230.0
+    ;;
+  "create cluster")
+    config="$(option --config-file "$@")"
+    kubeconfig="$(option --kubeconfig "$@")"
+    [ -n "$kubeconfig" ] || die "create without --kubeconfig would write ~/.kube/config"
+    [ -f "$config" ] || die "no config file: ${config}"
+    ! grep -q CLUSTER_NAME "$config" || die "the config was not rendered"
+    name="$(sed -n 's/^  name: //p' "$config" | head -n 1)"
+    [ -n "$name" ] || die "no metadata.name in ${config}"
+    echo "[i]  eksctl version 0.230.0"
+    echo "[i]  using region us-west-2"
+    echo "[i]  building cluster stack \"eksctl-${name}-cluster\""
+    n="${name#mlobs-demo-}"
+    if [ "${FAKE_EKSCTL_CREATE_FAIL:-0}" = 1 ]; then
+      echo "stack eksctl-${name}-cluster ROLLBACK_COMPLETE alpha.eksctl.io/cluster-name=${name}" >>"$INV"
+      advance 300
+      echo "Error: failed to create cluster \"${name}\"" >&2
+      exit 1
+    fi
+    cat >>"$INV" <<EOF
+stack eksctl-${name}-cluster CREATE_COMPLETE alpha.eksctl.io/cluster-name=${name} alpha.eksctl.io/eksctl-version=0.230.0
+stack eksctl-${name}-nodegroup-demo CREATE_COMPLETE alpha.eksctl.io/cluster-name=${name} alpha.eksctl.io/nodegroup-name=demo
+vpc vpc-0${n}00000 available alpha.eksctl.io/cluster-name=${name}
+sg sg-0${n}0cp - alpha.eksctl.io/cluster-name=${name}
+sg sg-0${n}0eks - aws:eks:cluster-name=${name} kubernetes.io/cluster/${name}=owned
+lt lt-0${n}00000 - alpha.eksctl.io/cluster-name=${name}
+instance i-0${n}0node running eks:cluster-name=${name} kubernetes.io/cluster/${name}=owned eks:nodegroup-name=demo
+eni eni-0${n}0node in-use eks:cluster-name=${name}
+role eksctl-${name}-cluster-ServiceRole-1A2B3C - alpha.eksctl.io/cluster-name=${name}
+role eksctl-${name}-nodegroup-demo-NodeInstanceRole-4D5E6F - alpha.eksctl.io/cluster-name=${name}
+EOF
+    printf 'apiVersion: v1\nkind: Config\ncurrent-context: fake@%s\n' "$name" >"$kubeconfig"
+    advance 1080
+    echo "[i]  saved kubeconfig as \"${kubeconfig}\""
+    echo "[✔]  EKS cluster \"${name}\" in \"us-west-2\" region is ready"
+    ;;
+  "delete cluster")
+    name="$(option --name "$@")"
+    [ -n "$name" ] || die "delete without --name"
+    case " $* " in *" --wait "*) ;; *) die "delete without --wait" ;; esac
+    if ! grep -q "^stack eksctl-${name}-cluster " "$INV" 2>/dev/null; then
+      echo "Error: cluster \"${name}\" does not exist" >&2
+      exit 1
+    fi
+    # Every resource carrying the cluster's name in a tag goes; the node's
+    # instance stays listed, terminated.
+    awk -v n="$name" '{
+      hit = 0
+      for (t = 4; t <= NF; t++) if ($t ~ ("=" n "$") || index($t, "kubernetes.io/cluster/" n "=") == 1) hit = 1
+      if (!hit) { print; next }
+      if ($1 == "instance") { $3 = "terminated"; print }
+    }' "$INV" >"$INV.next"
+    mv "$INV.next" "$INV"
+    if [ "${FAKE_EKSCTL_DELETE_LEAVES_ENI:-0}" = 1 ]; then
+      echo "eni eni-0stranded0000001 available kubernetes.io/cluster/${name}=owned" >>"$INV"
+    fi
+    advance 600
+    echo "[i]  deleting EKS cluster \"${name}\""
+    echo "[✔]  all cluster resources were deleted"
+    ;;
+  *)
+    die "unexpected call: $*"
+    ;;
+esac

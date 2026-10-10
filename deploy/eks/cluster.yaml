@@ -1,0 +1,62 @@
+# The ephemeral EKS cluster of the H2 demonstration (Phase 3; docs/PLAN.md D39).
+#
+# Created and deleted by deploy/eks/demo.sh, an owner-run script and never CI,
+# with the eksctl it pins. Nothing else applies this file. The script renders
+# it before `eksctl create cluster --config-file`, the way apply.sh renders the
+# k3s manifests: metadata.name below is a placeholder, substituted with the
+# run's own name, mlobs-demo-<nonce>, and the render fails loudly if the
+# placeholder survives. The name carries a per-run nonce (D39), so two runs
+# never share a cluster, a CloudFormation stack or the tag value the orphan
+# sweep filters on.
+#
+# Every choice below is pinned by D39. What is absent is pinned too:
+#   - no vpc.id: eksctl creates and owns the VPC, and deletes it with the
+#     cluster. Nothing here touches the default VPC or the P1 host (infra/ec2).
+#   - no cloudWatch block: eksctl leaves control-plane logging off unless
+#     cloudWatch.clusterLogging.enableTypes names a log type, so the sweep's
+#     CloudWatch log-group line (/aws/eks/<name>/cluster) is expected-absent
+#     by construction.
+#   - no addons, no ssh, no tags: eksctl's defaults. In particular no
+#     project=mlobs tag: the sweep filters on the cluster-scoped tag families
+#     eksctl and EKS stamp themselves, never on project tags (D39).
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  # The placeholder demo.sh substitutes with mlobs-demo-<nonce> (D39).
+  name: CLUSTER_NAME
+  # D39: us-west-2, the region of the rest of the project's AWS footprint.
+  region: us-west-2
+  # D39: Kubernetes 1.36, the D19/D35 band (k3s v1.36.x on the host and in CI,
+  # envtest 1.36.x), verified in standard support on the demo day by demo.sh
+  # before it creates anything. Quoted: an unquoted 1.36 is a YAML float.
+  version: "1.36"
+
+iam:
+  # D39: no IAM OIDC provider. Nothing in the demo uses IRSA, and with this
+  # false the sweep's IAM OIDC-provider line is expected-absent by
+  # construction. false is also eksctl's default; it is written down because
+  # the sweep depends on it.
+  withOIDC: false
+
+vpc:
+  nat:
+    # D39: no NAT gateway. The node sits in a public subnet with a public IPv4
+    # address (privateNetworking: false below), so nothing needs one, and a
+    # NAT gateway is one more resource billed by the hour and one more for
+    # the teardown to leave behind.
+    gateway: Disable
+
+managedNodeGroups:
+  - name: demo
+    # D39: one t3.medium. Two api pods at 1Gi requests, the operator at 64Mi
+    # and redis at 32Mi sum to about 2.1Gi, EKS system pods add about 0.2Gi:
+    # about 2.3Gi against a t3.medium's ~3.3Gi allocatable. t3.large is the
+    # one sanctioned deviation (D39).
+    instanceType: t3.medium
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    # D39: public subnets. The node gets a public IPv4 address, which demo.sh
+    # asserts, and pulls the public GHCR images (D18) without a NAT gateway.
+    privateNetworking: false

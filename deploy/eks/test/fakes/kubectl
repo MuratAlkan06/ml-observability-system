@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# Fake kubectl for deploy/eks/test (docs/PLAN.md D39). It answers exactly the
+# calls deploy/eks/demo.sh makes, from files in FAKE_STATE, logs each call with
+# the KUBECONFIG it ran under, and fails loudly on anything else. It also holds
+# D36's teardown order: the ServingDeployment is deleted while the operator
+# still runs, and the CRD only after both are gone.
+set -euo pipefail
+: "${FAKE_STATE:?fake kubectl: FAKE_STATE is not set}"
+S="$FAKE_STATE"
+printf 'kubectl\t%s\tKUBECONFIG=%s\n' "$*" "${KUBECONFIG:-}" >>"$S/calls.log"
+
+# --namespace mlobs may sit anywhere; the namespace is not what is modelled.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --namespace) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+line="$*"
+
+st() { cat "$S/$1" 2>/dev/null || printf '%s\n' "${2:-}"; }
+put() { printf '%s\n' "$2" >"$S/$1"; }
+die() { echo "fake kubectl: $1" >&2; exit 1; }
+
+# Only `version --client` may run before eksctl has written the kubeconfig:
+# every other call needs the scratch file, never ~/.kube/config (D39).
+case "$line" in
+  "version --client -o json") ;;
+  *) [ -n "${KUBECONFIG:-}" ] && [ -s "$KUBECONFIG" ] || die "no scratch kubeconfig (KUBECONFIG='${KUBECONFIG:-}') for: ${line}" ;;
+esac
+
+# The clock knob: the first call containing FAKE_CLOCK_JUMP_ON moves the clock
+# to FAKE_CLOCK_BASE + FAKE_CLOCK_JUMP_TO, then hangs FAKE_HANG_SECONDS — a
+# long call in flight when the bound passes.
+if [ -n "${FAKE_CLOCK_JUMP_ON:-}" ] && [ ! -e "$S/clock-jumped" ]; then
+  case "$line" in
+    *"$FAKE_CLOCK_JUMP_ON"*)
+      : >"$S/clock-jumped"
+      echo $((${FAKE_CLOCK_BASE:?} + ${FAKE_CLOCK_JUMP_TO:?})) >"$DEMO_TEST_CLOCK_FILE"
+      sleep "${FAKE_HANG_SECONDS:-0}"
+      ;;
+  esac
+fi
+
+table() {
+  printf 'NAME%-30sSTATUS\n' ""
+  printf '%s%-24sok\n' "$1" ""
+}
+
+# The ServingDeployment as "<generation> <observedGeneration> <status> <condition generation>".
+sd_condition() {
+  local type gen status
+  type="$(printf '%s' "$line" | sed -n 's/.*@\.type=="\([A-Za-z]*\)".*/\1/p')"
+  gen="$(st gen 1)"
+  case "$type" in
+    Ready) status=True ;;
+    CanaryActive) if [ "$(st window closed)" = open ]; then status=True; else status=False; fi ;;
+    *) die "unexpected condition ${type}" ;;
+  esac
+  printf '%s %s %s %s' "$gen" "$gen" "$status" "$gen"
+}
+
+case "$line" in
+  "port-forward "*)
+    printf '%s %s\n' "$2" "$$" >"$S/pf-${3%%:*}"
+    exec sleep 120
+    ;;
+  "version --client -o json")
+    echo '{"clientVersion":{"gitVersion":"v1.36.1"}}'
+    ;;
+  "version -o json")
+    echo '{"clientVersion":{"gitVersion":"v1.36.1"},"serverVersion":{"gitVersion":"v1.36.2-eks-3a1b2c4"}}'
+    ;;
+  "version")
+    printf 'Client Version: v1.36.1\nKustomize Version: v5.7.1\nServer Version: v1.36.2-eks-3a1b2c4\n'
+    ;;
+  "wait --for=condition=Ready nodes --all "*)
+    echo "node/ip-192-168-31-7.us-west-2.compute.internal condition met"
+    ;;
+  "get nodes -o wide")
+    printf 'NAME                                          STATUS   ROLES    AGE   VERSION               INTERNAL-IP     EXTERNAL-IP\n'
+    printf 'ip-192-168-31-7.us-west-2.compute.internal   Ready    <none>   2m    v1.36.2-eks-3a1b2c4   192.168.31.7    34.217.0.10\n'
+    ;;
+  "get nodes -o jsonpath="*)
+    printf 'ip-192-168-31-7.us-west-2.compute.internal True t3.medium 34.217.0.10\n'
+    ;;
+  "apply -f "*)
+    file="$3"
+    case "$file" in
+      */deploy/k3s/manifests/00-namespace.yaml) echo "namespace/mlobs created" ;;
+      */deploy/k3s/manifests/11-redis.yaml) printf 'service/redis created\ndeployment.apps/redis created\n' ;;
+      */deploy/k3s/manifests/*) die "apply of an unexpected manifest: ${file}" ;;
+      */40-servingdeployment.yaml)
+        ! grep -qE 'IMAGE_PREFIX|IMAGE_TAG' "$file" || die "the ServingDeployment was applied unrendered"
+        put stable "$(sed -n 's/^  imageTag: //p' "$file")"
+        put cr 1
+        put gen 1
+        put window closed
+        echo "servingdeployment.serving.mlobs.dev/api created"
+        ;;
+      *) die "apply of an unexpected file: ${file}" ;;
+    esac
+    ;;
+  "rollout status deployment/"*)
+    echo "deployment \"${3#deployment/}\" successfully rolled out"
+    ;;
+  "wait --for=condition=Established crd/servingdeployments.serving.mlobs.dev "*)
+    [ "$(st crd 0)" = 1 ] || die "no CRD to wait on"
+    echo "customresourcedefinition.apiextensions.k8s.io/servingdeployments.serving.mlobs.dev condition met"
+    ;;
+  "get pods -l app=operator -o jsonpath="*)
+    printf 'operator-6b8f9c7d5-x2x7q'
+    ;;
+  "get lease/5bb4b9ad.mlobs.dev -o jsonpath="*)
+    printf 'operator-6b8f9c7d5-x2x7q_0f3c9a7e-4b1d-4c55-9a51-2f0a8d6e9b11'
+    ;;
+  "get deployment/operator -o jsonpath="*)
+    st opimage | tr -d '\n'
+    ;;
+  "get deployment/operator lease/5bb4b9ad.mlobs.dev -o wide")
+    table deployment.apps/operator
+    table lease.coordination.k8s.io/5bb4b9ad.mlobs.dev
+    ;;
+  "get servingdeployment/api -o jsonpath="*ShadowPaused*)
+    printf 'False ShadowNotFound'
+    ;;
+  "get servingdeployment/api -o jsonpath="*)
+    [ "$(st cr 0)" = 1 ] || die "no servingdeployment/api"
+    sd_condition
+    ;;
+  "get servingdeployment/api deployment/api"*"-o wide")
+    table servingdeployment.serving.mlobs.dev/api
+    table deployment.apps/api
+    case "$line" in *api-canary*) table deployment.apps/api-canary ;; esac
+    ;;
+  "get deployment/api -o jsonpath="*ownerReferences*)
+    [ "$(st cr 0)" = 1 ] && printf 'ServingDeployment/api'
+    ;;
+  "get deployment/api -o jsonpath="*image*)
+    printf 'ghcr.io/muratalkan06/mlobs-api:%s' "$(st stable)"
+    ;;
+  "get deployment/api-canary -o jsonpath="*ownerReferences*)
+    printf 'ServingDeployment/api'
+    ;;
+  "get deployment/api-canary -o jsonpath="*image*)
+    printf 'ghcr.io/muratalkan06/mlobs-api:%s' "$(st canary)"
+    ;;
+  "get deployment/api-canary --ignore-not-found -o jsonpath="*)
+    if [ "$(st window closed)" = open ]; then printf '1'; else printf '0'; fi
+    ;;
+  "get deployment/api-canary")
+    [ -n "$(st canary)" ] || { echo 'Error from server (NotFound): deployments.apps "api-canary" not found' >&2; exit 1; }
+    table deployment.apps/api-canary
+    ;;
+  "get pods -l app=api,role=canary -o jsonpath="*)
+    if [ "$(st window closed)" = open ]; then printf 'Running\n'; fi
+    ;;
+  "patch servingdeployment/api --type merge -p "*)
+    patch="$6"
+    case "$patch" in
+      *'"canaryImageTag":null'*) put window closed ;;
+      *'"canaryImageTag":"'*)
+        put canary "$(printf '%s' "$patch" | sed -n 's/.*"canaryImageTag":"\([0-9a-f]*\)".*/\1/p')"
+        put window open
+        ;;
+      *) die "unexpected patch: ${patch}" ;;
+    esac
+    put gen $(($(st gen 1) + 1))
+    echo "servingdeployment.serving.mlobs.dev/api patched"
+    ;;
+  "delete servingdeployment/api "*)
+    [ "$(st operator 0)" = 1 ] || die "the ServingDeployment deleted after the operator: D36 deletes it while the operator still runs"
+    put cr 0
+    put window closed
+    echo 'servingdeployment.serving.mlobs.dev "api" deleted'
+    ;;
+  "get deployment/api deployment/api-canary --ignore-not-found -o name")
+    if [ "$(st cr 0)" = 1 ]; then echo deployment.apps/api; fi
+    ;;
+  "get crd servingdeployments.serving.mlobs.dev")
+    [ "$(st crd 0)" = 1 ] || { echo 'Error from server (NotFound)' >&2; exit 1; }
+    table customresourcedefinition.apiextensions.k8s.io/servingdeployments.serving.mlobs.dev
+    ;;
+  "delete crd servingdeployments.serving.mlobs.dev "*)
+    [ "$(st cr 0)" = 0 ] && [ "$(st operator 0)" = 0 ] \
+      || die "the CRD deleted before the ServingDeployment and the release were gone: it goes last"
+    put crd 0
+    echo 'customresourcedefinition.apiextensions.k8s.io "servingdeployments.serving.mlobs.dev" deleted'
+    ;;
+  *)
+    die "unexpected call: ${line}"
+    ;;
+esac

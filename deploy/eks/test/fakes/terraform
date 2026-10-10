@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# Fake terraform for deploy/eks/test (docs/PLAN.md D39): init succeeds, plan
+# exits FAKE_TF_PLAN_EXIT (0, no changes, by default).
+set -euo pipefail
+: "${FAKE_STATE:?fake terraform: FAKE_STATE is not set}"
+printf 'terraform\t%s\n' "$*" >>"$FAKE_STATE/calls.log"
+
+case " $* " in
+  *" init "*) echo "Terraform has been successfully initialized!" ;;
+  *" plan "*) exit "${FAKE_TF_PLAN_EXIT:-0}" ;;
+  *) echo "fake terraform: unexpected call: $*" >&2; exit 1 ;;
+esac
