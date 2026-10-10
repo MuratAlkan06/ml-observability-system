@@ -296,7 +296,7 @@ echo "ok: secret applied"
 
 # Every ConfigMap is generated from the canonical file in the repository. There
 # is deliberately no copy of prometheus.yml, the Grafana provisioning tree, the
-# dashboards, the SQL or the baselines under deploy/ — one source, two runtimes
+# dashboards, the SQL or the baselines under deploy/ — one source of truth
 # (D21). Output is discarded here too: not secret, just noise that would bury
 # the fixed lines.
 apply_configmap() {

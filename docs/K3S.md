@@ -25,7 +25,7 @@ failed in plain sight:
   2026-09-21 those two never came back: the pre-cutover check on 2026-09-27
   found 7/9 containers up and Grafana — the project's only UI — dark for about
   six days. Two lines of YAML would have closed that particular gap. The point
-  is that under Compose each service opts in, and two had not; under k3s
+  is that under Compose each service had to opt in, and two had not; under k3s
   nothing opts in, because k3s is an enabled systemd service and every workload
   is a controller-managed object that comes back with it.
 - **Durability.** Compose declared no named volume. Postgres data lived in an
