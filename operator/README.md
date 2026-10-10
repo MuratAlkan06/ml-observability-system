@@ -19,8 +19,11 @@ target, with `observedGeneration == generation`); `CanaryActive`; and
 `ShadowPaused`, computed from the shadow scorer as observed, never from
 intent (D37). It never writes the spec. Leader election is on by default
 (`--leader-elect`), through a Lease in `mlobs`; it is tested as the
-acquisition of that Lease only, with no failover (D35). The live host moves
-to it in O4 (issue #68).
+acquisition of that Lease only, with no failover (D35). The live host moved
+to it in O4 (issue #68, completed 2026-10-05); adoption was demonstrated
+there on both kinds of object, the original `deployment/api` with its uid
+unchanged and a fresh one that the live D36 rollback's pre-operator deploy
+created.
 
 ## The canary window
 
