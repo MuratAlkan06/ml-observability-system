@@ -94,7 +94,7 @@ and reaches the canary alone.
 That leaves the stable Deployment's selector, `app: api`, matching the
 canary's pods as well. The overlap is deliberate. The stable's selector is
 immutable and its pod template must not change on adoption — a new label
-there would restart the live api when O4 adopts it — so the stable keeps the
+there would restart the live api under the operator's adoption (live since O4, #68) — so the stable keeps the
 labels it has always had, and there is no `role: stable`. The Deployment and
 ReplicaSet controllers tolerate the overlap: each counts and adopts only the
 ReplicaSets and pods whose controller reference is its own or absent, and
