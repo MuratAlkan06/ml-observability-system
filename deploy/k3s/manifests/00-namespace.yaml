@@ -18,3 +18,5 @@ metadata:
   name: mlobs
   labels:
     app.kubernetes.io/part-of: mlobs
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline
