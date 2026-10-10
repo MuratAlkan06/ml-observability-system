@@ -1,6 +1,7 @@
 # Shadow scorer — v1.1 Slice A (D3/D4).
 #
-# Compose source of truth: the `shadow-scorer` service in docker-compose.yml.
+# Compose provenance: the `shadow-scorer` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # StatefulSet for the same reason as the consumer (D22): the scorer registers as
 # `shadow_scorer-<hostname>` in its own consumer group, so a stable pod name is

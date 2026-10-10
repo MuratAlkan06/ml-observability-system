@@ -13,7 +13,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements-drift.txt
 COPY src/drift/ /app/src/drift/
 
 # No secrets baked in: SLACK_WEBHOOK_URL comes from the environment at run
-# time; baseline.json is mounted read-only by docker-compose.
+# time; the baseline JSON is mounted read-only at /baseline from the
+# drift-baseline ConfigMap that deploy/k3s/apply.sh builds from baseline/*.json.
 RUN useradd --create-home --shell /usr/sbin/nologin drift
 USER drift
 

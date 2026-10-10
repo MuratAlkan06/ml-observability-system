@@ -1,6 +1,7 @@
 # Shadow drift job — v1.1 D5.
 #
-# Compose source of truth: the `drift-shadow` service in docker-compose.yml.
+# Compose provenance: the `drift-shadow` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # The SAME image as `drift`, pointed at the shadow model's rows and its own
 # baseline. Window, guard, cadence, thresholds and bins stay frozen; only

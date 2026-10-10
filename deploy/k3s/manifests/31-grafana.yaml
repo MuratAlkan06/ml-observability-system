@@ -1,6 +1,7 @@
 # Grafana — docs/PLAN.md §6.
 #
-# Compose source of truth: the `grafana` service in docker-compose.yml.
+# Compose provenance: the `grafana` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # The one hostPort workload since the api moved to a NodePort Service in
 # Phase 3 O2 (D19 and its O2 erratum): 3000 is the port the README tells a

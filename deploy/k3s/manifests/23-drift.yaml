@@ -1,6 +1,7 @@
 # Primary drift job — docs/PLAN.md §5.
 #
-# Compose source of truth: the `drift` service in docker-compose.yml.
+# Compose provenance: the `drift` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # A Deployment, not a StatefulSet: the drift runner holds no consumer-group
 # identity and no local state — it wakes on a timer, reads a window out of

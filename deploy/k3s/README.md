@@ -4,11 +4,14 @@ Kubernetes manifests and deploy scripts for running the ML Observability stack
 on k3s, ported from `docker-compose.yml` (Phase 2 P2a; decisions D17–D27 in
 `docs/PLAN.md`).
 
-The Compose file remains the source of truth for *what each service is* — env
-blocks, images and startup ordering are transcribed here rather than
-reinterpreted, and every manifest names the Compose service it came from. It
-also stays installed on the host as a fallback runtime for the duration of
-Phase 2 (D25).
+The manifests stand alone: they are the description of *what each service is*.
+Their env blocks, images and startup ordering were transcribed from the Compose
+file rather than reinterpreted, and every manifest still names the Compose
+service it came from, as provenance. Compose is retired (D40), and that truth
+now lives at a recorded commit, not in the tree: the last shipping version is
+`docker-compose.yml` at `f33b65909820d9a4659e291f166e448077dab677`, readable with
+`git show f33b65909820d9a4659e291f166e448077dab677:docker-compose.yml`. D25's
+fallback runtime on the host ended with the file.
 
 Why the stack moved, what changed and when to revisit are in `docs/K3S.md`.
 This file covers the manifests, the two scripts, how to rehearse them locally,
@@ -320,14 +323,15 @@ IMAGE_PREFIX=docker.io/library PRE_CUTOVER_SHA="${PRE}" IMAGE_TAG="${TAG}" \
 # ends "ok: D36 rollback rehearsal passed"
 ```
 
-A machine already running the Compose stack holds `:8000`, `:3000` and
-`:9090`. Publish the cluster on other ports (`-p '18000:8000@server:0'`,
-`-p '13000:3000@server:0'`) and point both trees' `smoke.sh` there through the
-environment the rehearsal passes on: `API_URL=http://127.0.0.1:18000`,
-`GRAFANA_URL=http://127.0.0.1:13000` and `PROMETHEUS_LOCAL_PORT=19090`.
+On a machine where something else already holds `:8000`, `:3000` and `:9090`
+(a Compose-era stack left running, say), publish the cluster on other ports
+(`-p '18000:8000@server:0'`, `-p '13000:3000@server:0'`) and point both trees'
+`smoke.sh` there through the environment the rehearsal passes on:
+`API_URL=http://127.0.0.1:18000`, `GRAFANA_URL=http://127.0.0.1:13000` and
+`PROMETHEUS_LOCAL_PORT=19090`.
 Without the last one, the port-forward to the cluster's Prometheus cannot bind
-`:9090`, and `smoke.sh`'s readiness probe is answered by the Compose
-Prometheus instead.
+`:9090`, and `smoke.sh`'s readiness probe is answered by whatever holds
+`:9090` instead.
 
 ## Migration record and rehearsal results (2026-09-27)
 

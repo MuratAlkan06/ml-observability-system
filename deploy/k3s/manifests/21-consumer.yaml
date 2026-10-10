@@ -1,6 +1,7 @@
 # Stream consumer — docs/PLAN.md §3, §7.
 #
-# Compose source of truth: the `consumer` service in docker-compose.yml.
+# Compose provenance: the `consumer` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # StatefulSet rather than Deployment (D22). The consumer names itself
 # `consumer-<hostname>` inside its Redis consumer group, so its identity is its
