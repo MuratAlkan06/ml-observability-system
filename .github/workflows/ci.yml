@@ -1118,9 +1118,13 @@ jobs:
     # worth being unable to reach it by accident rather than merely unlikely to.
     #
     # Gated on the k3d rehearsal: a main push must not publish images whose
-    # deploy rehearsal failed. The explicit `if` here replaces GitHub's implicit
-    # success() check, so K3sSmoke's result must be tested directly — a bare
-    # `needs:` alone would not stop the publish after a failed rehearsal.
+    # deploy rehearsal failed. On GitHub's semantics a bare `needs: K3sSmoke`
+    # would already hold this job back after a failed rehearsal — a job whose
+    # needs failed is skipped — and an `if:` with no status function is ANDed
+    # with an implicit success(). The result is still tested explicitly: the
+    # condition then states everything it requires in the one place it is
+    # read, and it keeps doing so if a later edit adds always() or another
+    # status function here, which would drop the implicit success().
     needs: K3sSmoke
     if: needs.K3sSmoke.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
