@@ -1,6 +1,7 @@
 # ML Observability System
 
 [![CI](https://github.com/MuratAlkan06/ml-observability-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MuratAlkan06/ml-observability-system/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MuratAlkan06/ml-observability-system)](https://github.com/MuratAlkan06/ml-observability-system/releases)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -17,6 +18,13 @@ drift can be compared side by side to support a data-driven promote-or-hold deci
 near-zero impact on the primary prediction path as certified under Docker Compose (under the
 current k3s runtime the delta is published as measured; see the k3s re-measurement section). It is a compact, end-to-end demonstration of the
 observability that real ML systems need but rarely ship with.
+The operations layer is part of the demonstration too: the stack runs on k3s on a single EC2 host
+described in Terraform, and deploys go through an approval-gated SSM pipeline. There the api runs
+under a purpose-built `ServingDeployment` operator, which adopted the live Deployment in place and
+makes canary windows mechanical, with an ordered shadow pause and an operator-enforced 45-minute
+TTL; promote and rollback stay human calls in v0. The operator also ships as a Helm chart,
+demonstrated on an ephemeral EKS cluster that was created, exercised, destroyed and sweep-verified
+for about $0.05–0.06, and Docker Compose, the original runtime, was retired at v3.0.0.
 
 Engineering rules binding every contributor — human or agent — live in
 [PRINCIPLES.md](PRINCIPLES.md).
