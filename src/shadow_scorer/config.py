@@ -3,8 +3,8 @@
 Per docs/PLAN.md §7 each service owns its own ``config.py``; this module imports
 nothing from other ``src/`` services. Env-driven with prefix ``MLOBS_SHADOW_``.
 Defaults are the frozen v1.1 plan values (candidate model pin, tokenizer limits,
-metrics port) and Compose service DNS, so the container runs with zero explicit
-configuration.
+metrics port) and the service DNS names (unchanged since the Compose era), so the
+container runs with zero explicit configuration.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         protected_namespaces=(),
     )
 
-    # --- Infra wiring (Compose DNS; internal-only metrics port) ---
+    # --- Infra wiring (service DNS; internal-only metrics port) ---
     redis_url: str = "redis://redis:6379/0"
     pg_dsn: str = "postgresql://mlobs:mlobs@postgres:5432/mlobs"
     # Prometheus exposition port (v1.1 frozen: shadow metrics on :9110).

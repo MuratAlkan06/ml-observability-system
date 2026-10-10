@@ -43,7 +43,7 @@ RUN useradd --system --no-create-home --user-group app \
 ENV HOME=/tmp
 USER app
 
-# Metrics only (scraped over the compose network; never published off-box).
+# Metrics only (scraped in-cluster by Prometheus; never published off-cluster).
 EXPOSE 9110
 
 CMD ["python", "-m", "src.shadow_scorer"]

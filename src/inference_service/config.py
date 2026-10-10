@@ -3,7 +3,7 @@
 Per docs/PLAN.md §7 each service owns its own ``config.py``; there is no shared
 ``src/common/``. Cross-service constants (stream name, MAXLEN, model version,
 tokenizer limits, ports) are frozen by the plan and reproduced here as defaults,
-overridable via environment variables for local/compose wiring.
+overridable via environment variables for local or k8s wiring.
 """
 
 from __future__ import annotations

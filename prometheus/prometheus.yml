@@ -1,5 +1,6 @@
 # Prometheus scrape config for the ML Observability stack (docs/PLAN.md §6).
-# Targets are resolved by Docker Compose DNS; metrics_path defaults to /metrics.
+# Targets are Service names in the mlobs namespace, resolved by cluster DNS
+# (D21); metrics_path defaults to /metrics.
 global:
   scrape_interval: 15s
 
@@ -11,7 +12,7 @@ scrape_configs:
   # Phase 3 O2 (D34): the canary api, scraped through its own Service,
   # api-canary, apart from the stable. It is up only while a canary window is
   # open; deploy/k3s/smoke.sh requires it up then and down otherwise (D37).
-  # Compose runs no canary, so under Compose this target is always down.
+  # In the steady state, with no window open, this target is down by design.
   - job_name: api_canary
     static_configs:
       - targets: ["api-canary:8000"]
