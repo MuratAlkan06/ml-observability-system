@@ -260,7 +260,7 @@ jobs:
           # pending) to 0, which silently defeated the case dispatch below
           # from P1 until P2c (see the D13 erratum in docs/PLAN.md).
           terraform_wrapper: false
-      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::601548053958:role/mlobs-tf-plan
           aws-region: us-west-2
@@ -1279,7 +1279,7 @@ jobs:
 
       # Credentials are requested only now, after the build: the Dockerfile's
       # package installs run while this job holds no AWS session at all.
-      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::601548053958:role/mlobs-artifact-publish
           aws-region: us-west-2
