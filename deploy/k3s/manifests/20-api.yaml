@@ -1,6 +1,7 @@
 # Inference API — docs/PLAN.md §2.
 #
-# Compose source of truth: the `api` service in docker-compose.yml.
+# Compose provenance: the `api` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # Since Phase 3 O2 this file holds the api's two Services and no workload. The
 # api Deployment, deployment/api, is created or adopted and then owned by the

@@ -1,13 +1,14 @@
 # Prometheus — docs/PLAN.md §6.
 #
-# Compose source of truth: the `prometheus` service in docker-compose.yml.
+# Compose provenance: the `prometheus` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
 # The scrape config is mounted verbatim from prometheus/prometheus.yml (D21).
 # Not a copy, not a rewrite: apply.sh builds the ConfigMap from the canonical
 # repo file, and the Service names in this directory were chosen to match the
 # Compose DNS names it already contains (`api:8000`, `shadow-scorer:9110`,
-# `drift-shadow:9109`). One scrape config serves both runtimes, so there is no
-# second file to drift out of sync.
+# `drift-shadow:9109`). One scrape config served both runtimes while both
+# shipped, so there was never a second file to drift out of sync.
 ---
 apiVersion: v1
 kind: Service

@@ -1,6 +1,7 @@
 # Postgres — the only stateful component that survives a pod restart (D20).
 #
-# Compose source of truth: the `postgres` service in docker-compose.yml.
+# Compose provenance: the `postgres` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 ---
 # The one PersistentVolumeClaim in the stack. k3s ships `local-path` as its
 # default StorageClass; it is named explicitly here so the manifest states what

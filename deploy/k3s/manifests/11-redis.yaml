@@ -1,6 +1,7 @@
 # Redis — the prediction event stream (docs/PLAN.md §3).
 #
-# Compose source of truth: the `redis` service in docker-compose.yml.
+# Compose provenance: the `redis` service in docker-compose.yml at
+# f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 # Deliberately ephemeral (D20): `--appendonly no` means Compose never persisted
 # it either, and the consumer's XAUTOCLAIM recovery assumes redelivery, not a
 # durable stream.

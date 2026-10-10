@@ -20,8 +20,8 @@ remembered. Compose left three things implicit on this host, and one of them
 failed in plain sight:
 
 - **Restart after an instance start.** Seven of the nine services in
-  `docker-compose.yml` carry `restart: unless-stopped`; `prometheus` and
-  `grafana` carry no restart policy. After the instance was started on
+  `docker-compose.yml` carried `restart: unless-stopped`; `prometheus` and
+  `grafana` carried no restart policy. After the instance was started on
   2026-09-21 those two never came back: the pre-cutover check on 2026-09-27
   found 7/9 containers up and Grafana — the project's only UI — dark for about
   six days. Two lines of YAML would have closed that particular gap. The point
@@ -72,10 +72,13 @@ test.
   `deploy/helm/mlobs-operator/` is a CI-checked projection of three of them
   (`01-` to `03-`), with no Helm in the k3s path. The EKS run is H2 (D39).
   Its config and owner-run script, never CI, are in `deploy/eks/`.
-- **Compose retirement — at P3 close.** Compose stays on the host as the
-  fallback runtime (D25) and in the README quick start for local development.
-  Retiring `docker-compose.yml` is a change with its own risk (D27), decided at
-  P3 close once k3s has been the live runtime long enough to have earned it.
+- **Compose retirement — executed at P3 close (H3, D40).** Until then Compose
+  was the host's fallback runtime (D25) and the README quick start for local
+  development. Retiring `docker-compose.yml` was a change with its own risk
+  (D27), so it shipped as its own slice: the file is deleted, its last shipping
+  commit `f33b65909820d9a4659e291f166e448077dab677` is recorded in
+  `deploy/k3s/README.md`, D25's fallback runtime ended with it, and the README
+  quick start is the local k3d recipe.
 - **k3s version bumps.** The pin (D19) lives in three places — the host
   install, `K3S_IMAGE` in CI, and the local k3d recipe — and moves in one
   change, with `K3sSmoke` green on the new pin before the host moves. Each bump

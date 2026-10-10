@@ -43,14 +43,15 @@ flowchart LR
     prom --> graf["Grafana dashboards"]
 ```
 
-All services run on a single node: under Docker Compose in the quick start below — the layout this
-paragraph describes — and under k3s on the EC2 host since 2026-09-27 (see [Deployment](#deployment)).
+All services run on a single node: under k3s on the EC2 host since 2026-09-27 (see
+[Deployment](#deployment)), and in a local k3d cluster shaped like it in the quick start below.
 Only the API (`:8000`) and Grafana
-(`:3000`) are published for normal use; Prometheus (`:9090`) is bound to loopback for local
-debugging, and the consumer (`:9108`), drift (`:9109`), and shadow-scorer (`:9110`) metrics
-endpoints — plus the second `drift-shadow` job — are scraped over the internal Compose network and
-never published to the host. The shadow scorer joins the same `mlobs:predictions` stream with its
-**own consumer group**, so it never touches the primary prediction path.
+(`:3000`) are published for normal use; Prometheus (`:9090`) is reached through
+`kubectl port-forward` for debugging, and the consumer (`:9108`), drift (`:9109`), and
+shadow-scorer (`:9110`) metrics endpoints — plus the second `drift-shadow` job — are scraped over
+in-cluster Services and never published to the host. The shadow scorer joins the same
+`mlobs:predictions` stream with its **own consumer group**, so it never touches the primary
+prediction path.
 
 ## Demo
 
@@ -64,27 +65,31 @@ from *skipped* to *evaluated*.
 
 ## Quick start
 
-Prerequisites: Docker + Docker Compose, and Python 3.12 on the host for the traffic simulator.
+The stack runs locally in a k3d cluster shaped like the host: the same pinned k3s image and
+flags, the same `apply.sh` and `smoke.sh` the `K3sSmoke` CI job runs. The cluster command, the
+image builds and the pins live in one place,
+[Rehearsing locally with k3d](deploy/k3s/README.md#rehearsing-locally-with-k3d), and are not
+copied here.
+
+Prerequisites: Docker, `kubectl` and k3d (the recipe pins its version), roughly 20GB of free
+disk, and Python 3.12 on the host for the traffic simulator.
 
 ```bash
 # 1. Clone
 git clone https://github.com/MuratAlkan06/ml-observability-system.git
 cd ml-observability-system
 
-# 2. Configure secrets (never committed — .env is gitignored)
+# 2. Configure secrets (never committed — .env is gitignored; apply.sh reads it)
 cp .env.example .env
 #   Edit .env and set at minimum:
 #     POSTGRES_PASSWORD   (any strong value; applied at first initdb)
-#     GF_ADMIN_PASSWORD   (Grafana admin; the stack refuses to start if unset)
+#     GF_ADMIN_PASSWORD   (Grafana admin; apply.sh refuses to deploy if unset)
 #   Optional: SLACK_WEBHOOK_URL (empty disables alerting), GF_ADMIN_USER.
 
-# 3. Build and start the stack (the shadow scorer + second drift job run by
-#    default — the model-comparison feature populates out of the box)
-docker compose up -d --build
-
-#    Latency A/B "off" switch — stop the shadow scorer to measure /predict with
-#    and without it (see "v1.1 load test" below); the primary path is unaffected:
-#      docker compose stop shadow-scorer   # (docker compose start shadow-scorer to resume)
+# 3. Create the cluster, build and import the five images, and deploy: steps
+#    1-5 of the k3d recipe in deploy/k3s/README.md. apply.sh ends by running
+#    smoke.sh. The shadow scorer and the second drift job run by default, so
+#    the model-comparison feature populates out of the box.
 
 # 4. Drive traffic from the host (simulator needs only httpx)
 python -m venv .venv && . .venv/bin/activate
@@ -92,6 +97,9 @@ pip install httpx
 python -m src.simulator --mode normal          # healthy baseline traffic
 python -m src.simulator --mode drift            # trips all three drift tests
 #   Useful flags: --rate <rps> (default 5), --count <N> (default: run until Ctrl-C).
+
+# 5. Tear down (step 6 of the recipe)
+k3d cluster delete mlobs-dev
 ```
 
 Then look at:
@@ -100,7 +108,7 @@ Then look at:
 | --- | --- | --- |
 | Grafana dashboards | http://localhost:3000 | Anonymous **Viewer** — no login. *mlobs — API & Inference*, *mlobs — Pipeline & Drift*, and *mlobs — Model Comparison*. |
 | API docs (Swagger) | http://localhost:8000/docs | `POST /predict`, `GET /health`, `GET /metrics`. |
-| Prometheus | http://localhost:9090 | Loopback-only (SSH-tunnel off-box). |
+| Prometheus | http://localhost:9090 | Not published: run `kubectl -n mlobs port-forward svc/prometheus 9090:9090` first. |
 
 ## Load test
 
@@ -174,6 +182,10 @@ under load left `/predict` unaffected; on restart the consumer-group backlog dra
 < 40 s**, with **0 duplicate** `shadow_predictions` (`count == count(DISTINCT request_id)`). The
 one-time migration `sql/migrations/002_shadow.sql` was applied on the live volume, and a second
 application verified as a clean no-op (idempotent).
+
+*Historical methodology: the Compose-era commands exactly as run for the numbers above. Compose
+is retired (D40); the `docker compose` switch below needs `docker-compose.yml` at
+`f33b65909820d9a4659e291f166e448077dab677`, its last shipping commit.*
 
 Reproduce (15 s warm-up, then the 120 s measured run at 5 rps; toggle the scorer between windows):
 
@@ -306,8 +318,10 @@ rollouts, and a `smoke.sh` shared with the CI rehearsal. k3s is an enabled syste
 brings every workload back with it, so an instance start restores the full stack, Prometheus and
 Grafana included (by construction; no stop/start is in the P2b evidence yet). Under Compose those
 two had no restart policy and stayed down after a start. The demo history crossed the cutover by
-`pg_dump`/restore with row counts matching. Docker Compose is retained for local development
-(the quick start above) and as the documented fallback runtime on the host. Why k3s, what changed
+`pg_dump`/restore with row counts matching. Docker Compose is retired (D40, Phase 3 H3):
+`docker-compose.yml` is deleted, its last shipping commit recorded in
+[deploy/k3s/README.md](deploy/k3s/README.md), and D25's fallback runtime on the host ended with
+it. Local development is the k3d quick start above. Why k3s, what changed
 and when to revisit are in [docs/K3S.md](docs/K3S.md); the cutover record and the memory
 rehearsal that kept the t3.medium are in
 [deploy/k3s/README.md](deploy/k3s/README.md#migration-record-and-rehearsal-results-2026-09-27).
@@ -384,7 +398,7 @@ the traffic between them, not a traffic router, so the split has four properties
 | Drift detection | Pure-Python χ² + KL against a frozen baseline, per model (`drift` / `drift-shadow`) |
 | Metrics | Prometheus |
 | Dashboards | Grafana (anonymous Viewer) |
-| Orchestration | k3s `v1.36.4+k3s1` on EC2 ([`deploy/k3s/`](deploy/k3s/README.md)); Docker Compose for local dev |
+| Orchestration | k3s `v1.36.4+k3s1` on EC2 ([`deploy/k3s/`](deploy/k3s/README.md)); k3d on the same k3s image for local dev |
 | Language | Python 3.12 |
 
 ## Roadmap

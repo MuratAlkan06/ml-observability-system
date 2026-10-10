@@ -4,8 +4,9 @@
 -- the postgres entrypoint on a FRESH volume. Fresh volumes already get everything
 -- below from init.sql; this idempotent delta is for EXISTING deployments only.
 --
--- Apply once on a live box (no Alembic — v1.1 keeps the plain-SQL stance):
---   docker compose exec -T postgres psql -U mlobs -d mlobs < sql/migrations/002_shadow.sql
+-- Apply once on a live box (no Alembic — v1.1 keeps the plain-SQL stance). On
+-- k3s, `-i` without `-t` feeds the file on stdin (the Compose-era `exec -T`):
+--   kubectl -n mlobs exec -i deployment/postgres -- psql -U mlobs -d mlobs < sql/migrations/002_shadow.sql
 --
 -- Every statement is guarded (IF NOT EXISTS) so re-running is a no-op.
 
