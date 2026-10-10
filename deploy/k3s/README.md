@@ -130,13 +130,13 @@ service-node-port-range: "8000-8000"
 disable-network-policy: true
 ```
 
-That change is O4's, inside its gated cutover window (issue #68), not a
-pipeline step; the host is the third pin site and is deferred there on
-purpose. With network policy off, `br_netfilter` is loaded by k3s's own
+That change was O4's, made inside its gated cutover window (issue #68,
+completed 2026-10-05), not a pipeline step; the host was the third pin site,
+deferred there on purpose until the cutover. With network policy off, `br_netfilter` is loaded by k3s's own
 startup and by nothing else, and pods reach Services only while it is loaded;
 the restart is followed by `lsmod | grep br_netfilter` and a pod resolving a
 Service by name (in k3d, where k3s cannot load modules, CI loads it on the
-runner). Until the host has it, `apply.sh` there stops at its preflight,
+runner). On any cluster that lacks the pair, `apply.sh` stops at its preflight,
 before anything is applied: it reads the range k3s records in each server
 node's `k3s.io/node-args` annotation and stops on the fixed line naming the
 pair when that range does not admit 8000, and the running stack is left as it
@@ -294,7 +294,7 @@ too.
 
 `rehearse-rollback.sh` rehearses undoing the operator (D36) the way CI's
 `RollbackRehearsal` job runs it. It deploys the pre-cutover tree through that
-tree's own `apply.sh`, cuts over to this one as O4 will on the host (issue
+tree's own `apply.sh`, cuts over to this one as O4 did on the host (issue
 #68), so that the operator adopts `deployment/api` in place, and opens a canary
 window. Then it runs D36's six steps and asserts each on the state it leaves:
 the canary to 0 by host patch, the `ServingDeployment` deleted,
