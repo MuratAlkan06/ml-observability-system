@@ -27,7 +27,7 @@ From the owner brief (#62).
 | O4 (#68) | Live EC2 cutover, gated: host NodePort flag + k3s restart; the operator adopts the live api; one live canary window (≤ 45 min TTL) opened, then promoted or closed; the D36 sequence demonstrated live once. | done (#68) |
 | H1 | Helm packaging of the operator (D38): the chart at `deploy/helm/mlobs-operator/` with the tag and namespace guards; `HelmParity` and `HelmLint` CI jobs, one negative test per guard; `OperatorManifestSync` extended to the chart's `crds/` copy; `OperatorE2E` gains a chart-install phase; `deploy/helm/` joins `K3sPaths`; Helm pinned at the CI pin site. ≈ 1 weekend. | done (#94 merged) |
 | H2 | Ephemeral EKS demonstration (D39): committed `deploy/eks/` config; the owner-run demo script — preflights before cluster create, fixed-line assertions, per-run nonce, scratch kubeconfig, the T+2h window-segment valve and the hard T+3h teardown trap, the pinned orphan sweep; the live run on the designated non-root principal; evidence including the T+24h sweep-and-billing line and the `infra/ec2` plan exit-0 backstop; Helm and eksctl pinned at the script pin site. ≈ 1 weekend. | done (#96 merged; evidence on #92) |
-| H3 | Compose retirement (D40): the enumerated textual sweep with the last shipping SHA recorded; phase close — every #60 item triaged, release notes, tag `v3.0.0`. ≈ 0.5 weekend. | next |
+| H3 | Compose retirement (D40): the enumerated textual sweep with the last shipping SHA recorded; phase close — every #60 item triaged, release notes, tag `v3.0.0`. ≈ 0.5 weekend. | done (#99 + the pre-tag chores; phase close evidenced on #60/#92/#68) |
 
 ## Acceptance criteria
 

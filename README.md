@@ -330,14 +330,23 @@ Phase 3 puts the api under a `ServingDeployment` operator ([`operator/`](operato
 the repository, since O2, `apply.sh` deploys the operator and hands `deployment/api` to it, a
 human-opened canary window runs a canary pod beside the stable behind the same `:8000` (a
 NodePort Service on k3s's exact 8000-8000 node-port range), and `smoke.sh` checks whichever of the
-two states the stack is in. The live host moves over in O4 (issue #68), inside a gated window
-that also gives its k3s the node-port flags. Until then a pipeline deploy to the host stops at
-`apply.sh`'s preflight, before it changes anything, and the running stack stays as it is.
+two states the stack is in. The live host moved over in O4 (issue #68, completed 2026-10-05),
+inside a gated window that also gave its k3s the node-port flags. It runs under the operator, and
+a pipeline deploy to it runs the full D32 sequence. Adoption was demonstrated live on both kinds
+of object: the cutover adopted the original `deployment/api` in place, its uid unchanged, and the
+re-cutover after the live D36 rollback adopted the fresh one that the rollback's pre-operator
+deploy had created.
 Opening and closing a window, the 45-minute TTL and its arithmetic, and undoing the operator (D36,
 rehearsed in CI by the `RollbackRehearsal` job) are in the [operator runbook](docs/RUNBOOK.md).
 Why the phase builds its own operator rather than adopting Argo Rollouts or KServe, with what each
 would have bought and what would change the answer, is in
 [docs/WHY-NOT-ARGO-KSERVE.md](docs/WHY-NOT-ARGO-KSERVE.md).
+
+The operator is also packaged as a Helm chart at
+[`deploy/helm/mlobs-operator/`](deploy/helm/mlobs-operator/README.md) (D38); the host and the
+pipeline keep the flattened manifests and run no Helm. [`deploy/eks/`](deploy/eks/) is the
+owner-run kit that installed the chart on an ephemeral EKS cluster and deleted the cluster in the
+same run (D39; evidence on issue #92).
 
 That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
@@ -404,6 +413,13 @@ the traffic between them, not a traffic router, so the split has four properties
 ## Roadmap
 
 Built in waves of independently reviewable slices.
+
+**v3.0.0 — Phase 3: `ServingDeployment` operator, Helm packaging, Compose retirement** —
+operator v0: in-place adoption of the api, a mechanical canary window with an ordered shadow
+pause and an operator-enforced 45-minute TTL, promote and rollback still human calls;
+demonstrated in CI on k3d, live on the EC2 host, and through its Helm chart on an ephemeral EKS
+cluster; Docker Compose retired (D40); see the
+[release notes].
 
 **v2.0.0 — Phase 2: infrastructure, Kubernetes, gated deploys** — principles +
 CI gates, Terraform adoption of the host, the live k3s migration, and the

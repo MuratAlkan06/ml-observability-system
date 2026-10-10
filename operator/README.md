@@ -19,8 +19,11 @@ target, with `observedGeneration == generation`); `CanaryActive`; and
 `ShadowPaused`, computed from the shadow scorer as observed, never from
 intent (D37). It never writes the spec. Leader election is on by default
 (`--leader-elect`), through a Lease in `mlobs`; it is tested as the
-acquisition of that Lease only, with no failover (D35). The live host moves
-to it in O4 (issue #68).
+acquisition of that Lease only, with no failover (D35). The live host moved
+to it in O4 (issue #68, completed 2026-10-05); adoption was demonstrated
+there on both kinds of object, the original `deployment/api` with its uid
+unchanged and a fresh one that the live D36 rollback's pre-operator deploy
+created.
 
 ## The canary window
 
@@ -91,7 +94,7 @@ and reaches the canary alone.
 That leaves the stable Deployment's selector, `app: api`, matching the
 canary's pods as well. The overlap is deliberate. The stable's selector is
 immutable and its pod template must not change on adoption — a new label
-there would restart the live api when O4 adopts it — so the stable keeps the
+there would restart the live api under the operator's adoption (live since O4, #68) — so the stable keeps the
 labels it has always had, and there is no `role: stable`. The Deployment and
 ReplicaSet controllers tolerate the overlap: each counts and adopts only the
 ReplicaSets and pods whose controller reference is its own or absent, and
