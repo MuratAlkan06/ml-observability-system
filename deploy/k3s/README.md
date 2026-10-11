@@ -217,7 +217,9 @@ torch images are large and each is stored twice, once by the docker daemon and
 again in the cluster's containerd.
 
 ```bash
-# 1. k3d, pinned to the version CI uses
+# 1. k3d, pinned to the version CI uses. On macOS: `brew install k3d`, whose
+#    formula follows k3d's latest release rather than this pin, or the same
+#    download with k3d-darwin-arm64 (or k3d-darwin-amd64) for k3d-linux-amd64.
 curl -fsSL -o /tmp/k3d \
   https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64
 sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d

@@ -79,8 +79,9 @@ image builds and the pins live in one place,
 [Rehearsing locally with k3d](deploy/k3s/README.md#rehearsing-locally-with-k3d), and are not
 copied here.
 
-Prerequisites: Docker, `kubectl` and k3d (the recipe pins its version), roughly 20GB of free
-disk, and Python 3.12 on the host for the traffic simulator.
+Prerequisites: Docker, `kubectl` and k3d (the recipe pins its version; on macOS,
+`brew install k3d` or the recipe's download with the darwin binary), roughly 20GB of free disk,
+and Python 3.12 on the host for the traffic simulator.
 
 ```bash
 # 1. Clone
@@ -312,7 +313,8 @@ visibly change outputs.
 routing a small percentage of real `/predict` traffic to the candidate once agreement, drift, and
 latency clear the bar above. Shadow scoring is the safe, zero-user-impact precondition for that
 rollout; canary routing, automated promotion, and A/B significance testing are deliberately
-deferred.
+deferred. Phase 3 has since shipped the canary window, split by replica ratio rather than by a set
+percentage; see [Deployment](#deployment).
 
 ## Deployment
 
@@ -324,7 +326,9 @@ Since 2026-09-27 that host runs the stack on k3s `v1.36.4+k3s1` from
 [`deploy/k3s/`](deploy/k3s/README.md): plain manifests, an `apply.sh` that waits on all nine
 rollouts, and a `smoke.sh` shared with the CI rehearsal. k3s is an enabled systemd service that
 brings every workload back with it, so an instance start restores the full stack, Prometheus and
-Grafana included (by construction; no stop/start is in the P2b evidence yet). Under Compose those
+Grafana included: by construction, and shown live at O4's first gate on 2026-10-02, with all nine
+workloads 1/1 Running after an instance start
+([#68](https://github.com/MuratAlkan06/ml-observability-system/issues/68#issuecomment-5960106781)). Under Compose those
 two had no restart policy and stayed down after a start. The demo history crossed the cutover by
 `pg_dump`/restore with row counts matching. Docker Compose is retired (D40, Phase 3 H3):
 `docker-compose.yml` is deleted, its last shipping commit recorded in
@@ -338,7 +342,8 @@ Phase 3 puts the api under a `ServingDeployment` operator ([`operator/`](operato
 the repository, since O2, `apply.sh` deploys the operator and hands `deployment/api` to it, a
 human-opened canary window runs a canary pod beside the stable behind the same `:8000` (a
 NodePort Service on k3s's exact 8000-8000 node-port range), and `smoke.sh` checks whichever of the
-two states the stack is in. The live host moved over in O4 (issue #68, completed 2026-10-05),
+two states the stack is in. The live host moved over in O4 (issue
+[#68](https://github.com/MuratAlkan06/ml-observability-system/issues/68), completed 2026-10-05),
 inside a gated window that also gave its k3s the node-port flags. It runs under the operator, and
 a pipeline deploy to it runs the full D32 sequence. Adoption was demonstrated live on both kinds
 of object: the cutover adopted the original `deployment/api` in place, its uid unchanged, and the
@@ -354,7 +359,8 @@ The operator is also packaged as a Helm chart at
 [`deploy/helm/mlobs-operator/`](deploy/helm/mlobs-operator/README.md) (D38); the host and the
 pipeline keep the flattened manifests and run no Helm. [`deploy/eks/`](deploy/eks/) is the
 owner-run kit that installed the chart on an ephemeral EKS cluster and deleted the cluster in the
-same run (D39; evidence on issue #92).
+same run (D39; evidence on issue
+[#92](https://github.com/MuratAlkan06/ml-observability-system/issues/92)).
 
 That host is now codified in
 [`infra/`](infra/README.md): Terraform adopts the existing instance, its security group and each
@@ -416,6 +422,11 @@ the traffic between them, not a traffic router, so the split has four properties
 | Metrics | Prometheus |
 | Dashboards | Grafana (anonymous Viewer) |
 | Orchestration | k3s `v1.36.4+k3s1` on EC2 ([`deploy/k3s/`](deploy/k3s/README.md)); k3d on the same k3s image for local dev |
+| Serving operator | Go `ServingDeployment` controller on controller-runtime, scaffolded with kubebuilder ([`operator/`](operator/README.md)) |
+| Operator packaging | Helm chart ([`deploy/helm/mlobs-operator/`](deploy/helm/mlobs-operator/README.md)), a CI-checked projection of the flattened manifests; the host runs no Helm |
+| Host infrastructure | Terraform, the existing EC2 instance and security group adopted by `import`, state in S3 ([`infra/`](infra/README.md)) |
+| Ephemeral demo | EKS via eksctl, owner-run: the Helm chart installed, exercised and the cluster deleted in one run ([`deploy/eks/`](deploy/eks/README.md)) |
+| Deploys | GitHub Actions (`deploy.yml`): approval-gated, OIDC to AWS, then a parameter-locked SSM document on the host |
 | Language | Python 3.12 |
 
 ## Roadmap
@@ -434,6 +445,10 @@ CI gates, Terraform adoption of the host, the live k3s migration, and the
 approval-gated SSM deploy channel; see the
 [release notes](https://github.com/MuratAlkan06/ml-observability-system/releases/tag/v2.0.0).
 
+**v1.0.0 — Real-time ML observability system** — inference, the event pipeline, drift detection
+with Slack alerting, dashboards and the EC2 deploy, built in the three waves below; see the
+[release notes](https://github.com/MuratAlkan06/ml-observability-system/releases/tag/v1.0.0).
+
 - [x] **Wave 1 — A · Reset & scaffold** — legacy stubs removed, frozen plan adopted, CI + tooling in place
 
 **Wave 2 — parallel slices**
@@ -449,7 +464,8 @@ approval-gated SSM deploy channel; see the
   pipeline at ~4.7k predictions and all three drift tests firing real Slack alerts. *That history
   was carried through the 2026-09-27 k3s cutover: 8386 predictions before it, 8386 restored after.*
 
-**v1.1 — Shadow / candidate comparison**
+**v1.1 — Shadow / candidate comparison** — see the
+[release notes](https://github.com/MuratAlkan06/ml-observability-system/releases/tag/v1.1.0).
 - [x] **S6 · Shadow scorer** — MiniLM-L6 candidate re-scores live traffic off a second consumer
   group; `shadow_predictions` table; comparison metrics on `:9110`; primary-path impact certified
   near-zero under Compose (k3s-era delta published as measured in the re-measurement section)

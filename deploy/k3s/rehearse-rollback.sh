@@ -31,7 +31,7 @@
 # IMAGE_TAG=<sha> (infra/ec2/deploy.tf). The pre-cutover tree is extracted from
 # git history with `git archive`, which leaves the repository untouched.
 #
-# The rehearsal first puts the cluster where the host will stand after O4:
+# The rehearsal first puts the cluster where the host has stood since O4:
 #   A. the pre-cutover tree deployed: deployment/api from its manifest, with
 #      hostPort 8000 and no owner
 #   B. #68's cutover, steps 2 and 3 (step 1, the D34 pair, is the cluster's

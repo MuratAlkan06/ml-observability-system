@@ -58,9 +58,10 @@ restore: predictions 8386 → 8386, shadow_predictions 3628 → 3628, drift_runs
 18884 → 18885 (the +1 is a fresh k3s drift cycle). The D26 memory rehearsal
 passed with a 4.7× margin, so the host stays a `t3.medium`.
 
-The "after an instance start" row holds by construction. The P2b evidence does
-not include a stop/start of the migrated host, so the first one is its live
-test.
+The "after an instance start" row holds by construction, and has been shown
+live: at O4's first gate on 2026-10-02 the host came back from an instance
+start with all nine workloads 1/1 Running
+([issue #68, comment 5960106781](https://github.com/MuratAlkan06/ml-observability-system/issues/68#issuecomment-5960106781)).
 
 ## When to revisit
 
@@ -87,7 +88,7 @@ test.
   as an atomic pair with `--disable-network-policy` (the D34 erratum of O2:
   k3s's network-policy controller refuses a single-port range and the server
   crash-loops): the host's `/etc/rancher/k3s/config.yaml`
-  (`deploy/k3s/README.md`, "Host k3s flags"; the host gains the pair inside
+  (`deploy/k3s/README.md`, "Host k3s flags"; the host gained the pair (2026-10-05) inside
   O4's gated window, issue #68), the `K3sSmoke` k3d arguments, and the local
   recipe. A bump re-verifies `127.0.0.1:8000`, which reaches the NodePort
   through kube-proxy's iptables-mode `route_localnet`, and re-checks whether

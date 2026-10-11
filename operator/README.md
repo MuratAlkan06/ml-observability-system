@@ -4,7 +4,8 @@ The `ServingDeployment` operator — Phase 3 of this repository
 (`docs/PHASE3.md`; decisions D31–D37 in `docs/PLAN.md`). One namespaced CRD,
 `servingdeployments.serving.mlobs.dev`, and a Go controller for it.
 
-Status: O2. The operator runs the stable path and the canary window, and
+Status: v0, shipped in v3.0.0 (O0–O4, H1–H2). The operator runs the stable
+path and the canary window, and
 `deploy/k3s/apply.sh` deploys it (`03-operator.yaml`) in D32's order: the CRD
 until `Established`, the operator until rolled out, then the
 `ServingDeployment` in `40-servingdeployment.yaml`, which renders
