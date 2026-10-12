@@ -80,6 +80,38 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              gate:
+                description: |-
+                  gate opts the canary windows into the metric-driven gate (docs/PLAN.md
+                  D42). Absent, the operator is v0: it reads no pod's metrics, writes no
+                  status.gate and emits no gate Event, and promote and rollback stay
+                  human. Like the canary fields it is set by the host-side patch that
+                  opens a window and is never rendered by the pipeline (D32), so a
+                  pipeline deploy leaves it as it is.
+                properties:
+                  forCanaryImageTag:
+                    description: |-
+                      forCanaryImageTag binds an acting mode to one canary: ActRollback and
+                      ActPromote are armed only while it equals spec.canaryImageTag, and
+                      otherwise the gate runs as Observe and says so in an Event. Consent is
+                      given per canary tag, so a gate left in the spec does not arm itself for
+                      the next window's canary (D42). Observe needs no tag.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mode:
+                    description: |-
+                      mode is the gate's mode. In this version of the operator every mode
+                      runs as Observe: ActRollback and ActPromote are accepted, and a window
+                      that asks for one is observed and says so in an Event, until the slices
+                      that give them their acting behavior land.
+                    enum:
+                    - Observe
+                    - ActRollback
+                    - ActPromote
+                    type: string
+                required:
+                - mode
+                type: object
               imageTag:
                 description: |-
                   imageTag is the stable api image tag: the full 40-character lowercase
@@ -156,6 +188,303 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              gate:
+                description: |-
+                  gate is the evidence of the gate spec.gate opts into, for the last
+                  window it observed (docs/PLAN.md D42). The operator is its sole writer.
+                properties:
+                  arming:
+                    description: arming says how the gate armed spec.gate.mode at
+                      its last boundary.
+                    enum:
+                    - Armed
+                    - TagMismatch
+                    - NotYetActive
+                    type: string
+                  breachRun:
+                    description: |-
+                      breachRun is line 3's counter: the consecutive intervals with a latency
+                      breach or unevaluable.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  canaryPod:
+                    description: |-
+                      canaryPod is the canary pod last read: a new one resets the clean run
+                      (D44).
+                    properties:
+                      name:
+                        description: name is the pod's name.
+                        type: string
+                      uid:
+                        description: uid tells apart a pod recreated under the same
+                          name.
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  canaryReadySeen:
+                    description: |-
+                      canaryReadySeen is whether a canary pod has been Ready at a boundary of
+                      the window. Until one has, intervals are pending (D45).
+                    type: boolean
+                  cleanRun:
+                    description: |-
+                      cleanRun is the consecutive clean intervals; the promote verdict comes
+                      at 11 (D44).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  intervalSeconds:
+                    description: 'intervalSeconds is the grid''s interval: 60, the
+                      O4 interval.'
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  lastVerdict:
+                    description: lastVerdict is the verdict of the last interval recorded.
+                    enum:
+                    - Pending
+                    - Warmup
+                    - Clean
+                    - Breach
+                    - Unevaluable
+                    type: string
+                  mode:
+                    description: mode is the mode the gate ran its last boundary as.
+                    enum:
+                    - Observe
+                    - ActRollback
+                    - ActPromote
+                    type: string
+                  nextBoundary:
+                    description: |-
+                      nextBoundary is the boundary the gate reads next. Each boundary it
+                      reads, or finds missed, records the interval that ends there.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  promoteVerdict:
+                    description: |-
+                      promoteVerdict is the first interval that completed 11 consecutive
+                      clean intervals (D44). In Observe it is recorded and nothing is
+                      dispatched.
+                    properties:
+                      at:
+                        description: at is the boundary that interval ends at.
+                        format: date-time
+                        type: string
+                      interval:
+                        description: interval is the index of that interval.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - at
+                    - interval
+                    type: object
+                  records:
+                    description: |-
+                      records are the window's intervals, oldest first: a ring of 50 slots,
+                      sized to the 45-minute TTL's 45 intervals (D42).
+                    items:
+                      description: GateRecord is one interval's evidence and verdict
+                        (D42).
+                      properties:
+                        canary:
+                          description: |-
+                            canary is the canary pod's change over the interval, absent where none
+                            could be taken.
+                          properties:
+                            errors:
+                              description: errors is the 5xx among them.
+                              format: int64
+                              type: integer
+                            p95Seconds:
+                              description: |-
+                                p95Seconds is histogram_quantile(0.95) over the bucket changes, as a
+                                decimal, absent where they give none.
+                              type: string
+                            requests:
+                              description: requests is the /predict requests the pod
+                                served in the interval.
+                              format: int64
+                              type: integer
+                          required:
+                          - errors
+                          - requests
+                          type: object
+                        end:
+                          description: end is the boundary the interval ends at.
+                          format: date-time
+                          type: string
+                        index:
+                          description: index is the interval's place on the grid.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        ratio:
+                          description: |-
+                            ratio is the canary's p95 over the stable's, as a decimal, absent where
+                            there is none.
+                          type: string
+                        reasons:
+                          description: |-
+                            reasons explain the verdict, in the order watch-window.sh prints its
+                            lines.
+                          items:
+                            description: |-
+                              GateReason explains an interval's verdict, from the decision engine's fixed
+                              vocabulary (D42): the canary's state, the line that tripped, or the cause
+                              that left line 3 unevaluated, OperatorInterrupted among them (D45).
+                            enum:
+                            - CanaryNotReady
+                            - CanaryWarmup
+                            - CanaryOOMKilled
+                            - CanaryErrors
+                            - LatencyRatio
+                            - OperatorInterrupted
+                            - StableReadFailed
+                            - CanaryReadFailed
+                            - StableNoBaseline
+                            - CanaryNoBaseline
+                            - StablePodChanged
+                            - CanaryPodChanged
+                            - StableCounterReset
+                            - CanaryCounterReset
+                            - StableBelowFloor
+                            - CanaryBelowFloor
+                            - StableNoP95
+                            - CanaryNoP95
+                            - NoRatio
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        stable:
+                          description: |-
+                            stable is the stable pod's change over the interval, absent where none
+                            could be taken.
+                          properties:
+                            errors:
+                              description: errors is the 5xx among them.
+                              format: int64
+                              type: integer
+                            p95Seconds:
+                              description: |-
+                                p95Seconds is histogram_quantile(0.95) over the bucket changes, as a
+                                decimal, absent where they give none.
+                              type: string
+                            requests:
+                              description: requests is the /predict requests the pod
+                                served in the interval.
+                              format: int64
+                              type: integer
+                          required:
+                          - errors
+                          - requests
+                          type: object
+                        start:
+                          description: start is the boundary the interval starts at.
+                          format: date-time
+                          type: string
+                        verdict:
+                          description: verdict classifies the interval.
+                          enum:
+                          - Pending
+                          - Warmup
+                          - Clean
+                          - Breach
+                          - Unevaluable
+                          type: string
+                      required:
+                      - end
+                      - index
+                      - start
+                      - verdict
+                      type: object
+                    maxItems: 50
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  rollbackVerdict:
+                    description: |-
+                      rollbackVerdict is the first interval whose verdict tripped a line of
+                      the table. In Observe it is recorded and nothing acts on it: the window
+                      stays open until its TTL or a close.
+                    properties:
+                      at:
+                        description: at is the boundary that interval ends at.
+                        format: date-time
+                        type: string
+                      interval:
+                        description: interval is the index of the interval that tripped
+                          it.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      trip:
+                        description: trip names the line that tripped.
+                        enum:
+                        - Line5CanaryOOMKilled
+                        - Line2CanaryErrors
+                        - Line3CanaryLatency
+                        type: string
+                    required:
+                    - at
+                    - interval
+                    - trip
+                    type: object
+                  totals:
+                    description: totals counts the window's recorded intervals by
+                      verdict.
+                    properties:
+                      breach:
+                        description: breach counts the Breach intervals.
+                        format: int32
+                        type: integer
+                      clean:
+                        description: clean counts the Clean intervals.
+                        format: int32
+                        type: integer
+                      pending:
+                        description: pending counts the Pending intervals.
+                        format: int32
+                        type: integer
+                      unevaluable:
+                        description: |-
+                          unevaluable counts the Unevaluable intervals, the forfeited ones among
+                          them.
+                        format: int32
+                        type: integer
+                      warmup:
+                        description: warmup counts the Warmup intervals.
+                        format: int32
+                        type: integer
+                    required:
+                    - breach
+                    - clean
+                    - pending
+                    - unevaluable
+                    - warmup
+                    type: object
+                  windowStart:
+                    description: |-
+                      windowStart anchors the interval grid: CanaryActive's
+                      lastTransitionTime for the window observed. Boundary n is windowStart
+                      plus n intervals, and interval n runs from boundary n to boundary n+1.
+                    format: date-time
+                    type: string
+                required:
+                - arming
+                - breachRun
+                - canaryReadySeen
+                - cleanRun
+                - intervalSeconds
+                - mode
+                - nextBoundary
+                - totals
+                - windowStart
+                type: object
               observedGeneration:
                 description: |-
                   observedGeneration is the metadata.generation the status was last

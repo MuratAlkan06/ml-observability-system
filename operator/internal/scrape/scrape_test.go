@@ -576,11 +576,16 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 	})
 
 	It("leaves a caller outside this package no client to set: Reader is a Scraper's one exported field, "+
-		"so no client of the caller's, the manager's GetHTTPClient() with its ServiceAccount token among them, "+
-		"reads a pod", func() {
-		for field := range reflect.TypeFor[Scraper]().Fields() {
+		"promoted ones included, and ReadBoundary its one exported method, so no client of the caller's, the "+
+		"manager's GetHTTPClient() with its ServiceAccount token among them, reads a pod", func() {
+		for _, field := range reflect.VisibleFields(reflect.TypeFor[Scraper]()) {
 			Expect(field.IsExported()).To(Equal(field.Name == "Reader"), "Scraper.%s", field.Name)
 		}
+		var methods []string
+		for method := range reflect.TypeFor[*Scraper]().Methods() {
+			methods = append(methods, method.Name)
+		}
+		Expect(methods).To(Equal([]string{"ReadBoundary"}))
 	})
 
 	It("reads with metricsClient unless this package's tests set another, never http.DefaultClient: no proxy, "+
