@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -309,7 +310,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 		st = newStub()
 		// k8sClient is a plain client.New, uncached: the kind of reader the
 		// manager's APIReader is.
-		s = &Scraper{Reader: k8sClient, HTTP: st.client}
+		s = &Scraper{Reader: k8sClient, client: st.client}
 	})
 
 	It("lists each pod by watch-window.sh's selector and reads the one Running pod's /metrics at its pod IP on 8000", func() {
@@ -574,11 +575,20 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 		Expect(b.Baseline.Canary).To(BeNil(), "read once more, and failed again")
 	})
 
-	It("reads with metricsClient when given no client, never http.DefaultClient: no proxy, no compression, "+
-		"bounded headers, no redirect followed, no connection kept, and no timeout but the read's", func() {
-		Expect((&Scraper{}).httpClient()).To(BeIdenticalTo(metricsClient))
+	It("leaves a caller outside this package no client to set: Reader is a Scraper's one exported field, "+
+		"so no client of the caller's, the manager's GetHTTPClient() with its ServiceAccount token among them, "+
+		"reads a pod", func() {
+		for field := range reflect.TypeFor[Scraper]().Fields() {
+			Expect(field.IsExported()).To(Equal(field.Name == "Reader"), "Scraper.%s", field.Name)
+		}
+	})
+
+	It("reads with metricsClient unless this package's tests set another, never http.DefaultClient: no proxy, "+
+		"no compression, bounded headers, no redirect followed, no connection kept, and no timeout but the read's", func() {
+		Expect((&Scraper{Reader: k8sClient}).httpClient()).To(BeIdenticalTo(metricsClient),
+			"a Scraper as a caller outside this package makes one")
 		Expect(metricsClient).NotTo(BeIdenticalTo(http.DefaultClient))
-		Expect(s.httpClient()).To(BeIdenticalTo(st.client), "a client given is used as it is")
+		Expect(s.httpClient()).To(BeIdenticalTo(st.client), "a client this package's tests set is used as it is")
 
 		transport, ok := metricsClient.Transport.(*http.Transport)
 		Expect(ok).To(BeTrue(), "metricsClient has a transport of its own")
@@ -595,7 +605,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 		stablePod := podAt("api-6f7c9d8b5-q2xkz", stableIP)
 
 		BeforeEach(func() {
-			s.HTTP = st.through(newMetricsClient())
+			s.client = st.through(newMetricsClient())
 		})
 
 		It("fails the read on a redirect, as the script's curl follows none, and never asks where it points", func() {
@@ -609,7 +619,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 			Expect(st.seen()).To(Equal([]string{metricsRequest(stableIP)}))
 
 			By("a plain client would have followed it to another pod's page")
-			sample, err := (&Scraper{HTTP: st.client}).metrics(ctx, stablePod)
+			sample, err := (&Scraper{client: st.client}).metrics(ctx, stablePod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sample).To(Equal(parsed(predictPage(100))))
 			Expect(st.seen()).To(Equal([]string{metricsRequest(stableIP), metricsRequest(stableIP), metricsRequest(otherIP)}))
@@ -628,7 +638,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 			Expect(encodings).To(Receive(BeEmpty()))
 
 			By("a plain client asks for gzip, and would inflate what it is sent")
-			_, err = (&Scraper{HTTP: st.client}).metrics(ctx, stablePod)
+			_, err = (&Scraper{client: st.client}).metrics(ctx, stablePod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(encodings).To(Receive(Equal("gzip")))
 		})
@@ -643,7 +653,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 			Expect(err).To(MatchError(ContainSubstring("server response headers exceeded")))
 
 			By("a plain client, bounded at net/http's default of 10 MiB, reads them")
-			_, err = (&Scraper{HTTP: st.client}).metrics(ctx, stablePod)
+			_, err = (&Scraper{client: st.client}).metrics(ctx, stablePod)
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
@@ -726,7 +736,7 @@ var _ = Describe("Reading the pods as the operator, under the Role that ships", 
 			Cache:   cache.Options{DefaultNamespaces: map[string]cache.Config{operatorNamespace: {}}},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		s := &Scraper{Reader: mgr.GetAPIReader(), HTTP: st.client}
+		s := &Scraper{Reader: mgr.GetAPIReader(), client: st.client}
 
 		b := s.ReadBoundary(ctx, operatorNamespace)
 		Expect(b.StableErr).NotTo(HaveOccurred())

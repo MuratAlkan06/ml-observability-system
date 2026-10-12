@@ -90,20 +90,23 @@ type Scraper struct {
 	// grants pods get and list and not watch, so a cached client, whose
 	// informer watches, has no grant to run on (D41).
 	Reader client.Reader
-	// HTTP reads each pod's /metrics. Nil, as the operator runs, means
-	// metricsClient, built for this one read; this package's tests set a
-	// client of their own, which is used as it is. Each request carries its
-	// read's context, so no client needs a timeout of its own.
-	HTTP *http.Client
 
+	// client overrides metricsClient for this package's tests, which read
+	// through a stub; nil, as every Scraper made outside this package has it,
+	// means metricsClient. It is unexported so that no caller can hand a
+	// Scraper a client of its own: the manager's GetHTTPClient(), say, whose
+	// transport attaches the operator's ServiceAccount token to every
+	// request, would send that token to each pod IP the Scraper reads.
+	client *http.Client
 	// timeout overrides ReadTimeout for this package's tests; zero means
 	// ReadTimeout.
 	timeout time.Duration
 }
 
-// metricsClient is the client a Scraper reads /metrics with unless it is
-// given one. It reads as watch-window.sh's curl does: straight to the pod IP,
-// through no proxy whatever the operator's environment names; asking for no
+// metricsClient is the client a Scraper reads /metrics with, the only one a
+// Scraper made outside this package can have. It reads as watch-window.sh's
+// curl does: straight to the pod IP, through no proxy whatever the operator's
+// environment names, and with no credential of the operator's; asking for no
 // compression, so the page bound holds on the bytes the pod sends; and not
 // following a redirect, so a 3xx is the response read, and fails the read as
 // any status but 200 does. It also bounds the response's headers at
@@ -245,11 +248,11 @@ func (s *Scraper) metrics(ctx context.Context, pod *corev1.Pod) (gate.Sample, er
 	return parseExposition(http.MaxBytesReader(nil, resp.Body, maxPageBytes))
 }
 
-// httpClient is the client the Scraper reads /metrics with: its own, or
-// metricsClient.
+// httpClient is the client the Scraper reads /metrics with: metricsClient,
+// unless this package's tests have set another.
 func (s *Scraper) httpClient() *http.Client {
-	if s.HTTP != nil {
-		return s.HTTP
+	if s.client != nil {
+		return s.client
 	}
 	return metricsClient
 }

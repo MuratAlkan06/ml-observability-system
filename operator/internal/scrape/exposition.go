@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"fmt"
 	"io"
-	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -43,12 +42,13 @@ const (
 	// name. The api's histogram has 12; a page naming more than this fails
 	// the read rather than growing the map.
 	maxBuckets = 64
-	// maxCount bounds a count's magnitude at 2^53-1, the largest integer a
-	// float64 holds exactly with both its neighbours: from 2^53 on, two
-	// consecutive counts read as the same number, and a change between two
-	// counts can pass the int64 range, where gate's conversion to a count
-	// gives whatever the architecture makes of it. A count past the bound, or
-	// not a number at all (NaN, ±Inf), fails the read.
+	// maxCount bounds a count at 2^53-1, the largest integer a float64 holds
+	// exactly with both its neighbours: from 2^53 on, two consecutive counts
+	// read as the same number, and a change between two counts can pass the
+	// int64 range, where gate's conversion to a count gives whatever the
+	// architecture makes of it. A count past the bound, below zero, where no
+	// counter or bucket goes, or not a number at all (NaN, ±Inf), fails the
+	// read.
 	maxCount = 1<<53 - 1
 )
 
@@ -66,10 +66,10 @@ const (
 // bucket line with no le, an le that is not a number — the read fails, as
 // the script's does. It also fails past the bounds above, where the script's
 // would not: a line over maxLineBytes, more than maxBuckets bounds, and a
-// count, a line's or the request and 5xx sums, that is not a number within
-// ±maxCount. The buckets come back sorted by upper bound, the script's order,
-// ties in the order the page first named them. The pod is left for the
-// caller.
+// count, a line's or the request sum, that is not a number from 0 to
+// maxCount; the 5xx sum lies between zero and the request sum. The buckets
+// come back sorted by upper bound, the script's order, ties in the order the
+// page first named them. The pod is left for the caller.
 func parseExposition(page io.Reader) (gate.Sample, error) {
 	var (
 		sample gate.Sample
@@ -95,7 +95,7 @@ func parseExposition(page io.Reader) (gate.Sample, error) {
 		}
 		requests, bucket := strings.HasPrefix(line, requestsPrefix), strings.HasPrefix(line, bucketsPrefix)
 		if (requests || bucket) && !isCount(value) {
-			return gate.Sample{}, fmt.Errorf("line %d: %v is not a count within ±(2^53-1)", n, value)
+			return gate.Sample{}, fmt.Errorf("line %d: %v is not a count from 0 to 2^53-1", n, value)
 		}
 		switch {
 		case requests:
@@ -123,10 +123,12 @@ func parseExposition(page io.Reader) (gate.Sample, error) {
 	if err := lines.Err(); err != nil {
 		return gate.Sample{}, err
 	}
-	// Each line's count is within the bound; their sums must be too.
-	if !isCount(sample.Requests) || !isCount(sample.Errors) {
-		return gate.Sample{}, fmt.Errorf("the request and 5xx sums, %v and %v, are not both counts within ±(2^53-1)",
-			sample.Requests, sample.Errors)
+	// Each line's count is within the bound; their sum must be too. The 5xx
+	// sum needs no check of its own: it adds some of the same counts, none
+	// below zero, so it lies between zero and the request sum, an order a
+	// float sum's rounding, being monotonic, keeps.
+	if !isCount(sample.Requests) {
+		return gate.Sample{}, fmt.Errorf("the request sum, %v, is not a count from 0 to 2^53-1", sample.Requests)
 	}
 	for _, le := range order {
 		bound, err := strconv.ParseFloat(le, 64)
@@ -141,8 +143,8 @@ func parseExposition(page io.Reader) (gate.Sample, error) {
 	return sample, nil
 }
 
-// isCount reports whether v is a number within ±maxCount. NaN compares false
-// with everything, so it is not.
+// isCount reports whether v is a number from 0 to maxCount. NaN compares
+// false with everything, so it is not.
 func isCount(v float64) bool {
-	return math.Abs(v) <= maxCount
+	return v >= 0 && v <= maxCount
 }

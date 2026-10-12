@@ -219,17 +219,18 @@ var _ = Describe("A /metrics page, read as watch-window.sh's parse_exposition re
 	})
 
 	// The script's Python takes every one of these, and the engine would
-	// difference them: from 2^53 on, consecutive counts read as one, and past
-	// int64 a change converts to whatever the architecture makes of it. So
-	// the read fails instead, a named deviation toward unevaluable.
-	DescribeTable("fails the read on a count that is not a number within ±(2^53-1), on either series",
+	// difference them: from 2^53 on, consecutive counts read as one, past
+	// int64 a change converts to whatever the architecture makes of it, and a
+	// count below zero is one no counter or bucket holds. So the read fails
+	// instead, a named deviation toward unevaluable.
+	DescribeTable("fails the read on a count that is not a number from 0 to 2^53-1, on either series",
 		func(value string) {
 			for _, line := range []string{
 				`mlobs_http_requests_total{endpoint="/predict",method="POST",status="200"} ` + value,
 				`mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="+Inf"} ` + value,
 			} {
 				_, err := parseExposition(strings.NewReader("# a page\n" + line + "\n"))
-				Expect(err).To(MatchError(ContainSubstring("is not a count within ±(2^53-1)")), line)
+				Expect(err).To(MatchError(ContainSubstring("is not a count from 0 to 2^53-1")), line)
 			}
 		},
 		Entry("NaN", "NaN"),
@@ -239,6 +240,9 @@ var _ = Describe("A /metrics page, read as watch-window.sh's parse_exposition re
 		Entry("-1e300", "-1e300"),
 		Entry("2^53, where a float64 stops telling consecutive integers apart", "9007199254740992"),
 		Entry("2^53+1, which parses to 2^53", "9007199254740993"),
+		Entry("-1, below zero", "-1"),
+		Entry("-0.5, below zero though it rounds to zero", "-0.5"),
+		Entry("-(2^53-1), the bound's own magnitude below zero", "-9007199254740991"),
 	)
 
 	It("reads 2^53-1, the largest count within the bound, as itself on either series", func() {
@@ -251,13 +255,31 @@ var _ = Describe("A /metrics page, read as watch-window.sh's parse_exposition re
 		Expect(float64(maxCount)).To(Equal(math.Exp2(53) - 1))
 	})
 
-	It("fails the read on request or 5xx sums past the bound, though each line's count is within it", func() {
+	It("fails the read on a request sum past the bound, though each line's count is within it, "+
+		"and so on a 5xx sum past it, which the request sum holds", func() {
 		line := func(status string) string {
 			return `mlobs_http_requests_total{endpoint="/predict",method="POST",status="` + status + `"} 9007199254740991` + "\n"
 		}
 		_, err := parseExposition(strings.NewReader(line("200") + line("422")))
-		Expect(err).To(MatchError(ContainSubstring("the request and 5xx sums")))
+		Expect(err).To(MatchError(ContainSubstring("the request sum, 1.8014398509481982e+16, is not a count")))
 		_, err = parseExposition(strings.NewReader(line("500") + line("503")))
-		Expect(err).To(MatchError(ContainSubstring("the request and 5xx sums")))
+		Expect(err).To(MatchError(ContainSubstring("the request sum, 1.8014398509481982e+16, is not a count")))
+	})
+
+	// Were a count below zero read, a request line below zero could offset
+	// 5xx lines past the bound together, keeping the request sum within it
+	// while the 5xx sum, which no check of its own bounds, passed it.
+	It("fails the read where 5xx lines past the bound together are offset by a request line below zero, "+
+		"which would keep the request sum within it", func() {
+		line := func(status, value string) string {
+			return `mlobs_http_requests_total{endpoint="/predict",method="POST",status="` + status + `"} ` + value + "\n"
+		}
+		for _, text := range []string{
+			line("500", "9007199254740991") + line("503", "9007199254740991") + line("200", "-9007199254740991"),
+			line("200", "-9007199254740991") + line("500", "9007199254740991") + line("503", "9007199254740991"),
+		} {
+			_, err := parseExposition(strings.NewReader(text))
+			Expect(err).To(MatchError(ContainSubstring("is not a count from 0 to 2^53-1")), text)
+		}
 	})
 })
