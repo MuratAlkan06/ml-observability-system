@@ -1,0 +1,137 @@
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total{generation="0"} 334.0
+python_gc_objects_collected_total{generation="1"} 0.0
+python_gc_objects_collected_total{generation="2"} 0.0
+# HELP python_gc_objects_uncollectable_total Uncollectable objects found during GC
+# TYPE python_gc_objects_uncollectable_total counter
+python_gc_objects_uncollectable_total{generation="0"} 0.0
+python_gc_objects_uncollectable_total{generation="1"} 0.0
+python_gc_objects_uncollectable_total{generation="2"} 0.0
+# HELP python_gc_collections_total Number of times this generation was collected
+# TYPE python_gc_collections_total counter
+python_gc_collections_total{generation="0"} 33.0
+python_gc_collections_total{generation="1"} 3.0
+python_gc_collections_total{generation="2"} 0.0
+# HELP python_info Python platform information
+# TYPE python_info gauge
+python_info{implementation="CPython",major="3",minor="12",patchlevel="14",version="3.12.14"} 1.0
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 4.0554496e+07
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 3.0560256e+07
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.79182519125e+09
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 2.54
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds 5.0
+# HELP process_max_fds Maximum number of open file descriptors.
+# TYPE process_max_fds gauge
+process_max_fds 1.048576e+06
+# HELP mlobs_http_requests_total HTTP requests to the API (/predict, /health).
+# TYPE mlobs_http_requests_total counter
+mlobs_http_requests_total{endpoint="/health",method="GET",status="200"} 14.0
+mlobs_http_requests_total{endpoint="/predict",method="POST",status="200"} 1200.0
+mlobs_http_requests_total{endpoint="/predict",method="POST",status="422"} 1.0
+# HELP mlobs_http_requests_created HTTP requests to the API (/predict, /health).
+# TYPE mlobs_http_requests_created gauge
+mlobs_http_requests_created{endpoint="/health",method="GET",status="200"} 1.791825195025803e+09
+mlobs_http_requests_created{endpoint="/predict",method="POST",status="200"} 1.791825195109131e+09
+mlobs_http_requests_created{endpoint="/predict",method="POST",status="422"} 1.7918251951308901e+09
+# HELP mlobs_http_request_duration_seconds End-to-end HTTP request duration in seconds.
+# TYPE mlobs_http_request_duration_seconds histogram
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.01"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.025"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.05"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.075"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.1"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.15"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.2"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.3"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="0.5"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="1.0"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="2.5"} 14.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/health",le="+Inf"} 14.0
+mlobs_http_request_duration_seconds_count{endpoint="/health"} 14.0
+mlobs_http_request_duration_seconds_sum{endpoint="/health"} 0.017539193618750535
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.01"} 1.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.025"} 37.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.05"} 384.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.075"} 746.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.1"} 984.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.15"} 1154.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.2"} 1190.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.3"} 1199.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="0.5"} 1201.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="1.0"} 1201.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="2.5"} 1201.0
+mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="+Inf"} 1201.0
+mlobs_http_request_duration_seconds_count{endpoint="/predict"} 1201.0
+mlobs_http_request_duration_seconds_sum{endpoint="/predict"} 86.1534870624077
+# HELP mlobs_http_request_duration_seconds_created End-to-end HTTP request duration in seconds.
+# TYPE mlobs_http_request_duration_seconds_created gauge
+mlobs_http_request_duration_seconds_created{endpoint="/health"} 1.7918251950258238e+09
+mlobs_http_request_duration_seconds_created{endpoint="/predict"} 1.7918251951091633e+09
+# HELP mlobs_http_requests_in_flight In-flight /predict requests.
+# TYPE mlobs_http_requests_in_flight gauge
+mlobs_http_requests_in_flight 0.0
+# HELP mlobs_inference_duration_seconds Model inference (tokenization + forward pass) duration in seconds.
+# TYPE mlobs_inference_duration_seconds histogram
+mlobs_inference_duration_seconds_bucket{le="0.01"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.02"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.03"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.04"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.05"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.075"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.1"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.15"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.2"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.3"} 0.0
+mlobs_inference_duration_seconds_bucket{le="0.5"} 0.0
+mlobs_inference_duration_seconds_bucket{le="1.0"} 0.0
+mlobs_inference_duration_seconds_bucket{le="+Inf"} 0.0
+mlobs_inference_duration_seconds_count 0.0
+mlobs_inference_duration_seconds_sum 0.0
+# HELP mlobs_inference_duration_seconds_created Model inference (tokenization + forward pass) duration in seconds.
+# TYPE mlobs_inference_duration_seconds_created gauge
+mlobs_inference_duration_seconds_created 1.7918251950255063e+09
+# HELP mlobs_predictions_total Predictions served, by label.
+# TYPE mlobs_predictions_total counter
+# HELP mlobs_prediction_confidence_ratio Max-softmax prediction confidence (matches drift confidence bins).
+# TYPE mlobs_prediction_confidence_ratio histogram
+mlobs_prediction_confidence_ratio_bucket{le="0.5"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.55"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.6"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.65"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.7"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.75"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.8"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.85"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.9"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="0.95"} 0.0
+mlobs_prediction_confidence_ratio_bucket{le="+Inf"} 0.0
+mlobs_prediction_confidence_ratio_count 0.0
+mlobs_prediction_confidence_ratio_sum 0.0
+# HELP mlobs_prediction_confidence_ratio_created Max-softmax prediction confidence (matches drift confidence bins).
+# TYPE mlobs_prediction_confidence_ratio_created gauge
+mlobs_prediction_confidence_ratio_created 1.791825195025561e+09
+# HELP mlobs_model_loaded 1 if the model is loaded, else 0.
+# TYPE mlobs_model_loaded gauge
+# HELP mlobs_stream_events_published_total Prediction events successfully XADDed to the stream.
+# TYPE mlobs_stream_events_published_total counter
+mlobs_stream_events_published_total 0.0
+# HELP mlobs_stream_events_published_created Prediction events successfully XADDed to the stream.
+# TYPE mlobs_stream_events_published_created gauge
+mlobs_stream_events_published_created 1.791825195025705e+09
+# HELP mlobs_stream_publish_failures_total Prediction events lost because XADD failed (fire-and-forget).
+# TYPE mlobs_stream_publish_failures_total counter
+mlobs_stream_publish_failures_total 0.0
+# HELP mlobs_stream_publish_failures_created Prediction events lost because XADD failed (fire-and-forget).
+# TYPE mlobs_stream_publish_failures_created gauge
+mlobs_stream_publish_failures_created 1.7918251950257182e+09

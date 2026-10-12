@@ -15,6 +15,14 @@
 # `make -C operator verify-manifests` also fails if this file ever references
 # a ClusterRole.
 #
+# For operator v1's metric acquisition the Role also reads pods, get and list
+# and no watch (D41): at interval boundaries only, through an uncached reader,
+# so no informer runs. The one read finds the window's two api pods by label
+# and gives the canary's Ready time and OOM kills from its status; each pod's
+# /metrics is then read at its pod IP, not through pods/proxy, which the Role
+# does not grant. RBAC cannot name-scope list, so the read covers every pod in
+# mlobs.
+#
 # The ServiceAccount and RoleBinding above the marker line are hand-written.
 # The Role below it is controller-gen's output, verbatim, from the
 # +kubebuilder:rbac markers in operator/internal/controller/. Change the
@@ -60,6 +68,13 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
 - apiGroups:
   - apps
   resources:
