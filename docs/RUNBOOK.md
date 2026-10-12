@@ -272,6 +272,8 @@ commitment of this slice.
 
 ## Abort criteria (O4 cutover window)
 
+O4 completed 2026-10-05; kept as the record and the template for any re-cutover.
+
 These are the lines #68's cutover and its one live canary window are held
 to. Each names a check and what follows when it fails. A check that cannot be
 run counts as failed. Abort first and diagnose after. Record every abort on
@@ -657,8 +659,8 @@ operator rolls the stable back (`infra/README.md`, "Rolling back").
 **Before you start:**
 
 - **The pre-cutover SHA.** This is the SHA the host ran before O4's cutover.
-  O4 records it on #68, from the host checkout's `git rev-parse HEAD` taken
-  before the cutover dispatch. The CI rehearsal pins `16a8c86`, the last
+  O4 recorded `16a8c86` on #68, from the host checkout's `git rev-parse HEAD`
+  taken before the cutover dispatch. The CI rehearsal pins `16a8c86`, the last
   deploy on record before O4.
 - **It must still be deployable.** Its GHCR images do not expire, but its
   shadow tarball in S3 does, 60 days after the push that uploaded it.

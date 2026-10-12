@@ -12,4 +12,5 @@ htmlcov/
 .env.*
 .idea/
 .vscode/
+.playwright-mcp/
 .DS_Store

@@ -117,7 +117,7 @@ narrow to the brief itself.
   memory bar that dominates the table above. That is the natural place to run
   Argo Rollouts against the same api image beside the Helm-packaged operator,
   and to record what expressing D37's shadow pause in it actually takes.
-  Whether P3 does so is for its own design freeze.
+  D39 did not; it remains a revisit trigger.
 - **v1.** Before writing the metric-driven promote and rollback loop, look at
   Argo's analysis again: that loop is the part of Argo this repository would
   most directly rebuild.

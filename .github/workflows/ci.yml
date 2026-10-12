@@ -916,11 +916,11 @@ jobs:
   RollbackRehearsal:
     name: D36 rollback rehearsal (k3d)
     # Phase 3 O3 (D36): undoing the operator, rehearsed in D36's order before
-    # O4 needs it on the host. deploy/k3s/rehearse-rollback.sh is the whole
+    # O4 ran it live on the host. deploy/k3s/rehearse-rollback.sh is the whole
     # check and runs the same against a local k3d cluster; this job only
     # builds and imports what it needs. The script deploys the pre-cutover
     # tree through that tree's own apply.sh, cuts over to this one the way
-    # #68 will on the host, so that the operator adopts deployment/api in
+    # #68 did on the host, so that the operator adopts deployment/api in
     # place, and opens a canary window. Then it runs D36's six steps — canary
     # to 0 by host patch, the ServingDeployment deleted, deployment/api
     # garbage-collected to a bound, the operator scaled to 0, the pre-cutover
@@ -928,9 +928,9 @@ jobs:
     # asserts each on the cluster state it leaves: conditions, replica
     # counts, owners and uids, and the scripts' fixed lines.
     #
-    # PRE_CUTOVER_SHA stands for the SHA the host runs before O4's cutover:
+    # PRE_CUTOVER_SHA stands for the SHA the host ran before O4's cutover:
     # 16a8c86, the last deploy on record in the Deploy workflow's history.
-    # If O4 records a different pre-cutover SHA, this pin moves with it.
+    # O4 recorded 16a8c86 on #68 as the pre-cutover SHA.
     #
     # The cluster is K3sSmoke's, D34 pair included: the pre-cutover tree has
     # to come back on a k3s that already carries the flags, because the host

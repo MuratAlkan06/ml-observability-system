@@ -42,6 +42,9 @@ htmlcov/
 .idea/
 .vscode/
 
+# Browser-automation scratch (Playwright MCP page snapshots and console logs)
+.playwright-mcp/
+
 # OS
 .DS_Store
 .claude/

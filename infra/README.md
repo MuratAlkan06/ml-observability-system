@@ -44,8 +44,10 @@ Stated plainly, because the gap matters more than the coverage:
   rejected for the cluster and this root left untouched, so no Terraform
   rebuild was exercised. The item remains open, recorded on issue #60.
 - **It does not provision the host.** The instance's `userData` is empty; Docker,
-  the compose stack and the `.env` were configured over SSH by hand. Codifying
-  that is out of scope here.
+  the compose stack and the `.env` were configured over SSH by hand. So were
+  the k3s install that replaced Compose (P2b, 2026-09-27) and D34's two-line
+  change to `/etc/rancher/k3s/config.yaml` (O4, 2026-10-05), both recorded in
+  `deploy/k3s/README.md`. Codifying that is out of scope here.
 - **It does not encrypt the root volume.** The as-found volume is unencrypted,
   and turning encryption on would force a replacement of the certified disk.
   Recorded as a known gap rather than fixed by a drive-by change. The
