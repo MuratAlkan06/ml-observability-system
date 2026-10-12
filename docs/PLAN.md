@@ -1232,3 +1232,267 @@ retention jobs, Alembic.
 > shown to be rebuildable from it. The deferral moves to the #60 deferral record (comment
 > 6097856211), with its companion, the encrypted-root-volume swap `infra/README.md` also deferred
 > to P3; both remain open. No frozen text edited.
+
+# Operator v1 phase — ADR summary (D41–D50)
+
+> FROZEN (owner ruling 2026-10-12 recorded on #108). Decisions for Phase 4 — operator v1,
+> metric-driven promote and rollback (the contract is `docs/PHASE4.md`). The block was gated by
+> an options memo and an independent risk critique, both on #108; the memo's second revision
+> folds in the gaps the critique found, the owner approved it as recommended, and its rulings
+> R1–R8, R10 and R11 are D41–D48, D49 and D50 here. R9 — what v4.0.0 must demonstrate live — was
+> owner-ruled 2026-10-11 on #108 and is not restated. v1 transcribes the O4 abort table
+> (`docs/RUNBOOK.md`, "During the live canary window: close it") and invents no abort policy;
+> the memo's line-by-line fidelity table is on #108, and what is new beside the table is
+> ratified here and named where it lands — the promote threshold and the clean-run reset (D44),
+> the `OperatorInterrupted` label (D45) and the dispatch floor (D47). Everything above is
+> untouched; this block appends only.
+
+- **D41 Metric source — the operator reads each pod's `/metrics` at interval boundaries; pods
+  join the Role as get/list, uncached:** the operator reads each pod's own `/metrics` itself, by
+  `watch-window.sh`'s method verbatim: the pods are listed by the window's selectors — the
+  stable as `app=api` with no `role` label, the canary as `app=api,role=canary` — and read over
+  plain HTTP at the pod IP on port 8000; the same two series, `mlobs_http_requests_total` and
+  `mlobs_http_request_duration_seconds_bucket` with `endpoint="/predict"`; the same bucket-delta
+  p95; the same pod-identity check. Reads happen only at interval boundaries, through the
+  uncached APIReader, and every `/metrics` read carries a context timeout well under the 60 s
+  grid, so a hung pod costs an unevaluable interval, never a wedged reconcile. The Role gains
+  `pods` get and list in `mlobs`, read-only, and not watch: boundary-time reads need no
+  informer, and without one there is no cache churn between boundaries. The one grant is used
+  three ways — label discovery, the canary's Ready time for warmup, and OOMKilled from container
+  status. D33's honesty note carries over: list cannot be name-scoped, so the read covers the
+  namespace's pods. In CI the decision core stays a pure function fed interval samples, the
+  `decideWindow` precedent, and the acting e2e's HTTP stub serves a `/metrics` the test writes,
+  shaping histogram bucket deltas rather than bare counters, so a 1.25× crossing emerges from
+  interpolation exactly as it does live. *Provenance:* the method is `watch-window.sh`'s, which
+  the O4 abort criteria made the decision source for lines 2 and 3 (`docs/RUNBOOK.md`, "During
+  the live canary window: close it"). *Rejected:* the same reads through `pods/proxy`;
+  Prometheus, or a new stable-only scrape job; a cached client and the watch verb. *Why:*
+  Prometheus is ruled out on the record: its `[1m]` window is not the watch's interval and the
+  stable has no series of its own, so mechanizing through it changes the measurement, and the
+  measurement is the policy. `pods/proxy` is more grant than it looks — it reaches any port and
+  path on any pod through the API server — and it adds an API-server hop to a latency read. A
+  cached client would run an informer watch for data needed once a minute, and the
+  narrowest-grant argument that rejects `pods/proxy` applies to verbs too.
+- **D42 The opt-in gate and its evidence — one ordered mode enum, tag-bound arming, a TTL-sized
+  per-interval record in status:** one optional struct, `spec.gate`, with a `mode` enum
+  `Observe | ActRollback | ActPromote`; absent is v0. The modes are an explicit lattice, each
+  strictly containing the one before: Observe records only; ActRollback adds autonomous breach
+  rollback; ActPromote adds promote dispatch and still acts on rollback breaches. A mode that
+  promotes but will not abort is not offered. Validation is the CRD's OpenAPI schema: the mode
+  is an enum, the verdict and reason vocabularies are enum-validated too, and the new fields
+  join the Helm `crds/` parity sweep (D38). Arming is tag-bound: the acting modes require
+  `spec.gate.forCanaryImageTag == spec.canaryImageTag`, and a mismatch degrades the gate to
+  Observe with an Event. The gate is written by the same host patch that opens a window, so
+  there is no new spec writer (D32) and consent is given per canary tag. An e2e asserts that a
+  pipeline deploy leaves `spec.gate` intact and that the rendered CR manifest contains no gate
+  key. The evidence lives in status, where the durable clocks already live (the TTL precedent):
+  `status.gate` holds per-interval records — interval index, start and end, per-pod request
+  count, 5xx, p95, ratio, verdict, and reasons from a fixed vocabulary — plus `breachRun`,
+  `cleanRun`, session totals and `lastVerdict`; Events record transitions only. The records are
+  a ring sized to the TTL: 50 slots, about 12.5 KB, trivial against etcd's ~1.5 MiB object
+  bound, and enough for a 45-minute window's ~45 intervals. Between boundaries status is
+  byte-deterministic — no evaluation, no ring append, no timestamp churn — so the DeepEqual
+  guard suppresses the re-enqueue echo, and a test pins the invariant. *Rejected:* separate
+  booleans; a separate policy CRD; checklist-only arming; a 15-slot ring, with the
+  interval-by-interval evidence bar re-ruled down to fit it. *Why:* booleans admit nonsense
+  combinations that a webhook-less CRD (D33) cannot cheaply forbid, and a policy CRD is
+  speculative. `apply.sh`'s client-side apply preserves an unrendered `spec.gate` across
+  pipeline deploys, so a gate armed in October would still act in December; checklist-only
+  arming adds zero surface but leans on memory at the exact moment memory fails. Events age out
+  in about an hour on k3s and cannot carry a counter across a restart. A 15-slot ring
+  contradicts the evidence bar `docs/PHASE4.md` settled, and re-ruling the bar saves nothing
+  that matters. And a non-deterministic ring field would be a self-sustaining write loop.
+- **D43 Promote actuation — the operator dispatches the pipeline once per latched verdict; the
+  writer set stands; the token is enumerated like a boundary:** in ActPromote the operator
+  dispatches `deploy.yml` with `spec.canaryImageTag`, after validating it as 40-hex, at most
+  once per latched verdict; in ActRollback the promote verdict is recorded and a human actuates.
+  The pipeline stays the sole renderer of `spec.imageTag` (D32), and every existing guard stays
+  in the promoted path: the GHCR preflight, the ancestry check, the constant close patch and
+  state-aware smoke. **The token.** A fine-grained PAT held by a dedicated machine account, a
+  Write collaborator. Its scope is checked and recorded at mint time: Actions read/write on this
+  one repository and nothing else — explicitly no Deployments permission. Approving a pending
+  deployment needs Deployments write, which Actions read/write does not confer, so the token
+  cannot approve its own dispatch. Its residual capabilities are enumerated in the D33 manner:
+  it can dispatch all three `workflow_dispatch` workflows (CI, Deploy, Operator); re-run past
+  main-push runs, re-executing GhcrPublish and ShadowPublish on the same SHA from a
+  nondeterministic rebuild; cancel an in-flight Deploy run, which stops the watching, not the
+  deploy — the SSM command carries on unwatched (`deploy.yml`'s concurrency comment); and enable
+  or disable workflows. The code path uses exactly one capability, the single dispatch; the rest
+  is what the token could do, written down. **Dispatch discipline.** Latch-then-dispatch, at
+  most once: the verdict is written to status first, then dispatched, and a crash between the
+  two leaves a latched verdict and no run — actuation reverts to the human (D47). A non-2xx
+  dispatch leaves the verdict latched, emits an Event and is not retried; the human actuates.
+  `workflow_dispatch` returns 202 with no run id, so the latch records the attempt and its
+  timestamp, and the human records the run URL on the slice issue — the #68 evidence pattern.
+  Before dispatching, the operator lists Deploy runs through Actions read and defers — verdict
+  latched, Event emitted — if any run is queued or waiting: `deploy.yml`'s concurrency keeps the
+  newest pending run, so an operator dispatch would otherwise evict a queued human deploy at an
+  incident moment. A window opened under ActPromote has a precondition: the canary tag is a
+  commit on `main`, or the dispatch dies at the ancestry check after the gate did everything
+  right. **The Secret.** Created host-side only, never through CI or the repository; mounted by
+  the operator Deployment alone — a mount is not an API read, so there is no new RBAC; its
+  expiry bounded to the live-window season; and a rotation and revocation runbook line ships
+  with the slice. Once the promote demonstration completes, the PAT is expired and the reviewer
+  restored. With the Secret absent, ActPromote degrades to verdict-only, the off-season posture.
+  **The approval.** The `ec2-deploy` required reviewer stays in ordinary operation. It is lifted
+  only for the scheduled promote demonstration window, which a human attends regardless (D46),
+  and restored immediately after, both changes recorded on the slice issue. The rollback
+  demonstration needs no lift: rollback is in-cluster. Stated honestly: k3s stores Secrets
+  unencrypted at rest by default, and this is a new reverse control edge — the cluster can now
+  act on GitHub, where control previously flowed one way. Owner rulings at this freeze
+  (2026-10-12): the dedicated machine account, created when the slice needs it; the demo-scoped
+  approval lift, recorded on the slice issue and restored immediately after. *Rejected:*
+  verdict-only actuation; a new D letting the operator write `spec.imageTag`; an owner-account
+  PAT; keeping the required reviewer through the demonstration; lifting it permanently;
+  queued-run handling by discipline alone. *Why:* verdict-only is not auto-promote — with no
+  inbound path to the cluster it degenerates into a dispatch or a human, and R9 is settled; it
+  is v0's promote with better paperwork. Writing `spec.imageTag` stays rejected beyond D32:
+  `IMAGE_TAG` is one tag for all five images, so it would promote the api alone and leave a
+  mixed-tag stack. A dispatch satisfies R9 with the writer set untouched. An owner-account PAT
+  risks sole-reviewer deadlock — with prevent-self-review on, the owner cannot approve runs
+  dispatched under their own identity — and a broader identity blast radius, where the machine
+  account separates operator-initiated runs from human ones in Actions history and keeps
+  prevent-self-review enableable. Keeping the reviewer makes the honest claim
+  "operator-initiated, pipeline-guarded", which R9 does not accept; lifting it permanently
+  removes the strongest deploy guard year-round for one demonstration. And the incident is when
+  discipline fails.
+- **D44 Promote threshold — eleven consecutive clean intervals, compiled; a canary restart
+  resets the run; the arithmetic and its cold-pull sensitivity recorded:** N = 11, a compiled
+  constant. A clean interval is evaluable, post-warmup, free of any line 1, 2 or 3 trip, and
+  free of a canary OOMKilled; warmup and pending intervals count toward nothing. Counter
+  snapshots are seeded before the first evaluable interval, so the first post-warmup interval
+  has a real delta and no free breach. A canary pod restart resets `cleanRun`: a new process
+  restarts the evidence, and `watch-window.sh` already gives a restarted pod its own warmup (its
+  line-2 comment), so the re-warmup intervals would not count anyway, while a `cleanRun` carried
+  across the restart blends two processes' evidence. N and the reset rule are promote-side
+  policy new beside the O4 table, ratified here from the live evidence and not passed off as
+  transcription. The arithmetic: warmup plus 11 evaluable intervals is about 12 minutes from
+  canary Ready, and at 5 rps each pod sees about 150 requests per interval, three times the
+  floor. Its sensitivity: a verdict near T+14 minutes assumes a warm image pull. A cold pull
+  moves Ready later, and because warmup and the clean run anchor to Ready (D45) while the TTL
+  does not, the verdict floats with Ready — a late verdict meets D47's dispatch floor at verdict
+  time and reverts to the human rather than racing expiry. Owner ruling at this freeze
+  (2026-10-12): N is compiled, and changing it later requires a new D-number. *Provenance:*
+  Gate 4 passed live on 11 consecutive clean intervals (#68). *Rejected:*
+  `spec.gate.promoteAfterIntervals`, default 11 with a floor of 11; a freely configurable N; a
+  `cleanRun` carried across a canary restart. *Why:* numbers are not settings in this repository
+  — `watch-window.sh` says so, and the 45-minute TTL is compiled with its arithmetic recorded
+  (D37). A freely configurable N invites weakening the gate by patch; the floored field was the
+  fallback for longer soaks without a PR, and the owner ruled the constant.
+- **D45 Failure posture — pending counts toward nothing, unevaluable is a breach, two in a row
+  roll back, a restart forfeits its interval and says so:** the interval grid anchors to
+  `CanaryActive`'s `lastTransitionTime`, and warmup anchors to the canary pod's Ready, per
+  restart: an interval that starts 60 s or more after Ready is post-warmup, as the runbook's
+  line 2 has it. An interval that ends before any canary pod has been Ready is pending: it
+  counts toward neither counter, exactly as `watch-window.sh` classifies it. Pending is bounded
+  by the TTL ceiling alone: the operator invents no pending limit, and the attending human (D46)
+  owns a canary that never turns Ready. A table-driven test mirrors the script's classification
+  line for line. The rest transcribes the table. An unevaluable interval — a pod read that
+  fails, a pod under the floor, a pod identity change, a counter reset — is a breach toward the
+  two-in-a-row counter, and two in a row roll back; there is no new number. A post-warmup canary
+  5xx and a canary OOMKilled trip at once. A total metric-source outage in an acting mode
+  therefore self-resolves into rollback in about 2–3 minutes — abort first, diagnose after,
+  mechanized; Observe only records. On an operator restart mid-window, the counters and the ring
+  resume from status. In-memory snapshots are deliberately not persisted, so the interrupted
+  interval is forfeited: it counts as unevaluable and is recorded with reason
+  `OperatorInterrupted`, so the evidence never blames a healthy canary. Two consecutive operator
+  restarts therefore close the window on their own — safety landing on the classification
+  table's second-row remedy — while a persistent operator fault still takes the first row's
+  human path (D36). Evaluation stays in the pure package. The runbook gains the line: rolling
+  the operator image during an acting window burns forfeited intervals and resets `cleanRun` —
+  do not. Every failure direction lands on rollback, revert-to-human or wait, never on promote.
+  *Rejected:* no pending verdict, with pre-Ready intervals left unevaluable; persisting raw
+  snapshots across a restart; a metric-source outage as hold-and-wait. *Why:* without pending,
+  unevaluable-as-breach would roll back every slow-starting canary at about T+2–3 minutes — an
+  invented policy, the hole the critique found. Persisting snapshots is etcd churn to rescue one
+  interval. And hold-and-wait is the unwatched window, the one thing the table forbids.
+- **D46 The human line — the host, the stable, the operator itself, the deploy gate, and
+  agreement stay human; a human attends every acting window:** the operator decides only from
+  what a pod shows it. Stated as a rule, not an assumption: a human attends every acting window,
+  with `watch-window.sh` running beside it as the console — the script is not retired. Human, by
+  name: line 5's host regime — `MemAvailable` and the kernel OOM log — which is unobservable
+  in-cluster by design, with no node_exporter, so only the canary's own OOMKilled reaches the
+  operator; line 4's window-state judgement and line 6, the operator-fault rows, because the
+  operator cannot judge or bury itself (D36); the stable-unhealthy path; opening any window
+  (D32); rejecting a pending operator dispatch (D47); the promote approval, wherever the
+  reviewer stands (D43); and the agreement and confidence judgement (D49). *Rejected:* retiring
+  `watch-window.sh` once acting modes exist. *Why:* line 5's host regime is unobservable
+  in-cluster, so retiring the script would silently narrow the table.
+- **D47 Breach latch and the ceiling — rollback latches like expiry; the TTL is unchanged; a
+  post-expiry approval is an ordinary deploy, and the reviewer's reject is the override:** the
+  acting modes change the TTL's semantics not at all: the 45-minute TTL stays the ceiling in
+  every mode, and expiry always beats an unlanded promote. Breach rollback reuses the expiry
+  mechanism wholesale (the D32 clarification and the D37 addendum of O2): it restores steady
+  without touching the spec; sets `CanaryActive` False with a new reason, `BreachRolledBack`,
+  whose message names the tripped line, the evidence in `status.gate`; latches exactly as
+  `WindowExpired` does; and releases only through the cleared spec shape. `decideWindow` grows
+  one latched-reason check. A verdict dispatches only if the remaining TTL is at least 15
+  minutes; a verdict inside the floor stays recorded and actuation reverts to the human. The
+  floor gates the operator's dispatch. It does not bound when an approved run lands — 13 minutes
+  is a floor on the worst case and not a bound, and a dispatched run can sit waiting
+  indefinitely. A run approved after expiry deploys the promoted tag onto a steady stack: the
+  stable rolls by Recreate with no canary covering the bounce, so D32's no-gap promise does not
+  hold post-expiry (same-image excepted, a no-op). Three rules hold the race: a human attends
+  every acting window (D46); the acting-window abort checklist gains "check Actions for a
+  pending operator dispatch and REJECT it" — reviewers can reject, and that reject is the human
+  override, now written down; and a run approved after expiry is documented as an ordinary
+  gap-producing deploy, never recorded as a windowed promotion. *Provenance:* 13 minutes is the
+  longest way back on record, deploy run 36517554863 with its approval wait (`docs/RUNBOOK.md`,
+  the O4 cutover's dark bound). *Rejected:* extending the TTL in acting modes; a second latch
+  mechanism. *Why:* the ceiling is the safety property, and two latches are two copies of one
+  description.
+- **D48 The way back after the tarball horizon — a reviewed revert-at-need through the pipeline,
+  its CI dependency named; live windows aimed before the horizon:** D36's steps 1–4 are
+  unchanged. Past the horizon, step 5's target becomes a reviewed revert on current `main`,
+  raised at incident time and dispatched through the pipeline, which is the way back
+  `deploy.yml`'s tarball preflight already names when the tarball is gone. The dependency is
+  named: revert-at-need requires CI publish — GhcrPublish and ShadowPublish green — during the
+  incident, strictly weaker than the pre-staged tarball. Schedule discipline goes with it: every
+  live v1 window is aimed before 2026-11-20, so the tarball stays the primary way back and
+  revert-at-need is only the post-horizon fallback. Owner ruling at this freeze (2026-10-12):
+  all live v1 windows before 2026-11-20. *Provenance:* the D36 way-back's S3 fallback tarballs
+  expire about 2026-11-26/28 under the bucket's 60-day expiry (#60, dated comment). *Rejected:*
+  the schedule alone, with D36 intact and nothing re-ruled; a standing revert merged now. *Why:*
+  the schedule alone couples correctness to a date with no slack. A standing revert pre-stages
+  the way back as a commit, but the tip of `main` becomes the reverted tree — the default deploy
+  target is the way back, every future merge lands atop it, and `main` stops being current work.
+- **D49 The promote signal — the health table promotes, as the live gate did; #62's agreement
+  signal stays human until predictions carry per-arm attribution:** v1 promotes on the O4 health
+  table alone, exactly as the live Gate 4 pass did, and agreement and confidence against the
+  stable stay a human judgement, deferred behind per-arm attribution in predictions. The brief
+  is re-ruled on the record, not amended by nobody. Per-arm attribution landing is the standing
+  trigger to revisit this D and D44. The v4.0.0 claim is fixed now, sanctioned verbatim by the
+  owner at this freeze (2026-10-12): "The operator ran live windows and acted on the ratified O4
+  abort table: it observed, rolled back an induced breach, and dispatched a promotion — on the
+  table's health lines alone. The #62 agreement/confidence signal is not mechanized: predictions
+  carry no per-arm attribution, so that judgement stays human, deferred until the schema carries
+  it." *Provenance:* the owner brief (#62) set the promotion signal as agreement/confidence
+  against the stable (`docs/PHASE3.md`, "Metric split"). That signal is not mechanizable today:
+  the predictions table has no pod or image column, so canary and stable rows are
+  indistinguishable — the same fact that excludes drift as a gate. *Rejected:* blocking
+  ActPromote until per-arm attribution ships; approximating agreement with a proxy. *Why:*
+  blocking couples this phase to a schema-and-consumer project and holds the operator to a
+  higher bar than the ratified human process it transcribes. A proxy invents policy, which the
+  freeze forbids.
+- **D50 The R9 demonstrations — pre-declared agreement for Observe, induced canary load for the
+  breach, same-image on a fresh deploy for the promote:** R9's three live legs, their methods
+  frozen with the phase. **Leg 1, live Observe.** `watch-window.sh` runs beside the operator
+  under a session-level agreement rule declared on the slice issue before the window opens: the
+  pass criterion is the same trip or no-trip per line and the same session breach counts — not
+  per-interval equality, which the two grids' different origins make meaningless. **Leg 2, live
+  auto-rollback on an induced breach.** Primary: extra fresh-connection load aimed at the canary
+  pod alone, pushing its same-interval p95 past 1.25× the stable's — line 3 exercised verbatim,
+  with zero code change and the blast bounded to the window. Fallback: `kubectl delete pod` on
+  the canary, which exercises unevaluable-counts-as-breach. The line-5 human watch runs
+  throughout. **Leg 3, bounded live auto-promote.** Same-image, planned on a freshly deployed
+  tip SHA, because `deploy.yml`'s S3 preflight fails past the 60-day tarball window. It is
+  recorded for what it proves — the actuation path end to end, not image movement — and R9
+  sanctions same-image explicitly. The pipeline's constant close patch is both the completion
+  signal and the latch release. The CI proof beneath the live legs: pure-engine table tests with
+  no clock; envtest with an injected now for the counters, the latch and forfeiture, with
+  `containerStatuses` written directly, since envtest has no kubelet; at most one real-time k3d
+  scenario, as integration smoke; and any test-only interval knob absent from the manifests,
+  with an assertion proving it. *Provenance:* R9, owner-ruled 2026-10-11 on #108
+  (`docs/PHASE4.md`, Settled constraints). *Rejected:* a fault-levered image on `main` for the
+  breach. *Why:* one tag builds all five images, so the lever would ship in the stable image
+  too.
