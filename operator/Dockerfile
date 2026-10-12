@@ -1,5 +1,9 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+# The builder is pinned by tag and manifest-list digest, so it changes only
+# with a commit here: the 1.26 line's current patch. The image sets
+# GOTOOLCHAIN=local, so it builds with its own Go and never downloads the one
+# go.mod's toolchain line names; go.mod's go line must stay within 1.26.
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
