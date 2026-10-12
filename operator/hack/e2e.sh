@@ -29,7 +29,8 @@
 #   2. the operator holds its Lease (leader election, asserted as the
 #      acquisition only — D35)
 #   3. its ServiceAccount may patch the shadow scorer's scale and nothing
-#      beside it (the D33 addendum of O2)
+#      beside it (the D33 addendum of O2), and may get and list pods but not
+#      watch them nor reach them through pods/proxy (D41)
 #   4. the ServingDeployment's deployment/api is created, controlled by it,
 #      at the rendered image, and Ready at the current generation
 #   5. a canary window opens in D37's order — the shadow scorer paused with
@@ -259,6 +260,13 @@ EOF
   can_i no patch statefulsets.apps/shadow-scorer
   can_i no delete statefulsets.apps
   can_i no get secrets
+  # Metric acquisition (D41): pods read at boundaries through the uncached
+  # APIReader, so get and list and no watch; /metrics at the pod IP, so no
+  # pods/proxy.
+  can_i yes get pods
+  can_i yes list pods
+  can_i no watch pods
+  can_i no get pods --subresource=proxy
 
   # --- 4. deployment/api created, owned and Ready ----------------------------
 

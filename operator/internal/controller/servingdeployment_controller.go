@@ -93,6 +93,16 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // +kubebuilder:rbac:groups=apps,namespace=mlobs,resources=statefulsets/scale,resourceNames=shadow-scorer,verbs=patch
 // +kubebuilder:rbac:groups="",namespace=mlobs,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=mlobs,resources=leases,verbs=get;list;watch;create;update;patch;delete
+//
+// Metric acquisition (D41): get and list on the namespace's pods, and no
+// watch. The window's two api pods are read at interval boundaries only,
+// through the manager's uncached APIReader (internal/scrape), so no informer
+// runs and none needs the watch verb. The one grant serves three reads — the
+// pods by label, the canary's Ready time, and OOMKilled from container status
+// — and each pod's /metrics is read at its pod IP, not through pods/proxy,
+// which this Role does not grant. RBAC cannot name-scope list, so the read
+// covers the namespace's pods.
+// +kubebuilder:rbac:groups="",namespace=mlobs,resources=pods,verbs=get;list
 
 // Reconcile drives deployment/api, the stable api Deployment in the
 // ServingDeployment's namespace, to the image spec.imageTag names; decides the
