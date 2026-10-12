@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -30,10 +31,26 @@ var (
 	upperBound = regexp.MustCompile(`le="([^"]+)"`)
 )
 
-// maxLineBytes bounds one line of a /metrics page. The api's lines run to a
-// few hundred bytes; a longer one fails the read rather than growing the
-// buffer without bound.
-const maxLineBytes = 1 << 20
+// The bounds a page is read within. The script's Python reads past each of
+// them; here the read fails instead, so each is a named deviation from
+// watch-window.sh, and each errs toward an unevaluable interval.
+const (
+	// maxLineBytes bounds one line of a /metrics page. The api's longest
+	// runs to 115 bytes; a longer line than this fails the read rather than
+	// growing the buffer.
+	maxLineBytes = 16 << 10
+	// maxBuckets bounds the distinct le values the /predict bucket lines
+	// name. The api's histogram has 12; a page naming more than this fails
+	// the read rather than growing the map.
+	maxBuckets = 64
+	// maxCount bounds a count's magnitude at 2^53-1, the largest integer a
+	// float64 holds exactly with both its neighbours: from 2^53 on, two
+	// consecutive counts read as the same number, and a change between two
+	// counts can pass the int64 range, where gate's conversion to a count
+	// gives whatever the architecture makes of it. A count past the bound, or
+	// not a number at all (NaN, ±Inf), fails the read.
+	maxCount = 1<<53 - 1
+)
 
 // parseExposition is watch-window.sh's parse_exposition, line for line, over
 // a /metrics page in the text exposition format: of the lines that carry
@@ -47,9 +64,12 @@ const maxLineBytes = 1 << 20
 //
 // Where the script's Python would raise — a value that is not a number, a
 // bucket line with no le, an le that is not a number — the read fails, as
-// the script's does. The buckets come back sorted by upper bound, the
-// script's order, ties in the order the page first named them. The pod is
-// left for the caller.
+// the script's does. It also fails past the bounds above, where the script's
+// would not: a line over maxLineBytes, more than maxBuckets bounds, and a
+// count, a line's or the request and 5xx sums, that is not a number within
+// ±maxCount. The buckets come back sorted by upper bound, the script's order,
+// ties in the order the page first named them. The pod is left for the
+// caller.
 func parseExposition(page io.Reader) (gate.Sample, error) {
 	var (
 		sample gate.Sample
@@ -73,25 +93,40 @@ func parseExposition(page io.Reader) (gate.Sample, error) {
 		if err != nil {
 			return gate.Sample{}, fmt.Errorf("line %d: %w", n, err)
 		}
+		requests, bucket := strings.HasPrefix(line, requestsPrefix), strings.HasPrefix(line, bucketsPrefix)
+		if (requests || bucket) && !isCount(value) {
+			return gate.Sample{}, fmt.Errorf("line %d: %v is not a count within ±(2^53-1)", n, value)
+		}
 		switch {
-		case strings.HasPrefix(line, requestsPrefix):
+		case requests:
 			sample.Requests += value
 			if errorStatus.MatchString(line) {
 				sample.Errors += value
 			}
-		case strings.HasPrefix(line, bucketsPrefix):
+		case bucket:
 			m := upperBound.FindStringSubmatch(line)
 			if m == nil {
 				return gate.Sample{}, fmt.Errorf("line %d is a bucket with no le", n)
 			}
-			if _, seen := counts[m[1]]; !seen {
-				order = append(order, m[1])
+			// A copy, not the substring: a key kept from the line would keep
+			// the whole line, and a map assignment stores its key anew.
+			le := strings.Clone(m[1])
+			if _, seen := counts[le]; !seen {
+				if len(order) == maxBuckets {
+					return gate.Sample{}, fmt.Errorf("line %d names more than %d bucket bounds", n, maxBuckets)
+				}
+				order = append(order, le)
 			}
-			counts[m[1]] = value
+			counts[le] = value
 		}
 	}
 	if err := lines.Err(); err != nil {
 		return gate.Sample{}, err
+	}
+	// Each line's count is within the bound; their sums must be too.
+	if !isCount(sample.Requests) || !isCount(sample.Errors) {
+		return gate.Sample{}, fmt.Errorf("the request and 5xx sums, %v and %v, are not both counts within ±(2^53-1)",
+			sample.Requests, sample.Errors)
 	}
 	for _, le := range order {
 		bound, err := strconv.ParseFloat(le, 64)
@@ -104,4 +139,10 @@ func parseExposition(page io.Reader) (gate.Sample, error) {
 		return cmp.Compare(a.UpperBoundSeconds, b.UpperBoundSeconds)
 	})
 	return sample, nil
+}
+
+// isCount reports whether v is a number within ±maxCount. NaN compares false
+// with everything, so it is not.
+func isCount(v float64) bool {
+	return math.Abs(v) <= maxCount
 }

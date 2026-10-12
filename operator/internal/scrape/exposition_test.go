@@ -1,6 +1,8 @@
 package scrape
 
 import (
+	"bufio"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -176,6 +178,86 @@ var _ = Describe("A /metrics page, read as watch-window.sh's parse_exposition re
 	It("fails the read on a line past its bound, rather than buffering without one", func() {
 		long := `mlobs_http_requests_total{endpoint="/predict",method="` + strings.Repeat("P", maxLineBytes) + `"} 1.0`
 		_, err := parseExposition(strings.NewReader(long))
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(bufio.ErrTooLong))
+	})
+
+	It("bounds a line far above the api's own, the longest of which runs to 115 bytes", func() {
+		longest := 0
+		for _, name := range []string{"fresh", "stable-start", "stable-end", "canary-start", "canary-end"} {
+			for line := range strings.Lines(page(name)) {
+				longest = max(longest, len(strings.TrimSuffix(line, "\n")))
+			}
+		}
+		Expect(longest).To(Equal(115))
+		Expect(maxLineBytes).To(BeNumerically(">", 100*longest))
+	})
+
+	It("reads up to maxBuckets distinct bounds, however many lines name them, and fails the read on one more", func() {
+		Expect(maxBuckets).To(BeNumerically(">=", 4*len(parsed(page("stable-end")).Buckets)),
+			"the bound sits well above the api's 12 bounds")
+		bucketLines := func(bounds int) string {
+			var b strings.Builder
+			// Two lines per bound, as two label sets of one histogram name
+			// them: only distinct bounds count.
+			for _, method := range []string{"GET", "POST"} {
+				for i := 1; i < bounds; i++ {
+					fmt.Fprintf(&b, "mlobs_http_request_duration_seconds_bucket{endpoint=\"/predict\",method=%q,le=\"%d\"} %d.0\n",
+						method, i, i)
+				}
+				fmt.Fprintf(&b, "mlobs_http_request_duration_seconds_bucket{endpoint=\"/predict\",method=%q,le=\"+Inf\"} %d.0\n",
+					method, bounds)
+			}
+			return b.String()
+		}
+
+		s := parsed(bucketLines(maxBuckets))
+		Expect(s.Buckets).To(HaveLen(maxBuckets))
+		Expect(s.Buckets[maxBuckets-1]).To(Equal(gate.Bucket{UpperBoundSeconds: math.Inf(1), Count: maxBuckets}))
+
+		_, err := parseExposition(strings.NewReader(bucketLines(maxBuckets + 1)))
+		Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("names more than %d bucket bounds", maxBuckets))))
+	})
+
+	// The script's Python takes every one of these, and the engine would
+	// difference them: from 2^53 on, consecutive counts read as one, and past
+	// int64 a change converts to whatever the architecture makes of it. So
+	// the read fails instead, a named deviation toward unevaluable.
+	DescribeTable("fails the read on a count that is not a number within ±(2^53-1), on either series",
+		func(value string) {
+			for _, line := range []string{
+				`mlobs_http_requests_total{endpoint="/predict",method="POST",status="200"} ` + value,
+				`mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="+Inf"} ` + value,
+			} {
+				_, err := parseExposition(strings.NewReader("# a page\n" + line + "\n"))
+				Expect(err).To(MatchError(ContainSubstring("is not a count within ±(2^53-1)")), line)
+			}
+		},
+		Entry("NaN", "NaN"),
+		Entry("+Inf", "+Inf"),
+		Entry("-Inf", "-Inf"),
+		Entry("1e300", "1e300"),
+		Entry("-1e300", "-1e300"),
+		Entry("2^53, where a float64 stops telling consecutive integers apart", "9007199254740992"),
+		Entry("2^53+1, which parses to 2^53", "9007199254740993"),
+	)
+
+	It("reads 2^53-1, the largest count within the bound, as itself on either series", func() {
+		s := parsed(`mlobs_http_requests_total{endpoint="/predict",method="POST",status="500"} 9007199254740991` + "\n" +
+			`mlobs_http_request_duration_seconds_bucket{endpoint="/predict",le="+Inf"} 9007199254740991`)
+		Expect(s).To(Equal(gate.Sample{
+			Requests: maxCount, Errors: maxCount,
+			Buckets: []gate.Bucket{{UpperBoundSeconds: math.Inf(1), Count: maxCount}},
+		}))
+		Expect(float64(maxCount)).To(Equal(math.Exp2(53) - 1))
+	})
+
+	It("fails the read on request or 5xx sums past the bound, though each line's count is within it", func() {
+		line := func(status string) string {
+			return `mlobs_http_requests_total{endpoint="/predict",method="POST",status="` + status + `"} 9007199254740991` + "\n"
+		}
+		_, err := parseExposition(strings.NewReader(line("200") + line("422")))
+		Expect(err).To(MatchError(ContainSubstring("the request and 5xx sums")))
+		_, err = parseExposition(strings.NewReader(line("500") + line("503")))
+		Expect(err).To(MatchError(ContainSubstring("the request and 5xx sums")))
 	})
 })
