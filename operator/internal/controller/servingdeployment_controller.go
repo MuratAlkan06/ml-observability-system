@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	servingv1alpha1 "github.com/MuratAlkan06/ml-observability-system/operator/api/v1alpha1"
+	"github.com/MuratAlkan06/ml-observability-system/operator/internal/scrape"
 )
 
 // Event reasons the reconciler records on a ServingDeployment.
@@ -47,14 +49,27 @@ type ServingDeploymentReconciler struct {
 	// Recorder must write core/v1 Events: those are what the operator's Role
 	// grants create and patch on (docs/PLAN.md D33).
 	Recorder record.EventRecorder
-	// Now is the reconciler's clock, read once per reconcile; nil means
-	// time.Now. Tests set it, so the 45-minute window TTL is exercised
-	// without waiting on it.
+	// Now is the reconciler's clock, read once per reconcile, and once more
+	// after a gate boundary's reads to schedule the next boundary from when
+	// they ended; nil means time.Now. Tests set it, so the 45-minute window
+	// TTL and the gate's grid are exercised without waiting on them.
 	Now func() time.Time
 	// ImagePrefix is the registry and owner of the api images the operator
 	// writes, as <ImagePrefix>/mlobs-api:<tag>; empty means
 	// DefaultImagePrefix. The operator's --image-prefix sets it.
 	ImagePrefix string
+
+	// scraper reads the window's two pods at the gate's boundaries.
+	// SetupWithManager sets it to a scrape.Scraper whose Reader is the
+	// manager's uncached APIReader and nothing else, so its /metrics reads go
+	// through package scrape's own client (D41); this package's tests set a
+	// scripted one.
+	scraper boundaryReader
+	// gateInterval is the gate's grid interval; zero means gateGridInterval.
+	// SetupWithManager sets it from the test-only knob, gateIntervalEnv.
+	gateInterval time.Duration
+	// baselines are the gate's last boundary reads, in memory alone (D45).
+	baselines gateBaselines
 }
 
 // now reads the reconciler's clock.
@@ -109,24 +124,30 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // canary window from the spec, the CanaryActive condition on record and the
 // clock; and takes the next step toward that window's state — the canary
 // Deployment, deployment/api-canary, up or down, and the shadow scorer at 0 or
-// 1, in the order reconcileWindow keeps. It then writes the status for the
-// generation it acted on: the Ready, CanaryActive and ShadowPaused conditions
-// and status.observedGeneration. The status is written on failure too, so a
-// refused adoption shows on the resource and not only in the operator's log.
-// While a window is open the request is requeued for its deadline. The spec is
-// never written (docs/PLAN.md D31, D32, D37 and their O2 rulings).
+// 1, in the order reconcileWindow keeps. With spec.gate set and a window open
+// it runs the gate, which reads the window's pods only at the boundaries of
+// its interval grid and records each interval in status.gate (observe). It
+// then writes the status for the generation it acted on: the Ready,
+// CanaryActive and ShadowPaused conditions, status.observedGeneration and
+// status.gate. The status is written on failure too, so a refused adoption
+// shows on the resource and not only in the operator's log. While a window is
+// open the request is requeued for the earlier of its deadline and the gate's
+// next boundary. The spec is never written (docs/PLAN.md D31, D32, D37 and
+// their O2 rulings; D42).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
 		// A ServingDeployment that is gone needs nothing from here:
 		// deployment/api goes with it, garbage-collected through its
 		// ownerReference (D36).
+		r.baselines.forget(req.NamespacedName)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !sd.DeletionTimestamp.IsZero() {
 		// While the ServingDeployment is being deleted, a deployment/api the
 		// garbage collector has already removed must stay removed: D36's
 		// rollback waits on exactly that removal.
+		r.baselines.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -143,24 +164,31 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if windowErr != nil {
 		w.progress = "blocked: " + windowErr.Error()
 	}
-	reconcileErr := joinErrors(stableErr, windowErr)
 
 	base := sd.DeepCopy()
 	setConditions(sd, dep, stableErr, r.apiImage(sd.Spec.ImageTag), w, shadow, now)
 	sd.Status.ObservedGeneration = sd.Generation
+	step, gateErr := r.observe(ctx, sd, w.open, now)
+	reconcileErr := joinErrors(stableErr, windowErr, gateErr)
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, errors.Join(reconcileErr,
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
+	r.finishGate(sd, step)
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
 	if w.open {
 		// The TTL is enforced by this requeue, not by an event: nothing in
-		// the cluster changes at the deadline.
-		return ctrl.Result{RequeueAfter: w.deadline.Sub(now)}, nil
+		// the cluster changes at the deadline. Neither does anything at a
+		// gate boundary, which competes with it for the earlier requeue.
+		after := w.deadline.Sub(now)
+		if !step.next.IsZero() {
+			after = min(after, max(step.next.Sub(r.now()), time.Millisecond))
+		}
+		return ctrl.Result{RequeueAfter: after}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -296,7 +324,30 @@ func apiContainer(dep *appsv1.Deployment) *corev1.Container {
 // shadow scorer is not owned — the operator holds no write on it beyond its
 // scale — so a change to it enqueues every ServingDeployment in its namespace
 // instead: a hand scale is put back, and a pause is seen through to its pods.
+//
+// It also wires the gate's reads. The Scraper gets the manager's APIReader
+// and nothing else: the pods are read uncached, with no informer and so no
+// watch (D41), and a Scraper made outside package scrape has no client to set,
+// so its /metrics reads go through scrape's own, which carries none of the
+// operator's credentials. The pods are not watched here either: the gate reads
+// them at its boundaries, which the reconciler's requeue keeps. And the grid
+// interval is the O4 interval unless the test-only knob, gateIntervalEnv,
+// shortens it; a knob outside its bounds stops the operator here.
 func (r *ServingDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.scraper == nil {
+		r.scraper = &scrape.Scraper{Reader: mgr.GetAPIReader()}
+	}
+	if r.gateInterval == 0 {
+		interval, err := gateIntervalFrom(os.LookupEnv)
+		if err != nil {
+			return err
+		}
+		if interval != gateGridInterval {
+			mgr.GetLogger().Info("The gate's grid is shortened by its test-only knob", "env", gateIntervalEnv,
+				"interval", interval.String())
+		}
+		r.gateInterval = interval
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&servingv1alpha1.ServingDeployment{}).
 		Owns(&appsv1.Deployment{}).

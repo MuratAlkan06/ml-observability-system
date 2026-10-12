@@ -14,9 +14,12 @@
 #   mlobs-stub:e2e             operator/hack/e2e-stub.Dockerfile
 #   mlobs-api:IMAGE_TAG        the stub again, as the stable api
 #   mlobs-api:CANARY_TAG       the stub again, as the canary
-# The stub answers GET /health on 8000 and nothing else, so this is the
-# operator's mechanics — leader election and the reconcile — and not the
-# stack's: K3sSmoke rehearses the stack, with the real images, in both states.
+# The stub answers GET /health on 8000, and GET /metrics with the two /predict
+# series the gate reads, whose counters this script shapes pod by pod through
+# a file in the pod (e2e-stub.Dockerfile); it serves nothing else. So this is
+# the operator's mechanics — leader election, the reconcile and the gate — and
+# not the stack's: K3sSmoke rehearses the stack, with the real images, in both
+# states.
 #
 # What it asserts, in order:
 #   1. apply.sh's preflight refuses the cluster's default node-port range on
@@ -35,7 +38,22 @@
 #      at the rendered image, and Ready at the current generation
 #   5. a canary window opens in D37's order — the shadow scorer paused with
 #      no pods before the canary exists — and apply.sh's own close-window
-#      patch closes it in the reverse order
+#      patch closes it in the reverse order; with no spec.gate the operator
+#      is v0 — no status.gate, no gate Event — and the installed operator
+#      does not set the gate's test-only interval knob
+# for the flattened install only:
+#   7. the gate in Observe (D42, D45), on one window whose grid the test-only
+#      knob shortens to 20 s — the operator's own Deployment patched here and
+#      nowhere else; no scenario runs at the real 60 s interval. Each verdict
+#      sequence is read from status.gate: pending while the canary cannot
+#      start, then warmup, then eleven clean intervals and the promote
+#      verdict; a latency breach two in a row and the rollback verdict, the
+#      window left open and the canary serving; a canary /metrics that never
+#      answers, unevaluable at each boundary with the reconcile unblocked —
+#      the operator's reads of pod /metrics at runtime, under the Role that
+#      ships, with no watch (D41); then a pipeline deploy — the CR apply and
+#      the close-window patch, as apply.sh sends them — leaves spec.gate as
+#      it was, and the rendered CR carries no gate key
 # and, for the chart install only:
 #   6. the release is deployed and the operator it runs is the release's, and
 #      `helm uninstall` leaves the CRD in place: crds/ is install-only
@@ -52,6 +70,9 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 CANARY_TAG="${CANARY_TAG:-}"
 STUB_IMAGE="${STUB_IMAGE:-${IMAGE_PREFIX}/mlobs-stub:e2e}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-180}"
+# The gate's waits are counted in intervals of its shortened grid: the clean
+# run alone is warmup plus eleven of them.
+GATE_TIMEOUT_SECONDS="${GATE_TIMEOUT_SECONDS:-900}"
 HELM="${HELM:-helm}"
 
 NAMESPACE=mlobs
@@ -86,10 +107,16 @@ render() {
 # poll_until WHAT COMMAND...: run COMMAND until it succeeds, to a deadline.
 # Bounded, the only sleep this repo sanctions (PRINCIPLES.md §5).
 poll_until() {
-  local what="$1" deadline=$((SECONDS + TIMEOUT_SECONDS))
-  shift
+  poll_within "$TIMEOUT_SECONDS" "$@"
+}
+
+# poll_within SECONDS WHAT COMMAND...: poll_until, to a deadline of its own.
+poll_within() {
+  local limit="$1" what="$2" deadline
+  shift 2
+  deadline=$((SECONDS + limit))
   until "$@" >/dev/null 2>&1; do
-    [ "$SECONDS" -lt "$deadline" ] || die "${what}: not reached within ${TIMEOUT_SECONDS}s"
+    [ "$SECONDS" -lt "$deadline" ] || die "${what}: not reached within ${limit}s"
     sleep 2
   done
 }
@@ -208,6 +235,26 @@ shadow_back() {
 close_patch="$(sed -n "s/^CLOSE_WINDOW_PATCH='\(.*\)'\$/\1/p" "${REPO_ROOT}/deploy/k3s/apply.sh")"
 [ -n "$close_patch" ] || die "CLOSE_WINDOW_PATCH not found in deploy/k3s/apply.sh"
 
+# The gate's test-only interval knob, read from the operator's source, and the
+# grid step 7 runs on: the knob's floor, four read timeouts (D41).
+gate_knob="$(sed -n 's/^const gateIntervalEnv = "\(.*\)"$/\1/p' "${REPO_ROOT}/operator/internal/controller/gate.go")"
+[ -n "$gate_knob" ] || die "gateIntervalEnv not found in operator/internal/controller/gate.go"
+GATE_INTERVAL=20s
+
+# gate_events: the reasons of the gate's Events on the ServingDeployment, one
+# a line.
+gate_events() {
+  k get events --field-selector involvedObject.kind=ServingDeployment \
+    -o 'jsonpath={range .items[*]}{.reason}{"\n"}{end}' | grep '^Gate' || true
+}
+
+# knob_unset: the operator Deployment as installed does not set the knob.
+knob_unset() {
+  local names
+  names="$(field deployment/operator '{.spec.template.spec.containers[*].env[*].name}')" || return 1
+  ! printf '%s\n' "$names" | tr ' ' '\n' | grep -qxF "$gate_knob"
+}
+
 # assert_operator INSTALL: steps 2 to 5 against the operator INSTALL put in
 # place, the same for both.
 assert_operator() {
@@ -317,16 +364,198 @@ EOF
   k wait "$SERVINGDEPLOYMENT" --for=condition=ShadowPaused=false --timeout="${TIMEOUT_SECONDS}s" >/dev/null
   echo "ok: window closed by apply.sh's patch: CanaryActive False, canary at 0 with no pods, then the shadow scorer at 1"
 
+  # With no spec.gate the operator is v0 (D42): the window came and went with
+  # no status.gate and no gate Event. And the operator as installed does not
+  # set the gate's test-only knob.
+  [ -z "$(field "$SERVINGDEPLOYMENT" '{.spec.gate}')" ] || die "the ServingDeployment of step 4 has a spec.gate"
+  [ -z "$(field "$SERVINGDEPLOYMENT" '{.status.gate}')" ] || die "a ServingDeployment with no spec.gate has a status.gate"
+  [ -z "$(gate_events)" ] || die "a ServingDeployment with no spec.gate has gate Events: $(gate_events | tr '\n' ' ')"
+  knob_unset || die "deployment/operator as installed from $1 sets ${gate_knob}"
+  echo "ok: with no spec.gate the window was v0: no status.gate and no gate Event; deployment/operator as installed does not set ${gate_knob}"
+
   echo "ok: the operator's events, oldest first:"
   k get events --field-selector involvedObject.kind=ServingDeployment \
     --sort-by=.metadata.creationTimestamp -o 'custom-columns=REASON:.reason,MESSAGE:.message' --no-headers \
     | sed 's/^/    /'
 }
 
+# --- 7. the gate in Observe --------------------------------------------------
+
+# gate_field PATH: one field under the ServingDeployment's status.gate.
+gate_field() {
+  field "$SERVINGDEPLOYMENT" "{.status.gate.$1}"
+}
+
+# gate_field_set PATH: that field is set.
+gate_field_set() {
+  [ -n "$(gate_field "$1")" ]
+}
+
+# gate_records: status.gate's ring, oldest first, one record a line:
+# INDEX|VERDICT|REASONS|STABLE_REQUESTS|CANARY_REQUESTS, the reasons as JSON.
+gate_records() {
+  field "$SERVINGDEPLOYMENT" \
+    '{range .status.gate.records[*]}{.index}|{.verdict}|{.reasons}|{.stable.requests}|{.canary.requests}{"\n"}{end}'
+}
+
+# gate_recorded N: the ring holds at least N records.
+gate_recorded() {
+  [ "$(gate_records | grep -c . || true)" -ge "$1" ]
+}
+
+# record_at INDEX: the record of interval INDEX.
+record_at() {
+  gate_records | awk -F'|' -v i="$1" '$1 == i'
+}
+
+# canary_reads_failed_twice AFTER: two records in a row past interval AFTER
+# whose canary read failed.
+canary_reads_failed_twice() {
+  gate_records | awk -F'|' -v after="$1" '
+    $1 <= after { next }
+    $3 ~ /"CanaryReadFailed"/ { if (prev != "" && $1 == prev + 1) found = 1; prev = $1; next }
+    { prev = "" }
+    END { exit !found }'
+}
+
+# one_operator_pod: the operator's rollout has left one pod.
+one_operator_pod() {
+  [ "$(k get pods -l app=operator -o name | grep -c . || true)" = 1 ]
+}
+
+# canary_exec COMMAND: run COMMAND in the canary pod's stub.
+canary_exec() {
+  k exec "$canary_pod" -- sh -c "$1"
+}
+
+# assert_gate: step 7, against the operator installed from the flattened
+# manifests, its Lease held and steps 2 to 5 passed.
+assert_gate() {
+  echo "ok: --- the gate in Observe, on a ${GATE_INTERVAL} grid ---"
+  local count records promote_at trip at rec verdict reasons stable_n canary_n i after rendered_spec mode
+
+  # --- 7a. the test-only knob: shipped nowhere, set here alone ---------------
+
+  count="$(render 03-operator.yaml | grep -cF "$gate_knob" || true)"
+  [ "$count" = 0 ] || die "03-operator.yaml as apply.sh renders it sets ${gate_knob}"
+  count="$("$HELM" template "$RELEASE" "$CHART" --namespace "$NAMESPACE" \
+    --set image.prefix="$IMAGE_PREFIX" --set image.tag="$IMAGE_TAG" | grep -cF "$gate_knob" || true)"
+  [ "$count" = 0 ] || die "the chart, rendered, sets ${gate_knob}"
+  echo "ok: ${gate_knob} is set neither by 03-operator.yaml as apply.sh renders it nor by the chart"
+
+  k set env deployment/operator "${gate_knob}=${GATE_INTERVAL}" >/dev/null
+  k rollout status deployment/operator --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/operator with ${gate_knob}"
+  poll_until "the operator's earlier pod gone" one_operator_pod
+  operator_pod="$(k get pods -l app=operator -o 'jsonpath={.items[0].metadata.name}')"
+  poll_until "lease/${lease} held by pod/${operator_pod}" lease_held
+  echo "ok: ${gate_knob}=${GATE_INTERVAL} set on this cluster's deployment/operator alone; pod/${operator_pod} holds the lease"
+
+  # --- 7b. armed with the window; the canary held unready: pending -----------
+
+  # The canary's init container waits on redis, so with redis at 0 no canary
+  # pod can turn Ready, and every interval is pending (D45).
+  k scale deployment/redis --replicas=0 >/dev/null
+  poll_until "redis's pods gone" no_live_pods app=redis
+  k patch "$SERVINGDEPLOYMENT" --type merge -p \
+    "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1,\"gate\":{\"mode\":\"Observe\"}}}" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  poll_within "$GATE_TIMEOUT_SECONDS" "status.gate's first interval" gate_recorded 1
+  [ "$(gate_field mode) $(gate_field arming) $(gate_field intervalSeconds)" = "Observe Armed ${GATE_INTERVAL%s}" ] \
+    || die "status.gate runs as '$(gate_field mode) $(gate_field arming) $(gate_field intervalSeconds)'"
+  records="$(gate_records)"
+  if printf '%s\n' "$records" | awk -F'|' '$2 != "Pending" || $3 != "[\"CanaryNotReady\"]"' | grep -q .; then
+    die "an interval recorded while no canary pod could be Ready is not pending: ${records}"
+  fi
+  gate_events | grep -qx GateArmed || die "no GateArmed Event"
+  echo "ok: the gate armed in Observe with the window; $(printf '%s\n' "$records" | grep -c .) interval(s) pending, CanaryNotReady, while the canary waits on redis"
+
+  # --- 7c. the canary up: warmup, then eleven clean intervals --------------
+
+  k scale deployment/redis --replicas=1 >/dev/null
+  poll_within "$GATE_TIMEOUT_SECONDS" "status.gate's promote verdict" gate_field_set promoteVerdict.interval
+  promote_at="$(gate_field promoteVerdict.interval)"
+  [ -z "$(gate_field rollbackVerdict.trip)" ] \
+    || die "a line tripped before any breach was shaped: $(gate_field rollbackVerdict.trip)"
+  [ "$(gate_records | head -n 1 | cut -d'|' -f2)" = Pending ] || die "the window's first interval is not pending"
+  gate_records | awk -F'|' -v p="$promote_at" '$1 < p && $2 == "Warmup"' | grep -q . \
+    || die "no warmup interval before the promote verdict"
+  # The verdict's interval and the ten before it are clean: both pods read,
+  # each over the floor, at runtime and under the Role that ships (D41).
+  for i in $(seq $((promote_at - 10)) "$promote_at"); do
+    rec="$(record_at "$i")"
+    IFS='|' read -r _ verdict reasons stable_n canary_n <<<"$rec"
+    [ "$verdict" = Clean ] || die "interval ${i} of the clean run reads '${rec}'"
+    [ "${stable_n:-0}" -ge 50 ] && [ "${canary_n:-0}" -ge 50 ] \
+      || die "interval ${i} is clean on ${stable_n:-no} stable and ${canary_n:-no} canary requests"
+  done
+  gate_events | grep -qx GateWouldPromote || die "no GateWouldPromote Event"
+  [ "$(field "$SERVINGDEPLOYMENT" '{.status.conditions[?(@.type=="CanaryActive")].status}')" = True ] \
+    || die "CanaryActive is not True after the promote verdict"
+  echo "ok: warmup, then eleven clean intervals, each pod's /metrics read by the operator over the floor: the promote verdict at interval ${promote_at}, recorded, nothing dispatched"
+
+  # --- 7d. a latency breach, two in a row ------------------------------------
+
+  canary_pod="$(k get pods -l app=api,role=canary -o 'jsonpath={.items[0].metadata.name}')"
+  [ -n "$canary_pod" ] || die "no canary pod"
+  canary_exec 'echo "0 10 0" > /www/profile'
+  poll_within "$GATE_TIMEOUT_SECONDS" "status.gate's rollback verdict" gate_field_set rollbackVerdict.trip
+  trip="$(gate_field rollbackVerdict.trip)"
+  at="$(gate_field rollbackVerdict.interval)"
+  [ "$trip" = Line3CanaryLatency ] || die "the rollback verdict trips ${trip}, not Line3CanaryLatency"
+  for i in $((at - 1)) "$at"; do
+    rec="$(record_at "$i")"
+    IFS='|' read -r _ verdict reasons _ _ <<<"$rec"
+    [ "$verdict $reasons" = 'Breach ["LatencyRatio"]' ] || die "interval ${i} of the two in a row reads '${rec}'"
+  done
+  gate_events | grep -qx GateBreach || die "no GateBreach Event"
+  gate_events | grep -qx GateWouldRollBack || die "no GateWouldRollBack Event"
+  # Observe acts on nothing: the window stays open and the canary serving.
+  [ "$(field "$SERVINGDEPLOYMENT" '{.status.conditions[?(@.type=="CanaryActive")].status}/{.status.conditions[?(@.type=="CanaryActive")].reason}')" = True/WindowOpen ] \
+    || die "CanaryActive is not True, WindowOpen, after the rollback verdict"
+  [ "$(field deployment/api-canary '{.spec.replicas}')" = 1 ] || die "deployment/api-canary is not at 1 after the rollback verdict"
+  [ "$(field "pod/${canary_pod}" '{.status.phase}')" = Running ] || die "pod/${canary_pod} is not Running after the rollback verdict"
+  [ "$(field "$SERVINGDEPLOYMENT" '{.spec.canaryImageTag}')" = "$CANARY_TAG" ] || die "spec.canaryImageTag moved"
+  echo "ok: a slow canary breached intervals $((at - 1)) and ${at}: the rollback verdict, ${trip}, recorded; the window open and pod/${canary_pod} serving"
+
+  # --- 7e. a canary /metrics that never answers: the reconcile unblocked ----
+
+  after=$(($(gate_field nextBoundary) - 2))
+  canary_exec 'echo "10 0 0" > /www/profile && touch /www/hang'
+  poll_within "$GATE_TIMEOUT_SECONDS" "two canary reads in a row ending at the read timeout" \
+    canary_reads_failed_twice "$after"
+  canary_exec 'rm -f /www/hang'
+  if gate_records | awk -F'|' -v a="$after" '$1 > a && $3 ~ /OperatorInterrupted/' | grep -q .; then
+    die "a boundary was missed while the canary's reads hung: $(gate_records | tail -n 5 | tr '\n' ' ')"
+  fi
+  echo "ok: a canary /metrics that never answers costs each interval as unevaluable, CanaryReadFailed, and every boundary was still reached on time: the reconcile unblocked"
+
+  # --- 7f. a pipeline deploy leaves spec.gate; the rendered CR has none ----
+
+  rendered_spec="$(render 40-servingdeployment.yaml | kubectl create --dry-run=client -f - -o 'jsonpath={.spec}')"
+  [ "$rendered_spec" = "{\"imageTag\":\"${IMAGE_TAG}\"}" ] || die "the rendered ServingDeployment's spec is ${rendered_spec}"
+  count="$(render 40-servingdeployment.yaml | grep -cE '^[[:space:]]*gate:' || true)"
+  [ "$count" = 0 ] || die "the rendered ServingDeployment carries a gate key"
+  # What apply.sh sends: the CR apply, then its close-window patch.
+  render 40-servingdeployment.yaml | kubectl apply -f - >/dev/null
+  k patch "$SERVINGDEPLOYMENT" --type merge -p "$close_patch" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive=false --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  mode="$(field "$SERVINGDEPLOYMENT" '{.spec.gate.mode}')"
+  [ "$mode" = Observe ] || die "a pipeline deploy left spec.gate.mode '${mode}', not Observe"
+  poll_until "statefulset/shadow-scorer back at 1" shadow_back
+  gate_recorded 1 || die "status.gate's evidence is gone after the close"
+  echo "ok: the rendered ServingDeployment's spec is imageTag alone; a pipeline deploy closed the window and left spec.gate in Observe"
+
+  echo "ok: status.gate's ring, INDEX|VERDICT|REASONS|STABLE_REQUESTS|CANARY_REQUESTS:"
+  gate_records | sed 's/^/    /'
+  echo "ok: the gate's events: $(gate_events | sort | uniq -c | awk '{ printf "%s x%s; ", $2, $1 }')"
+}
+
 # --- the flattened manifests, then the chart ---------------------------------
 
 install_flattened
 assert_operator "the flattened manifests"
+assert_gate
 uninstall_flattened
 
 echo "ok: helm $("$HELM" version --template '{{.Version}}')"
