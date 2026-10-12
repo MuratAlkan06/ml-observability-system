@@ -1496,3 +1496,16 @@ retention jobs, Alembic.
   (`docs/PHASE4.md`, Settled constraints). *Rejected:* a fault-levered image on `main` for the
   breach. *Why:* one tag builds all five images, so the lever would ship in the stable image
   too.
+
+> **D44 clarification (2026-10-12, V1-S1):** D44's "warmup and pending intervals count toward
+> nothing" — and its aside that re-warmup intervals "would not count anyway" — over-broadened
+> warmup forgiveness in transcription. The ratified runbook table and `watch-window.sh` are
+> authoritative: warmup excludes only line 2's 5xx; the floor and the line-3 ratio are judged
+> during warmup and count toward the two-in-a-row counter; a judged-ok warmup interval resets
+> that counter, exactly as the script classifies; a canary OOM kill trips in any phase; and a
+> forfeited or baseline-less warmup interval is unevaluable, toward the counter. D44's "seeded
+> before the first evaluable interval" reads as before the first judged interval. The asymmetry
+> is deliberate and stays: on the promote side warmup still counts toward nothing — a warmup
+> interval never increments `cleanRun`, and a warmup breach or unevaluable interval resets it,
+> erring away from promote. D45's line-for-line script mirror stands as written, and the memo's
+> fidelity-table line-3 "Same" stands. Ruled at V1-S1 (issue #111); no frozen text edited.
