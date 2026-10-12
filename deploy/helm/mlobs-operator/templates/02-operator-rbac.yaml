@@ -21,7 +21,11 @@
 # and gives the canary's Ready time and OOM kills from its status; each pod's
 # /metrics is then read at its pod IP, not through pods/proxy, which the Role
 # does not grant. RBAC cannot name-scope list, so the read covers every pod in
-# mlobs.
+# mlobs. Get and list return each pod whole: its labels, annotations and owner
+# references; its spec as written, images, commands, args and inline env
+# values among it, naming the Secrets and ConfigMaps it draws on but never
+# holding their contents; and its status, with pod and host IPs, conditions
+# and container states, termination messages included.
 #
 # The ServiceAccount and RoleBinding above the marker line are hand-written.
 # The Role below it is controller-gen's output, verbatim, from the

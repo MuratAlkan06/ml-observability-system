@@ -262,11 +262,20 @@ EOF
   can_i no get secrets
   # Metric acquisition (D41): pods read at boundaries through the uncached
   # APIReader, so get and list and no watch; /metrics at the pod IP, so no
-  # pods/proxy.
+  # pods/proxy. The pods grant reads and nothing more: no pod written, no
+  # subresource that reaches into one, and no ConfigMap read beside it.
   can_i yes get pods
   can_i yes list pods
   can_i no watch pods
+  can_i no create pods
+  can_i no delete pods
   can_i no get pods --subresource=proxy
+  can_i no create pods --subresource=proxy
+  can_i no create pods --subresource=exec
+  can_i no get pods --subresource=log
+  can_i no create pods --subresource=portforward
+  can_i no get configmaps
+  can_i no list configmaps
 
   # --- 4. deployment/api created, owned and Ready ----------------------------
 

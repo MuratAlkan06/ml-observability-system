@@ -10,8 +10,12 @@
 // operator's Role grants get and list on pods and no watch, because reads that
 // happen once a minute need no informer (D41). Every read carries a context
 // timeout, ReadTimeout, well under the 60 s grid, so a pod that never answers
-// costs an unevaluable interval and never a wedged reconcile. A read that
-// fails is a nil gate.Sample, which is what gate counts as a failed read.
+// costs an unevaluable interval and never a wedged reconcile. A read is
+// bounded in size as well: a page past maxPageBytes, or a line, a number of
+// bucket bounds or a count past the parser's bounds, fails it where the
+// script reads on, so each bound is a named deviation that errs toward an
+// unevaluable interval. A read that fails is a nil gate.Sample, which is what
+// gate counts as a failed read.
 //
 // Nothing here decides or keeps a session: that is gate's, and when to read is
 // the controller's.
@@ -46,6 +50,15 @@ const (
 	// pod that never answers costs an unevaluable interval.
 	ReadTimeout = 5 * time.Second
 
+	// maxPageBytes bounds a /metrics page, after the transport has inflated
+	// it if it asked for compression. The api's runs to about 9 KiB; a page
+	// past the bound fails the read, where the script's curl reads on, and no
+	// part of it is parsed into a sample.
+	maxPageBytes = 1 << 20
+	// maxHeaderBytes bounds a /metrics response's headers, which from the api
+	// run to a few hundred bytes, for metricsClient.
+	maxHeaderBytes = 16 << 10
+
 	// reasonOOMKilled is the reason the kubelet gives a container the kernel
 	// OOM-killed.
 	reasonOOMKilled = "OOMKilled"
@@ -77,14 +90,41 @@ type Scraper struct {
 	// grants pods get and list and not watch, so a cached client, whose
 	// informer watches, has no grant to run on (D41).
 	Reader client.Reader
-	// HTTP reads each pod's /metrics; nil means http.DefaultClient. Each
-	// request carries its read's context, so the client needs no timeout of
-	// its own.
-	HTTP *http.Client
 
+	// client overrides metricsClient for this package's tests, which read
+	// through a stub; nil, as every Scraper made outside this package has it,
+	// means metricsClient. It is unexported so that no caller can hand a
+	// Scraper a client of its own: the manager's GetHTTPClient(), say, whose
+	// transport attaches the operator's ServiceAccount token to every
+	// request, would send that token to each pod IP the Scraper reads.
+	client *http.Client
 	// timeout overrides ReadTimeout for this package's tests; zero means
 	// ReadTimeout.
 	timeout time.Duration
+}
+
+// metricsClient is the client a Scraper reads /metrics with, the only one a
+// Scraper made outside this package can have. It reads as watch-window.sh's
+// curl does: straight to the pod IP, through no proxy whatever the operator's
+// environment names, and with no credential of the operator's; asking for no
+// compression, so the page bound holds on the bytes the pod sends; and not
+// following a redirect, so a 3xx is the response read, and fails the read as
+// any status but 200 does. It also bounds the response's headers at
+// maxHeaderBytes, and keeps no connection open between reads a minute apart,
+// opening one per read as curl does. It has no timeout of its own: each
+// read's context carries ReadTimeout.
+var metricsClient = newMetricsClient()
+
+func newMetricsClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                  nil,
+			DisableCompression:     true,
+			DisableKeepAlives:      true,
+			MaxResponseHeaderBytes: maxHeaderBytes,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // Boundary is what the operator reads at one interval boundary: the end of
@@ -182,7 +222,10 @@ func (s *Scraper) read(ctx context.Context, namespace string, role Role) (*gate.
 
 // metrics GETs pod's /metrics at its pod IP on MetricsPort and parses it. A
 // status other than 200 fails the read, as curl -f fails one of 400 or
-// above; the api's /metrics answers 200 or not at all.
+// above; the api's /metrics answers 200 or not at all. So does a page over
+// maxPageBytes: the read of it errs at the bound rather than ending there, so
+// the parse fails rather than taking the page's first maxPageBytes for all of
+// it.
 func (s *Scraper) metrics(ctx context.Context, pod *corev1.Pod) (gate.Sample, error) {
 	if pod.Status.PodIP == "" {
 		return gate.Sample{}, fmt.Errorf("pod/%s has no pod IP", pod.Name)
@@ -192,11 +235,7 @@ func (s *Scraper) metrics(ctx context.Context, pod *corev1.Pod) (gate.Sample, er
 	if err != nil {
 		return gate.Sample{}, err
 	}
-	httpClient := s.HTTP
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return gate.Sample{}, err
 	}
@@ -204,7 +243,18 @@ func (s *Scraper) metrics(ctx context.Context, pod *corev1.Pod) (gate.Sample, er
 	if resp.StatusCode != http.StatusOK {
 		return gate.Sample{}, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	return parseExposition(resp.Body)
+	// MaxBytesReader is io.LimitReader that fails past its limit instead of
+	// ending at it. Given no ResponseWriter, it only reads.
+	return parseExposition(http.MaxBytesReader(nil, resp.Body, maxPageBytes))
+}
+
+// httpClient is the client the Scraper reads /metrics with: metricsClient,
+// unless this package's tests have set another.
+func (s *Scraper) httpClient() *http.Client {
+	if s.client != nil {
+		return s.client
+	}
+	return metricsClient
 }
 
 func (s *Scraper) readTimeout() time.Duration {
