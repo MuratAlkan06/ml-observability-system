@@ -599,6 +599,13 @@ gate_window_other_than() {
   [ -n "$start" ] && [ "$start" != "$1" ]
 }
 
+# canary_scaled_up: deployment/api-canary asks for the window's one pod. The
+# Deployment stays from the last window's close, at 0 and its rollout done,
+# until the operator scales it up, once the shadow scorer's pods are gone (D37).
+canary_scaled_up() {
+  [ "$(field deployment/api-canary '{.spec.replicas}')" = 1 ]
+}
+
 # observed_current: the operator has reconciled the ServingDeployment's
 # current generation, and so decided its window.
 observed_current() {
@@ -630,6 +637,7 @@ assert_gate_acting() {
   acted_start="$(gate_field windowStart)"
   [ "$(gate_field mode) $(gate_field arming)" = "ActRollback Armed" ] \
     || die "status.gate runs the armed window as '$(gate_field mode) $(gate_field arming)', not 'ActRollback Armed'"
+  poll_until "deployment/api-canary scaled to 1" canary_scaled_up
   k rollout status deployment/api-canary --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
     || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/api-canary"
   canary_pod="$(k get pods -l app=api,role=canary --field-selector=status.phase=Running \
