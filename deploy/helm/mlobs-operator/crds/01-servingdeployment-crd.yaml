@@ -311,6 +311,7 @@ spec:
                             - BelowFloor
                             - TagInvalid
                             - OwnerChainUnverified
+                            - CanaryPodStale
                             - TokenAbsent
                             - RunsUnreadable
                             type: string

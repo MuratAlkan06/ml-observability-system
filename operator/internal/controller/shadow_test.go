@@ -135,6 +135,10 @@ type recordingClient struct {
 	// errOperatorKilled instead of returning, and the reconcile goes no
 	// further.
 	killAfter func(clientWrite) bool
+	// beforePatch, when set, runs as a subresource patch is sent and before it
+	// reaches the API server: the moment a concurrent writer lands between a
+	// reconcile's read and its write.
+	beforePatch func(clientWrite)
 }
 
 // errOperatorKilled is the panic killAfter raises.
@@ -155,6 +159,16 @@ func (rc *recordingClient) record(
 	defer rc.mu.Unlock()
 	rc.writes = append(rc.writes, w)
 	return w
+}
+
+// sending runs beforePatch, if set, on w, a write about to be sent.
+func (rc *recordingClient) sending(w clientWrite) {
+	rc.mu.Lock()
+	before := rc.beforePatch
+	rc.mu.Unlock()
+	if before != nil {
+		before(w)
+	}
 }
 
 // killIf panics with errOperatorKilled if w, a write that has landed, is one
@@ -219,6 +233,7 @@ func newRecordingReconciler() (*ServingDeploymentReconciler, *recordingClient) {
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch,
 			opts ...client.SubResourcePatchOption) error {
 			w := rc.record("patch", obj, sub, patch)
+			rc.sending(w)
 			if err := c.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
 				return err
 			}

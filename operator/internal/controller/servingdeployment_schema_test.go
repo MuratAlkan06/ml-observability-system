@@ -130,6 +130,13 @@ var _ = Describe("ServingDeployment CRD schema", func() {
 				State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchBelowFloor,
 			}
 		}, true),
+		Entry("a dispatch turned down because the canary pod read is not the dispatched tag's (#121, F1)",
+			func(st *servingv1alpha1.GateStatus) {
+				st.PromoteVerdict = schemaPromoteVerdict()
+				st.PromoteVerdict.Dispatch = &servingv1alpha1.GateDispatch{
+					State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
+				}
+			}, true),
 		Entry("a dispatch state outside the vocabulary", func(st *servingv1alpha1.GateStatus) {
 			st.PromoteVerdict = schemaPromoteVerdict()
 			st.PromoteVerdict.Dispatch.State = "Sent"

@@ -138,11 +138,12 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // the Ready, CanaryActive and ShadowPaused conditions,
 // status.observedGeneration and status.gate. The status is written on failure
 // too, so a refused adoption shows on the resource and not only in the
-// operator's log. A promote dispatch that write latched is sent only after it
-// lands, and GitHub's answer is written after (D43). While a window is open
-// the request is requeued for the earlier of its deadline and the gate's next
-// boundary. The spec is never written (docs/PLAN.md D31, D32, D37 and their O2
-// rulings; D42, D43, D47).
+// operator's log. A status write that latches a promote dispatch is locked to
+// the ServingDeployment as read, the dispatch is sent only after it lands, and
+// GitHub's answer is written after (D43). While a window is open the request
+// is requeued for the earlier of its deadline and the gate's next boundary.
+// The spec is never written (docs/PLAN.md D31, D32, D37 and their O2 rulings;
+// D42, D43, D47).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -197,8 +198,15 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	reconcileErr := joinErrors(stableErr, windowErr, gateErr)
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		// A promote dispatch's latch rides this write; if it fails, nothing
-		// is sent.
-		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
+		// is sent. That write is optimistically locked to the object this
+		// reconcile read, a cached read: a ServingDeployment written since,
+		// its tag pair above all, conflicts it, and the retry decides again
+		// from what was written (#121, F4).
+		patch := client.MergeFrom(base)
+		if step.dispatch != nil {
+			patch = client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		}
+		if err := r.Status().Patch(ctx, sd, patch); err != nil {
 			return ctrl.Result{}, errors.Join(reconcileErr,
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}

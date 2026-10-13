@@ -384,7 +384,7 @@ const (
 
 // GateDispatchReason says why a promote verdict was deferred or not
 // dispatched.
-// +kubebuilder:validation:Enum=RunPending;BelowFloor;TagInvalid;OwnerChainUnverified;TokenAbsent;RunsUnreadable
+// +kubebuilder:validation:Enum=RunPending;BelowFloor;TagInvalid;OwnerChainUnverified;CanaryPodStale;TokenAbsent;RunsUnreadable
 type GateDispatchReason string
 
 const (
@@ -400,6 +400,10 @@ const (
 	// GateDispatchOwnerChainUnverified: a pod the gate read is not shown to
 	// be deployment/api's or deployment/api-canary's.
 	GateDispatchOwnerChainUnverified GateDispatchReason = "OwnerChainUnverified"
+	// GateDispatchCanaryPodStale: the canary pod the gate read does not run
+	// the image spec.canaryImageTag renders, or is being deleted, so its
+	// evidence is not shown to be the dispatched tag's.
+	GateDispatchCanaryPodStale GateDispatchReason = "CanaryPodStale"
 	// GateDispatchTokenAbsent: the dispatch token could not be read when the
 	// dispatch was due.
 	GateDispatchTokenAbsent GateDispatchReason = "TokenAbsent"

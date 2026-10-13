@@ -360,5 +360,51 @@ var _ = Describe("The pod owner chain the promote dispatch checks (#108, N1)", f
 		Entry("a pod outside its Deployment's selector",
 			pod("api-canary-7b8d9c6f4-m4tnw", apiLabels(), "7b8d9c6f4", owner(replicaSetOwner("api-canary-7b8d9c6f4"))),
 			canaryDep(), "pod/api-canary-7b8d9c6f4-m4tnw does not match deployment/api-canary's selector"),
+		Entry("the canary's pod passed off as the stable's, its hash label carrying the canary's name: no "+
+			"generated hash has a '-' (#121, F6)",
+			pod("api-canary-7b8d9c6f4-m4tnw", canaryLabels(), "canary-7b8d9c6f4",
+				owner(replicaSetOwner("api-canary-7b8d9c6f4"))),
+			stableDep(), `pod/api-canary-7b8d9c6f4-m4tnw's pod-template-hash label "canary-7b8d9c6f4" has a '-', `+
+				"which no generated hash has"),
 	)
+
+	DescribeTable("ties the canary pod read to the dispatched tag: its api container at the image the tag renders, "+
+		"and not being deleted (#121, F1)",
+		func(mutate func(p *corev1.Pod), want string) {
+			p := pod("api-canary-7b8d9c6f4-m4tnw", canaryLabels(), "7b8d9c6f4",
+				owner(replicaSetOwner("api-canary-7b8d9c6f4")))
+			p.Spec.Containers = []corev1.Container{
+				{Name: "sidecar", Image: "example.com/sidecar:1"},
+				{Name: apiContainerName, Image: stableImage(canaryImageTag)},
+			}
+			if mutate != nil {
+				mutate(p)
+			}
+			err := canaryRuns(p, stableImage(canaryImageTag))
+			if want == "" {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(err).To(MatchError(want))
+		},
+		Entry("its api container at the tag's image", nil, ""),
+		Entry("another tag's image", func(p *corev1.Pod) { p.Spec.Containers[1].Image = stableImage(laterCanaryImageTag) },
+			"the canary pod read, pod/api-canary-7b8d9c6f4-m4tnw, runs "+stableImage(laterCanaryImageTag)+", not "+
+				stableImage(canaryImageTag)+", the image spec.canaryImageTag renders: what it reported is not the "+
+				"dispatched tag's"),
+		Entry("the tag's image under another prefix", func(p *corev1.Pod) {
+			p.Spec.Containers[1].Image = apiImage(testImagePrefix, canaryImageTag)
+		}, "the canary pod read, pod/api-canary-7b8d9c6f4-m4tnw, runs "+apiImage(testImagePrefix, canaryImageTag)+
+			", not "+stableImage(canaryImageTag)+", the image spec.canaryImageTag renders: what it reported is not "+
+			"the dispatched tag's"),
+		Entry("being deleted", func(p *corev1.Pod) { p.DeletionTimestamp = new(metav1.Now()) },
+			"the canary pod read, pod/api-canary-7b8d9c6f4-m4tnw, is being deleted: what it reported may be an "+
+				"image the canary no longer runs"),
+		Entry("no api container", func(p *corev1.Pod) { p.Spec.Containers = p.Spec.Containers[:1] },
+			`the canary pod read, pod/api-canary-7b8d9c6f4-m4tnw, has no container named "api"`),
+	)
+
+	It("ties no pod at all to the tag", func() {
+		Expect(canaryRuns(nil, stableImage(canaryImageTag))).To(MatchError("no one Running canary pod was selected"))
+	})
 })

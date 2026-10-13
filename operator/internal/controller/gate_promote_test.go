@@ -15,8 +15,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	servingv1alpha1 "github.com/MuratAlkan06/ml-observability-system/operator/api/v1alpha1"
 )
@@ -206,6 +209,43 @@ func expectGitHubHeaders(req githubRequest, token string) {
 	Expect(req.auth).To(Equal("Bearer " + token))
 	Expect(req.accept).To(Equal("application/vnd.github+json"))
 	Expect(req.version).To(Equal("2022-11-28"))
+}
+
+// setTagPair moves the open window's canary to tag and arms spec.gate for it,
+// in one host-side merge patch with no resourceVersion precondition: a human
+// changing the canary of a window open under ActPromote.
+func setTagPair(sd *servingv1alpha1.ServingDeployment, tag string) {
+	body := fmt.Sprintf(`{"spec":{"canaryImageTag":%q,"gate":{"forCanaryImageTag":%q}}}`, tag, tag)
+	target := &servingv1alpha1.ServingDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: sd.Namespace, Name: sd.Name}}
+	Expect(k8sClient.Patch(ctx, target, client.RawPatch(types.MergePatchType, []byte(body)))).To(Succeed())
+}
+
+// markDeleting deletes pod while a finalizer holds it, as a pod stays while
+// its containers stop: its deletionTimestamp set, its status as it was.
+// envtest has no kubelet to finish a deletion; the finalizer stands in for it,
+// and is removed when the spec ends.
+func markDeleting(pod *corev1.Pod) {
+	latest := &corev1.Pod{}
+	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), latest)).To(Succeed())
+	latest.Finalizers = append(latest.Finalizers, "test.mlobs.dev/terminating")
+	Expect(k8sClient.Update(ctx, latest)).To(Succeed())
+	Expect(k8sClient.Delete(ctx, latest)).To(Succeed())
+	DeferCleanup(func() {
+		held := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), held)).To(Succeed())
+		held.Finalizers = nil
+		Expect(k8sClient.Update(ctx, held)).To(Succeed())
+	})
+	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), latest)).To(Succeed())
+	Expect(latest.DeletionTimestamp).NotTo(BeNil())
+	Expect(latest.Status.Phase).To(Equal(corev1.PodRunning))
+}
+
+// staleCanaryEvent is the Event of the verdict at interval 10 turned down
+// because the canary pod read is not the dispatched tag's, for why.
+func staleCanaryEvent(why string) string {
+	return "Warning GatePromoteNotDispatched the promote verdict of interval 10 is not dispatched: the canary " +
+		"pod read, pod/api-canary-7b8d9c6f4-m4tnw, " + why + "; it stays recorded, and a human actuates it"
 }
 
 // dispatchedEvent is the Event of a verdict at interval GitHub accepted the
@@ -560,6 +600,89 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 			"recorded, and a human actuates it"))
 		h.clean(2)
 		Expect(gh.all()).To(BeEmpty())
+		expectOpen(h)
+	})
+
+	DescribeTable("turns a verdict down for a human, asking nothing of GitHub, when the canary pod it read is not "+
+		"shown to run the tag it would dispatch: the dispatched sha is tied to the evidence (#121, F1)",
+		func(race func(h *gateHarness, canary *corev1.Pod), why string) {
+			h := newGateHarness(actPromote)
+			gh, _ := armDispatch(h)
+			canary := h.addCanary(at(windowStart.Add(-time.Minute)))
+			h.open()
+			h.clean(10)
+			h.drainOpenEvents()
+
+			race(h, canary)
+			h.clean(1)
+			st := h.gate()
+			Expect(st.PromoteVerdict.Interval).To(BeEquivalentTo(10), "the verdict itself stands")
+			Expect(st.Mode).To(Equal(levelActPromote))
+			Expect(st.Arming).To(Equal(servingv1alpha1.GateArmingArmed), "the arming does not catch it")
+			Expect(dispatchOf(st)).To(Equal(&servingv1alpha1.GateDispatch{
+				State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
+			}))
+			Expect(gh.all()).To(BeEmpty(), "turned down before the token is read or a run listed")
+			Expect(h.gateEvents()).To(ConsistOf(staleCanaryEvent(why)))
+			Expect(apiContainer(getCanaryDeployment(h.ns)).Image).To(Equal(
+				stableImage(getServingDeployment(h.sd).Spec.CanaryImageTag)),
+				"deployment/api-canary runs the spec's tag: the pod read is what lags")
+
+			h.clean(2)
+			Expect(gh.all()).To(BeEmpty())
+			Expect(dispatchOf(h.gate()).Reason).To(Equal(servingv1alpha1.GateDispatchCanaryPodStale))
+			expectOpen(h)
+		},
+		Entry("the tag pair changed in the boundary's own reconcile: deployment/api-canary is moved to the new tag "+
+			"before the read, and the old pod, Running while a Recreate rollout stops it, is the one read",
+			func(h *gateHarness, _ *corev1.Pod) { setTagPair(h.sd, laterCanaryImageTag) },
+			"runs "+stableImage(canaryImageTag)+", not "+stableImage(laterCanaryImageTag)+", the image "+
+				"spec.canaryImageTag renders: what it reported is not the dispatched tag's"),
+		Entry("the canary pod read is being deleted, its successor not yet Running",
+			func(_ *gateHarness, canary *corev1.Pod) { markDeleting(canary) },
+			"is being deleted: what it reported may be an image the canary no longer runs"),
+	)
+
+	It("sends nothing when the ServingDeployment is written between the boundary's read and the latch's write: "+
+		"that write is locked to what was read, so a tag pair changed there conflicts it, and the retry inside "+
+		"the boundary turns the verdict down for a human (#121, F4)", func() {
+		h, gh, _ := newPromoteHarness()
+		h.clean(10)
+		h.drainOpenEvents()
+		var raced bool
+		h.writes.mu.Lock()
+		h.writes.beforePatch = func(w clientWrite) {
+			if !raced && w.subresource == statusSubresource && strings.Contains(w.body, `"state":"Attempted"`) {
+				raced = true
+				setTagPair(h.sd, laterCanaryImageTag)
+			}
+		}
+		h.writes.mu.Unlock()
+
+		By("the boundary's reconcile: the latch's write conflicts, and nothing lands or is sent")
+		h.serve(perInterval, 0, 0)
+		h.n++
+		h.clock.t = h.boundaryTime(h.n)
+		_, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
+		Expect(raced).To(BeTrue(), "the tag pair was patched as the latch was sent")
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "%v", err)
+		Expect(h.gate().PromoteVerdict).To(BeNil(), "the latch, and the verdict with it, never landed")
+		Expect(gh.dispatches()).To(BeEmpty())
+		Expect(gh.runLists()).To(HaveLen(len(pendingRunStatuses)), "listed once, before the latch")
+		Expect(h.gateEvents()).To(BeEmpty(), "nothing is recorded for a write that did not land")
+
+		By("the retry, a second into the boundary: decided again from the new spec, and turned down")
+		h.clock.t = h.boundaryTime(h.n).Add(time.Second)
+		reconcileResult(h.r, h.sd)
+		Expect(dispatchOf(h.gate())).To(Equal(&servingv1alpha1.GateDispatch{
+			State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
+		}))
+		Expect(h.gateEvents()).To(ConsistOf(staleCanaryEvent("runs " + stableImage(canaryImageTag) + ", not " +
+			stableImage(laterCanaryImageTag) + ", the image spec.canaryImageTag renders: what it reported is not " +
+			"the dispatched tag's")))
+		h.clean(2)
+		Expect(gh.dispatches()).To(BeEmpty())
+		Expect(gh.runLists()).To(HaveLen(len(pendingRunStatuses)))
 		expectOpen(h)
 	})
 

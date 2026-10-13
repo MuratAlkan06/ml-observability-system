@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,16 +32,20 @@ import (
 //  3. spec.canaryImageTag is a full commit SHA;
 //  4. the pods the boundary read are deployment/api's and
 //     deployment/api-canary's (#108, N1);
-//  5. the token reads;
-//  6. no Deploy run is queued, waiting, pending, requested or in progress.
+//  5. the canary pod read runs the image that tag renders and is not being
+//     deleted, so the evidence is the dispatched tag's (canaryRuns);
+//  6. the token reads;
+//  7. no Deploy run is queued, waiting, pending, requested or in progress.
 //
 // The dispatch is then latched: the status write that records the attempt,
 // its time and its sha lands before the dispatch is sent, and a latched
-// verdict is never sent again. A crash between the two leaves the latch and
-// no run, and a human actuates. GitHub's answer is recorded after, in a second
-// write: accepted, or refused or unanswered and not retried. A verdict that
-// fails 1, 3, 4, 5 or the runs' listing is not dispatched at all, and a human
-// actuates it. One that fails 6 is deferred and checked again at each later
+// verdict is never sent again. That write is optimistically locked to the
+// ServingDeployment the reconcile read, so a spec changed since conflicts it
+// and nothing is sent. A crash between the two leaves the latch and no run,
+// and a human actuates. GitHub's answer is recorded after, in a second write:
+// accepted, or refused or unanswered and not retried. A verdict that fails 1,
+// 3, 4, 5, 6 or the runs' listing is not dispatched at all, and a human
+// actuates it. One that fails 7 is deferred and checked again at each later
 // boundary, where it waits too while 2 fails, until 1 fails. Every way a
 // dispatch does not happen lands on a human or on waiting, never on a promote.
 
@@ -106,6 +111,9 @@ func (r *ServingDeploymentReconciler) promote(
 	}
 	if err := r.verifyOwners(ctx, sd, b); err != nil {
 		return notDispatched(servingv1alpha1.GateDispatchOwnerChainUnverified, err.Error())
+	}
+	if err := canaryRuns(b.CanaryPod, r.apiImage(tag)); err != nil {
+		return notDispatched(servingv1alpha1.GateDispatchCanaryPodStale, err.Error())
 	}
 	token, err := r.dispatcher.token()
 	if err != nil {
@@ -233,6 +241,12 @@ func ownerChain(pod *corev1.Pod, dep *appsv1.Deployment, sd *servingv1alpha1.Ser
 	if hash == "" {
 		return fmt.Errorf("pod/%s has no %s label", pod.Name, appsv1.DefaultDeploymentUniqueLabelKey)
 	}
+	if strings.Contains(hash, "-") {
+		// No hash the Deployment controller writes has one, and one would let
+		// api-canary's ReplicaSet pass as api's under the hash canary-<hash>.
+		return fmt.Errorf("pod/%s's %s label %q has a '-', which no generated hash has",
+			pod.Name, appsv1.DefaultDeploymentUniqueLabelKey, hash)
+	}
 	if want := dep.Name + "-" + hash; ref.Name != want {
 		return fmt.Errorf("pod/%s is controlled by replicaset/%s, not deployment/%s's replicaset/%s",
 			pod.Name, ref.Name, dep.Name, want)
@@ -242,4 +256,36 @@ func ownerChain(pod *corev1.Pod, dep *appsv1.Deployment, sd *servingv1alpha1.Ser
 		return fmt.Errorf("pod/%s does not match deployment/%s's selector", pod.Name, dep.Name)
 	}
 	return nil
+}
+
+// canaryRuns checks that pod, the canary pod a boundary read, is the one image
+// runs: its api container's image is image, the one the dispatch's tag
+// renders, and it is not being deleted. The reconcile drives
+// deployment/api-canary to spec.canaryImageTag before the boundary is read,
+// and a Recreate rollout leaves the old pod Running, and so the one read,
+// while it terminates; ownerChain passes it, since its ReplicaSet is still the
+// Deployment's. Without this check, a tag pair changed in a boundary's
+// reconcile would dispatch the new tag on what the old image reported (#121,
+// F1). The image compared is the pod spec's, which the ReplicaSet stamped from
+// the template the tag rendered; the container status's is the runtime's
+// report, which may name another tag of the same image, and is not compared.
+func canaryRuns(pod *corev1.Pod, image string) error {
+	switch {
+	case pod == nil:
+		return errors.New("no one Running canary pod was selected")
+	case pod.DeletionTimestamp != nil:
+		return fmt.Errorf("the canary pod read, pod/%s, is being deleted: what it reported may be an image "+
+			"the canary no longer runs", pod.Name)
+	}
+	for _, c := range pod.Spec.Containers {
+		if c.Name != apiContainerName {
+			continue
+		}
+		if c.Image != image {
+			return fmt.Errorf("the canary pod read, pod/%s, runs %s, not %s, the image spec.canaryImageTag "+
+				"renders: what it reported is not the dispatched tag's", pod.Name, c.Image, image)
+		}
+		return nil
+	}
+	return fmt.Errorf("the canary pod read, pod/%s, has no container named %q", pod.Name, apiContainerName)
 }
