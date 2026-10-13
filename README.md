@@ -22,9 +22,11 @@ The operations layer is part of the demonstration too: the stack runs on k3s on 
 described in Terraform, and deploys go through an approval-gated SSM pipeline. There the api runs
 under a purpose-built `ServingDeployment` operator, which adopted the live Deployment in place and
 makes canary windows mechanical, with an ordered shadow pause and an operator-enforced 45-minute
-TTL; promote and rollback stay human calls in v0. The operator also ships as a Helm chart,
-demonstrated on an ephemeral EKS cluster that was created, exercised, destroyed and sweep-verified
-for about $0.05–0.06, and Docker Compose, the original runtime, was retired at v3.0.0.
+TTL; promote and rollback stay human calls in v0, and v1 lets a window opt into a metric gate that
+rolls it back on a line of the ratified abort table or dispatches its promotion (see
+[Deployment](#deployment)). The operator also ships as a Helm chart, demonstrated on an ephemeral
+EKS cluster that was created, exercised, destroyed and sweep-verified for about $0.05–0.06, and
+Docker Compose, the original runtime, was retired at v3.0.0.
 
 Engineering rules binding every contributor — human or agent — live in
 [PRINCIPLES.md](PRINCIPLES.md).
@@ -355,6 +357,24 @@ Why the phase builds its own operator rather than adopting Argo Rollouts or KSer
 would have bought and what would change the answer, is in
 [docs/WHY-NOT-ARGO-KSERVE.md](docs/WHY-NOT-ARGO-KSERVE.md).
 
+Phase 4 adds operator v1, a metric gate a window opts into (`spec.gate`; D41–D50 in
+[`docs/PLAN.md`](docs/PLAN.md)), armed per canary tag by the host patch that opens the window. At
+each 60 s boundary the operator reads both pods' own `/metrics` the way the human watch does, and
+judges the interval by the O4 abort table the live cutover's canary window was held to — the
+50-request floor, the 1.25× same-interval p95 ratio, an unevaluable interval counted as a breach —
+with no abort policy of its own. `Observe` records every interval and what it would have done;
+`ActRollback` also closes the window on a tripped line, latched as an expired window is;
+`ActPromote` also dispatches the Deploy workflow for the canary's SHA after 11 consecutive clean
+intervals, at most once, so the pipeline still does the promoting, every guard in place. A window
+with no gate is v0. The host, the stable, the operator itself, opening any window, the deploy
+approval and the agreement/confidence judgement stay human, and a human attends every acting
+window ([the runbook's v1 line](docs/RUNBOOK.md#the-v1-gate-what-the-operator-decides-what-stays-human)).
+All three modes are exercised in CI on k3d, against a stub whose metrics the test shapes and an
+in-cluster stand-in for GitHub's API. The live demonstrations v4.0.0 is held to — an observed
+window, a rolled-back induced breach, a dispatched same-image promotion — run gated on issue
+[#123](https://github.com/MuratAlkan06/ml-observability-system/issues/123); the claim lands here
+with their evidence (D49, D50).
+
 The operator is also packaged as a Helm chart at
 [`deploy/helm/mlobs-operator/`](deploy/helm/mlobs-operator/README.md) (D38); the host and the
 pipeline keep the flattened manifests and run no Helm. [`deploy/eks/`](deploy/eks/) is the
@@ -397,8 +417,9 @@ the traffic between them, not a traffic router, so the split has four properties
   reached the canary.
 - **Rollback is human-triggered in v0.** Nothing watches the canary's health and pulls it. A bad
   canary serves its share of connections until a human closes the window, a pipeline deploy
-  closes it, or the 45-minute TTL does. Metric-driven promote and rollback are v1
-  ([`docs/PHASE3.md`](docs/PHASE3.md)).
+  closes it, or the 45-minute TTL does. In v1 a window can opt into the metric gate (see
+  [Deployment](#deployment)), whose acting modes also close it on a tripped line; one that does not
+  is v0.
 - **The `api` metrics job mixes the two pods.** It scrapes `api:8000` through the same Service,
   so during a window each scrape reaches the stable or the canary. Their samples interleave in one
   series under one `instance` label, so counters step backwards between pods and `rate()` reads
