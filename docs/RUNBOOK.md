@@ -3,10 +3,12 @@
 > Phase 3 O3. This is the host procedure for the `ServingDeployment` operator:
 > opening and closing a canary window, what the 45-minute TTL does and why it
 > is 45 minutes, the one tradeoff the operator makes on its own, and D36's
-> rollback. The decisions are D31–D37 in [`PLAN.md`](PLAN.md). The operator
-> itself is described in [`operator/README.md`](../operator/README.md), and
-> what the traffic split does and does not promise is set out in the README,
-> under [The canary split, stated plainly](../README.md#the-canary-split-stated-plainly).
+> rollback. The decisions are D31–D37 in [`PLAN.md`](PLAN.md). Phase 4 adds
+> the metric gate a window can opt into, under D41–D50: what it decides and
+> what stays human are in "The v1 gate" below. The operator itself is
+> described in [`operator/README.md`](../operator/README.md), and what the
+> traffic split does and does not promise is set out in the README, under
+> [The canary split, stated plainly](../README.md#the-canary-split-stated-plainly).
 >
 > It starts where O4 leaves the host (issue #68): the D34 pair in
 > `/etc/rancher/k3s/config.yaml`, the `hostPort` gone from `deployment/api`,
@@ -29,11 +31,13 @@ kubeconfig the deploy document uses (`infra/ec2/deploy.tf`), so
 | Step | Where | Who |
 |---|---|---|
 | Deploy a SHA: sets `spec.imageTag`, closes any open window | pipeline | a human dispatches |
-| Open a window | host | a human |
+| Open a window, and arm its gate | host | a human |
 | Close a window by hand | host | a human |
-| Promote the canary | pipeline: dispatch the canary's SHA | a human dispatches; the operator orders it |
+| Promote the canary | pipeline: dispatch the canary's SHA, the same run whoever sends it | a human dispatches, or under `ActPromote` the operator does, from in-cluster, with the issue-#121 token; the `ec2-deploy` reviewer approves or rejects the run unless lifted (D43); a human records its URL on the window's issue; the operator orders the close |
 | Close a window at its TTL | in-cluster | the operator |
-| Clear the canary fields an expired window leaves | pipeline, or host | either |
+| Roll a window back on a tripped line (`ActRollback`, `ActPromote`) | in-cluster | the operator |
+| Reject a pending operator dispatch | pipeline: the run's review | a human |
+| Clear the canary fields an expired or rolled-back window leaves | pipeline, or host | either |
 | D36 rollback, steps 1–4 | host | a human |
 | D36 rollback, steps 5–6 | pipeline | a human dispatches |
 
@@ -161,7 +165,9 @@ brings `deployment/api-canary` up. `CanaryActive` turns True on the reconcile
 that starts the pause, and its `lastTransitionTime` is the TTL's clock.
 `ShadowPaused` turns True once the shadow is observed at 0. The deadline is in
 `CanaryActive`'s message, `canary window open until <time>`. The longer
-`STATE_TIMEOUT_SECONDS` covers the canary's model load.
+`STATE_TIMEOUT_SECONDS` covers the canary's model load. A window that opts
+into the gate is opened by this same patch with its `spec.gate` in it ("The
+v1 gate", Arming).
 
 ## Closing a window, and promoting
 
@@ -193,22 +199,38 @@ that starts the pause, and its `lastTransitionTime` is the TTL's clock.
 - **The dispatch token, its rotation and its revocation** (`ActPromote`,
   D43). Under `ActPromote` the operator sends that dispatch itself, with the
   token in `secret/operator-dispatch-token`, key `token`, which
-  `deployment/operator` alone mounts. The token's scope is checked and
-  recorded on the slice issue when it is minted: Actions read/write on this
-  repository and nothing else, no Deployments permission, its expiry inside
-  the live-window season. Create the Secret on the host only, never through
-  CI or the repository, and at least 2 minutes before the window opens
-  ("Before opening a window", item 6). Rotate by replacing it in place, which
+  `deployment/operator` alone mounts. The token is a GitHub App's
+  installation token, under the issue-#121 ruling, which replaced D43's
+  machine-account PAT. The App is the repository owner's, installed on this
+  repository alone, with Actions read/write and nothing else beyond the
+  read-only metadata GitHub adds to it: no environment or deployment-approval
+  permission. GitHub expires an installation token an hour after minting it,
+  so one is minted for each acting window, and its mint response, which names
+  the token's permissions, repository and expiry, is recorded on the window's
+  slice issue as its scope record. The operator mints nothing: the Secret
+  holds the minted token, which the operator sends as it reads it. The App's
+  private key, which mints it, never goes into the repository or CI.
+
+  Create the Secret on the host only, never through CI or the repository, at
+  least 2 minutes before the window opens ("Before opening a window", item
+  6), from a token minted within the half hour before the open. The floor
+  lets the gate dispatch no later than 30 minutes into the window, the
+  45-minute TTL less D47's 15 minutes, and the operator cannot see a token's
+  expiry. An expired token still reads, so the window arms `ActPromote`, and
+  the dispatch ends `NotDispatched` with `RunsUnreadable` when GitHub refuses
+  the runs listing; a human actuates. Rotate by replacing it in place, which
   needs no operator restart, since the operator reads the file at every use
   and the kubelet carries the change, typically in 1–2 minutes. Then revoke
   the old token at GitHub: the replaced value can stay in the k3s datastore
-  until compaction.
+  until compaction. An installation token is revoked with itself:
 
   ```bash
   read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
     --from-file=token=/dev/stdin; unset TOKEN                                                      # create
   read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
     --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl replace -f -; unset TOKEN       # rotate
+  read -rs TOKEN && curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE -H "Authorization: Bearer $TOKEN" \
+    https://api.github.com/installation/token; unset TOKEN                                         # revoke: 204
   ```
 
   Beyond the one dispatch the operator makes, the token's Actions write lets
@@ -290,9 +312,9 @@ canary fields therefore stay. That spec is legal and equivalent to steady:
 ## The stable-first guard, and what it costs
 
 Every close waits for `deployment/api` to be Available before it scales the
-canary to 0. That covers a close by hand, by the pipeline, by promotion and by
-the TTL alike. This is D32's no-serving-gap rule, and in the ordinary case it
-costs nothing.
+canary to 0. That covers a close by hand, by the pipeline, by promotion, by
+the TTL and by the gate's rollback alike. This is D32's no-serving-gap rule,
+and in the ordinary case it costs nothing.
 
 **The named tradeoff:** if the stable is not Available when a window closes,
 the canary keeps serving and the shadow stays paused. That happens when the
@@ -364,6 +386,175 @@ and Slack alerting comes from the drift job alone. Two rules would cover it:
 
 These are candidates for the phase-close hardening pass (#60), not a
 commitment of this slice.
+
+## The v1 gate: what the operator decides, what stays human
+
+In v0 the operator makes the window mechanical, and a human makes the call.
+In v1 a window can opt into a gate, `spec.gate`, that makes part of the call
+from metrics (D41–D50). At each 60 s boundary of the window it reads both
+pods' own `/metrics` by `watch-window.sh`'s method (D41), and it judges each
+interval by the O4 lines ("During the live canary window: close it", below).
+That table is unchanged, and it stays the decision rule: the gate transcribes
+it and invents no abort policy (D44, D45). What is new beside it is
+promote-side: the 11-interval clean run and its reset on a canary restart
+(D44), and the 15-minute dispatch floor (D47). With no `spec.gate` the
+operator is v0, as the rest of this runbook describes it.
+
+**What it decides, by mode.** Each mode contains the one before it (D42).
+
+- **`Observe` records, and acts on nothing.** Each interval becomes a record
+  in `status.gate`, a ring of 50 beside the window's counters: both pods'
+  requests, 5xx and p95, the ratio, the verdict and its reasons. The first
+  tripped line and the promote verdict are recorded as what an acting gate
+  would have done, each with one Event, `GateWouldRollBack` or
+  `GateWouldPromote`. The window stays open until its TTL or a close.
+- **`ActRollback` adds the close.** A tripped line rolls the window back
+  through the TTL's own latch (D47): `CanaryActive` False with reason
+  `BreachRolledBack`, its message naming the line — `Line2CanaryErrors`,
+  `Line3CanaryLatency` or `Line5CanaryOOMKilled` — steady restored in the
+  cluster with no spec write, and no window opening until the close-window
+  patch clears the canary fields ("When the TTL lapses"). Line 2 and the
+  canary's own OOM kill trip at once. Line 3 trips on two in a row, a latency
+  breach and an unevaluable interval counting alike, so a canary that stops
+  serving, line 1, trips it too, through the unevaluable intervals it leaves,
+  in about 2–3 minutes (D45). The records' reasons say which a line-3 trip
+  was. The promote verdict is recorded, with a `GateWouldPromote` Event, and
+  a human actuates it.
+- **`ActPromote` adds the dispatch, and still rolls back.** At the promote
+  verdict, 11 consecutive clean intervals, about 12 minutes after the canary
+  turns Ready (D44), the operator sends the promotion ("Closing a window, and
+  promoting") itself: one `workflow_dispatch` of `deploy.yml` on `main`, its
+  `sha` the canary's tag. The pipeline still does the promoting, every guard
+  in place (D43). The dispatch is latched in status before it is sent, and
+  never sent twice. Each of these holds first, in this order, or nothing is
+  sent: at least 15 minutes of the TTL left (D47); the clean run still whole;
+  the tag 40-hex; the two pods read shown to be `deployment/api`'s and
+  `deployment/api-canary`'s; the canary pod read running the image the tag
+  renders, and not terminating; the token readable; and no Deploy run
+  queued, waiting, pending, requested or in progress. A pending run defers
+  the dispatch to a later boundary. Any other miss, a refused dispatch, or a
+  stop between the latch and GitHub's answer leaves the verdict to a human,
+  with no retry. `status.gate.promoteVerdict.dispatch` says which. The
+  window's own preconditions are items 5 and 6 of "Before opening a window".
+
+**Arming.** The gate rides the host patch that opens the window, so consent
+is given per canary tag and there is no new spec writer (D32, D42):
+
+```bash
+kubectl -n mlobs patch servingdeployment/api --type merge \
+  -p '{"spec":{"canaryImageTag":"<40-hex sha>","canaryReplicas":1,"gate":{"mode":"ActRollback","forCanaryImageTag":"<40-hex sha>"}}}'
+```
+
+- **Tag-bound.** `ActRollback` and `ActPromote` arm only while
+  `forCanaryImageTag` equals `spec.canaryImageTag`. Otherwise the gate runs
+  as `Observe`, says so in a `GateDegraded` Event, and `status.gate.arming`
+  reads `TagMismatch`. `Observe` needs no tag.
+- **Sampled when the window opens** (D42, and its V1-S4 clarification). The
+  level a window opens at is the most it acts at: a gate set on a window
+  already open, or a mode raised in one, takes effect from the next window.
+  A lower never waits for the next window: removing `spec.gate` stops the
+  gate on the spot, and a lowered mode or a changed tag takes effect at the
+  next boundary, before the gate acts again. Every record carries the level
+  it was judged at, `effectiveLevel`. Confirm the level at the open from its
+  `GateArmed` Event, as item 6 of "Before opening a window" does.
+- **`TokenAbsent`.** `ActPromote` with no token to read runs as
+  `ActRollback`, the level it contains: its rollback acts, and its promote
+  verdict waits for a human (D43). A token that reads only after the open is
+  a raise, for the next window.
+- **It outlives the window.** The close-window patch and pipeline deploys
+  leave `spec.gate` as it is (D42). The tag binding keeps an acting gate from
+  arming another canary, but a window reopened on the same tag arms again,
+  and a gate left at `Observe` records every later window. Remove it with a
+  patch of its own:
+
+  ```bash
+  kubectl -n mlobs patch servingdeployment/api --type merge -p '{"spec":{"gate":null}}'
+  ```
+
+**Reading it.** The commands at the top of this runbook show the conditions
+and the Events. The gate's own state, and its ring:
+
+```bash
+kubectl -n mlobs get servingdeployment api -o jsonpath='{.status.gate.mode} {.status.gate.arming} breachRun={.status.gate.breachRun} cleanRun={.status.gate.cleanRun}{"\n"}'
+kubectl -n mlobs get servingdeployment api -o jsonpath='{range .status.gate.records[*]}{.index} {.effectiveLevel} {.verdict} {.reasons} {.ratio}{"\n"}{end}'
+```
+
+**What stays human (D46).** The gate decides only from what a pod shows it.
+The rest is a person's, by name:
+
+- **The host.** Line 5's host regime, `MemAvailable` and the kernel's OOM
+  log, is unobservable in-cluster: the stack runs no node_exporter, so only
+  the canary's own OOM kill reaches the gate. `watch-window.sh` runs beside
+  every acting window as the console, and is not retired.
+- **The stable.** A stable that is unhealthy, the classification table's
+  third row, goes through the pipeline, as before.
+- **The window state and the operator itself.** Line 4's judgement and line
+  6, the table's first row, stay human: the operator cannot judge or bury
+  itself (D36). Two operator restarts in a row do close an acting window, as
+  line 3's two in a row (D45), but a persistent operator fault still takes
+  the first row's path.
+- **A canary that never turns Ready.** Its intervals are pending and count
+  toward nothing, so only the TTL bounds it (D45). The human closes it.
+- **Opening any window**, and with it arming the gate (D32, D42).
+- **The deploy gate.** The promote approval is a human's wherever the
+  reviewer stands (D43): the `ec2-deploy` reviewer approves or rejects an
+  operator's run as any other, and lifting it for the promote demonstration
+  is a recorded human decision. Rejecting a pending operator dispatch is a
+  human's call (D47).
+- **Agreement and confidence.** The gate promotes on the table's health
+  lines alone, as the live Gate 4 pass did (#68). Agreement and confidence
+  against the stable, #62's promotion signal, stay a human judgement until
+  predictions carry per-arm attribution: today canary and stable rows cannot
+  be told apart (D49).
+
+**An acting window's checklist.** "During the live canary window: close it"
+holds as written: the watch, the two records, the six lines, and the
+classification table, top row first. An acting window adds:
+
+1. **A human attends it** (D46), with `watch-window.sh` beside the operator
+   from before the open patch until the close has converged. The gate's
+   close does not replace the human's: on any line, the human closes as
+   before.
+2. **No operator-image roll while it is open** (D45). Do not roll, restart
+   or rescale `deployment/operator` during an acting window. The gate keeps
+   each boundary's read in memory, deliberately unpersisted, so a restart
+   forfeits the interval in flight: it is recorded `OperatorInterrupted`,
+   counts as unevaluable toward line 3, and resets `cleanRun`. Two forfeited
+   intervals in a row roll the window back.
+3. **On any abort, check Actions for a pending operator dispatch and REJECT
+   it** (D47). A dispatch the gate sent can wait for its approval past the
+   window's close: the 15-minute floor gates when the operator dispatches,
+   not when an approved run lands. The status holds the dispatch's state,
+   time and SHA, and its run is titled `Deploy <that sha>`:
+
+   ```bash
+   kubectl -n mlobs get servingdeployment api -o jsonpath='{.status.gate.promoteVerdict.dispatch}{"\n"}'
+   gh run list --workflow deploy.yml --limit 5
+   ```
+
+   Reject it on the run's page, under Review deployments. That reject is the
+   human override. After a rollback, the `GateRolledBack` Event names a
+   dispatch the gate sent before the trip.
+4. **After expiry, an approval is an ordinary deploy** (D47). A run approved
+   after the window expired deploys the canary's SHA onto a steady stack:
+   the stable rolls by Recreate, with no canary to cover the bounce, so
+   D32's no-gap promise does not hold (same-image excepted, a no-op). Record
+   it as an ordinary deploy, with its gap, never as a windowed promotion. The
+   same holds for a run approved after any other close.
+5. **The run's URL, by hand** (D43). GitHub's answer to a dispatch names no
+   run, so the human finds the run in Actions and records its URL on the
+   window's issue, beside `status.gate.promoteVerdict`. The run's fixed line
+   `ok: canary window closed by the close-window patch (D32)` and its
+   `ok: smoke passed (steady state)` are the promotion's completion signal
+   (D50).
+6. **The reviewer lift, for the promote demonstration alone** (D43). The
+   `ec2-deploy` reviewer is lifted as late and restored as early as the
+   demonstration allows, each change recorded on the slice issue with its
+   time. While it is lifted, an operator dispatch has no pending run to
+   reject: its run starts at once, and the token's reach widens with it (the
+   token entry, above). The brakes are then before the dispatch: removing
+   `spec.gate` or closing the window stops it at once, and lowering the mode
+   stops it at the next boundary, where a dispatch would be sent.
 
 ## Abort criteria (O4 cutover window)
 
@@ -505,7 +696,8 @@ The steps are #68's handoff note, items 1–3.
 
 Closing is the close-window patch ("Closing a window, and promoting"), then
 `deploy/k3s/smoke.sh` ending `ok: smoke passed (steady state)`. Which way back
-a tripped line takes is the classification table's call, after the lines.
+a tripped line takes is the classification table's call, after the lines. A
+window whose gate acts adds its own checklist to these ("The v1 gate").
 
 **Before the open patch**, three things on the host:
 
@@ -763,7 +955,13 @@ operator rolls the stable back (`infra/README.md`, "Rolling back").
   2026-09-29. By the end of November 2026 no pre-cutover SHA can pass the
   deploy preflight, and step 5 then needs a new commit on `main` whose tree is
   pre-cutover, which is a revert with its own review. **This fallback has a
-  shelf life.**
+  shelf life.** Past that horizon, step 5's target is a reviewed revert on
+  current `main`, raised at the incident and dispatched through the
+  pipeline, the way back the tarball preflight's own error names (D48). It
+  depends on CI publishing during the incident, GhcrPublish and
+  ShadowPublish green on the revert's push, so it is strictly weaker than
+  the pre-staged tarball. That is why every live v1 window is ruled to run
+  before 2026-11-20.
 - **The database needs nothing.** `sql/` is identical between `16a8c86` and
   O2, so no schema change crosses this boundary and D25's restore is not
   needed. O4's `pg_dump` preflight stands regardless.
