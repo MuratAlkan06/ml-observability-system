@@ -65,9 +65,9 @@ spec:
                   canaryImageTag is the canary api image tag, in the same 40-character
                   commit SHA form. It is set only by a host-side patch that opens a canary
                   window and is never rendered by the pipeline (docs/PLAN.md D32). The
-                  operator never writes it: a window that reaches its 45-minute TTL is
-                  closed in the cluster, and this field stays until the close-window patch
-                  clears it.
+                  operator never writes it: a window that reaches its 45-minute TTL, or
+                  that an acting gate rolls back, is closed in the cluster, and this field
+                  stays until the close-window patch clears it.
                 pattern: ^[0-9a-f]{40}$
                 type: string
               canaryReplicas:
@@ -87,7 +87,10 @@ spec:
                   status.gate and emits no gate Event, and promote and rollback stay
                   human. Like the canary fields it is set by the host-side patch that
                   opens a window and is never rendered by the pipeline (D32), so a
-                  pipeline deploy leaves it as it is.
+                  pipeline deploy leaves it as it is. Removed from an open window, the
+                  gate stops at once; the window's status.gate keeps its evidence, its
+                  mode lowered to Observe, so a gate set again before that window closes
+                  does not act in it.
                 properties:
                   forCanaryImageTag:
                     description: |-
@@ -100,10 +103,14 @@ spec:
                     type: string
                   mode:
                     description: |-
-                      mode is the gate's mode. In this version of the operator every mode
-                      runs as Observe: ActRollback and ActPromote are accepted, and a window
-                      that asks for one is observed and says so in an Event, until the slices
-                      that give them their acting behavior land.
+                      mode is the gate's mode. ActRollback acts: a tripped line rolls the
+                      window back (D47). ActPromote's promote dispatch does not act in this
+                      version of the operator: armed, it runs as ActRollback, records the
+                      promote verdict without dispatching it, and says so in an Event, until
+                      the slice that gives it its dispatch lands. A window acts at the level
+                      sampled when it opens: a mode raised mid-window takes effect from the
+                      next window, and one lowered, or its tag mismatched, from the next
+                      boundary.
                     enum:
                     - Observe
                     - ActRollback
@@ -194,8 +201,11 @@ spec:
                   window it observed (docs/PLAN.md D42). The operator is its sole writer.
                 properties:
                   arming:
-                    description: arming says how the gate armed spec.gate.mode at
-                      its last boundary.
+                    description: |-
+                      arming says how the gate armed spec.gate.mode at its last boundary:
+                      Armed; TagMismatch, an acting mode armed for another canary tag, run as
+                      Observe; or NotYetActive, ActPromote, whose dispatch this version of the
+                      operator does not act on, run as ActRollback.
                     enum:
                     - Armed
                     - TagMismatch
@@ -252,7 +262,11 @@ spec:
                     - Unevaluable
                     type: string
                   mode:
-                    description: mode is the mode the gate ran its last boundary as.
+                    description: |-
+                      mode is the acting level the gate ran its last boundary at: sampled
+                      when the window opened, lowered at a boundary by a lowered or
+                      mismatched spec.gate and at once by its removal, and never raised
+                      before the next window.
                     enum:
                     - Observe
                     - ActRollback
@@ -268,8 +282,9 @@ spec:
                   promoteVerdict:
                     description: |-
                       promoteVerdict is the first interval that completed 11 consecutive
-                      clean intervals (D44). In Observe it is recorded and nothing is
-                      dispatched.
+                      clean intervals (D44). It is recorded and nothing is dispatched: at
+                      ActRollback a human actuates it (D43), and ActPromote's dispatch does
+                      not act in this version of the operator.
                     properties:
                       at:
                         description: at is the boundary that interval ends at.
@@ -315,6 +330,18 @@ spec:
                           - errors
                           - requests
                           type: object
+                        effectiveLevel:
+                          description: |-
+                            effectiveLevel is the acting level the interval was evaluated at, the
+                            gate's mode at the boundary that recorded it: at ActRollback a tripped
+                            line rolls the window back, and at Observe nothing acts. The operator
+                            writes it on every record; one without it predates the field and was
+                            evaluated at Observe.
+                          enum:
+                          - Observe
+                          - ActRollback
+                          - ActPromote
+                          type: string
                         end:
                           description: end is the boundary the interval ends at.
                           format: date-time
@@ -409,8 +436,9 @@ spec:
                   rollbackVerdict:
                     description: |-
                       rollbackVerdict is the first interval whose verdict tripped a line of
-                      the table. In Observe it is recorded and nothing acts on it: the window
-                      stays open until its TTL or a close.
+                      the table. At Observe it is recorded and nothing acts on it: the window
+                      stays open until its TTL or a close. At ActRollback it is the trip that
+                      rolled the window back, CanaryActive False with BreachRolledBack (D47).
                     properties:
                       at:
                         description: at is the boundary that interval ends at.
@@ -422,6 +450,14 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      rolledBackAt:
+                        description: |-
+                          rolledBackAt is when the gate rolled the window back on this trip: the
+                          reconcile that latched CanaryActive False with BreachRolledBack, to the
+                          second. Absent when the trip was recorded at Observe, which acts on
+                          nothing.
+                        format: date-time
+                        type: string
                       trip:
                         description: trip names the line that tripped.
                         enum:

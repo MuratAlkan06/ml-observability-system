@@ -654,8 +654,8 @@ var _ = Describe("The gate in Observe (D42, D45)", func() {
 		Expect(len(encoded)).To(BeNumerically("<", 16<<10), "about 12.5 KB, trivial against etcd's bound (D42)")
 	})
 
-	DescribeTable("arms an acting mode only for the canary tag it names, and in this version runs every mode as "+
-		"Observe, saying so in one Event per window",
+	DescribeTable("arms an acting mode only for the canary tag it names, and runs Observe, and an acting mode "+
+		"armed for no tag or another tag, as Observe, saying so in one Event per window",
 		func(spec servingv1alpha1.GateSpec, want servingv1alpha1.GateArming, event any) {
 			h := newGateHarness(&spec)
 			h.addCanary(at(windowStart.Add(-time.Minute)))
@@ -685,15 +685,6 @@ var _ = Describe("The gate in Observe (D42, D45)", func() {
 			servingv1alpha1.GateSpec{Mode: servingv1alpha1.GateModeActPromote},
 			servingv1alpha1.GateArmingTagMismatch,
 			ContainSubstring("Warning GateDegraded spec.gate.mode ActPromote is armed for canary tag \"\"")),
-		Entry("ActRollback armed for the canary's tag: not active yet, observed, and named",
-			servingv1alpha1.GateSpec{Mode: servingv1alpha1.GateModeActRollback, ForCanaryImageTag: canaryImageTag},
-			servingv1alpha1.GateArmingNotYetActive, Equal("Warning GateDegraded spec.gate.mode ActRollback does not "+
-				"act in this version of the operator: the gate runs as Observe for canary tag "+canaryImageTag+
-				", records every interval in status.gate and acts on nothing")),
-		Entry("ActPromote armed for the canary's tag: not active yet, observed, and named",
-			servingv1alpha1.GateSpec{Mode: servingv1alpha1.GateModeActPromote, ForCanaryImageTag: canaryImageTag},
-			servingv1alpha1.GateArmingNotYetActive,
-			ContainSubstring("Warning GateDegraded spec.gate.mode ActPromote does not act in this version")),
 	)
 
 	It("re-arms at a boundary when the canary tag changes mid-window, with one Event on the transition", func() {
@@ -702,7 +693,7 @@ var _ = Describe("The gate in Observe (D42, D45)", func() {
 		})
 		h.addCanary(at(windowStart.Add(-time.Minute)))
 		h.open()
-		Expect(h.gateEvents()).To(ConsistOf(ContainSubstring("GateDegraded spec.gate.mode ActRollback does not act")))
+		Expect(h.gateEvents()).To(ConsistOf(ContainSubstring("Normal GateArmed the gate is armed in ActRollback")))
 		h.clean(1)
 		setCanarySpec(h.sd, laterCanaryImageTag, 1)
 		h.clean(1)

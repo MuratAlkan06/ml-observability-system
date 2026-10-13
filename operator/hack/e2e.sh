@@ -54,6 +54,14 @@
 #      ships, with no watch (D41); then a pipeline deploy — the CR apply and
 #      the close-window patch, as apply.sh sends them — leaves spec.gate as
 #      it was, and the rendered CR carries no gate key
+#   8. the gate in ActRollback (D45, D47), on the same 20 s grid: a window
+#      armed for the canary's tag, its canary slowed past warmup, is rolled
+#      back on line 3's two in a row — CanaryActive False with
+#      BreachRolledBack on its fixed line, the canary's pods gone before the
+#      shadow scorer returns, and the spec left exactly as the open patch set
+#      it; the ring records the breach at ActRollback; the latch holds against
+#      canary-field edits until apply.sh's close-window patch passes the spec
+#      through the closed shape, and the next window starts fresh evidence
 # and, for the chart install only:
 #   6. the release is deployed and the operator it runs is the release's, and
 #      `helm uninstall` leaves the CRD in place: crds/ is install-only
@@ -486,8 +494,9 @@ assert_gate() {
     rec="$(record_at "$i")"
     IFS='|' read -r _ verdict reasons stable_n canary_n <<<"$rec"
     [ "$verdict" = Clean ] || die "interval ${i} of the clean run reads '${rec}'"
-    [ "${stable_n:-0}" -ge 50 ] && [ "${canary_n:-0}" -ge 50 ] \
-      || die "interval ${i} is clean on ${stable_n:-no} stable and ${canary_n:-no} canary requests"
+    if ! { [ "${stable_n:-0}" -ge 50 ] && [ "${canary_n:-0}" -ge 50 ]; }; then
+      die "interval ${i} is clean on ${stable_n:-no} stable and ${canary_n:-no} canary requests"
+    fi
   done
   gate_events | grep -qx GateWouldPromote || die "no GateWouldPromote Event"
   [ "$(field "$SERVINGDEPLOYMENT" '{.status.conditions[?(@.type=="CanaryActive")].status}')" = True ] \
@@ -551,11 +560,182 @@ assert_gate() {
   echo "ok: the gate's events: $(gate_events | sort | uniq -c | awk '{ printf "%s x%s; ", $2, $1 }')"
 }
 
+# --- 8. the gate in ActRollback ----------------------------------------------
+
+# canary_active: CanaryActive as STATUS/REASON.
+canary_active() {
+  field "$SERVINGDEPLOYMENT" \
+    '{.status.conditions[?(@.type=="CanaryActive")].status}/{.status.conditions[?(@.type=="CanaryActive")].reason}'
+}
+
+# canary_active_is STATUS/REASON: CanaryActive reads so.
+canary_active_is() {
+  [ "$(canary_active)" = "$1" ]
+}
+
+# canary_active_message_is MESSAGE: CanaryActive's message is MESSAGE.
+canary_active_message_is() {
+  [ "$(field "$SERVINGDEPLOYMENT" '{.status.conditions[?(@.type=="CanaryActive")].message}')" = "$1" ]
+}
+
+# gate_levels: status.gate's ring, oldest first, one record a line:
+# INDEX|VERDICT|REASONS|EFFECTIVE_LEVEL, the reasons as JSON.
+gate_levels() {
+  field "$SERVINGDEPLOYMENT" \
+    '{range .status.gate.records[*]}{.index}|{.verdict}|{.reasons}|{.effectiveLevel}{"\n"}{end}'
+}
+
+# gate_clean_recorded: the ring holds a clean interval, one judged past the
+# canary's warmup.
+gate_clean_recorded() {
+  gate_records | awk -F'|' '$2 == "Clean"' | grep -q .
+}
+
+# gate_window_other_than START: status.gate is the evidence of a window
+# whose start is not START.
+gate_window_other_than() {
+  local start
+  start="$(gate_field windowStart)"
+  [ -n "$start" ] && [ "$start" != "$1" ]
+}
+
+# canary_scaled_up: deployment/api-canary asks for the window's one pod. The
+# Deployment stays from the last window's close, at 0 and its rollout done,
+# until the operator scales it up, once the shadow scorer's pods are gone (D37).
+canary_scaled_up() {
+  [ "$(field deployment/api-canary '{.spec.replicas}')" = 1 ]
+}
+
+# observed_current: the operator has reconciled the ServingDeployment's
+# current generation, and so decided its window.
+observed_current() {
+  local generation observed
+  read -r generation observed <<<"$(field "$SERVINGDEPLOYMENT" '{.metadata.generation} {.status.observedGeneration}')"
+  [ -n "$generation" ] && [ "$generation" = "$observed" ]
+}
+
+# canary_spec: the spec's canary fields and gate, TAG|REPLICAS|MODE|FOR_TAG.
+canary_spec() {
+  field "$SERVINGDEPLOYMENT" \
+    '{.spec.canaryImageTag}|{.spec.canaryReplicas}|{.spec.gate.mode}|{.spec.gate.forCanaryImageTag}'
+}
+
+# assert_gate_acting: step 8, against the operator installed from the
+# flattened manifests, with step 7's knob still set and its window closed.
+assert_gate_acting() {
+  echo "ok: --- the gate in ActRollback, on a ${GATE_INTERVAL} grid ---"
+  local previous_start acted_start generation trip at i rec verdict reasons level expected acted_records
+
+  # --- 8a. a window armed in ActRollback for the canary's tag ---------------
+
+  previous_start="$(gate_field windowStart)"
+  k patch "$SERVINGDEPLOYMENT" --type merge -p \
+    "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1,\"gate\":{\"mode\":\"ActRollback\",\"forCanaryImageTag\":\"${CANARY_TAG}\"}}}" >/dev/null
+  generation="$(field "$SERVINGDEPLOYMENT" '{.metadata.generation}')"
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  poll_until "status.gate for the new window" gate_window_other_than "$previous_start"
+  acted_start="$(gate_field windowStart)"
+  [ "$(gate_field mode) $(gate_field arming)" = "ActRollback Armed" ] \
+    || die "status.gate runs the armed window as '$(gate_field mode) $(gate_field arming)', not 'ActRollback Armed'"
+  poll_until "deployment/api-canary scaled to 1" canary_scaled_up
+  k rollout status deployment/api-canary --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/api-canary"
+  canary_pod="$(k get pods -l app=api,role=canary --field-selector=status.phase=Running \
+    -o 'jsonpath={.items[0].metadata.name}')"
+  [ -n "$canary_pod" ] || die "no running canary pod"
+  echo "ok: a window opened armed in ActRollback for ${CANARY_TAG}: status.gate runs it at ActRollback, Armed; pod/${canary_pod} serving"
+
+  # --- 8b. the canary clean past its warmup, then slowed ----------------------
+
+  poll_within "$GATE_TIMEOUT_SECONDS" "a clean interval past the canary's warmup" gate_clean_recorded
+  [ -z "$(gate_field rollbackVerdict.trip)" ] \
+    || die "a line tripped before any breach was shaped: $(gate_field rollbackVerdict.trip)"
+  canary_active_is True/WindowOpen || die "CanaryActive is $(canary_active) before any breach was shaped"
+  canary_exec 'echo "0 10 0" > /www/profile'
+  echo "ok: the canary judged clean past its warmup; pod/${canary_pod} slowed"
+
+  # --- 8c. line 3's two in a row: the window rolled back ----------------------
+
+  poll_within "$GATE_TIMEOUT_SECONDS" "status.gate's rollback" gate_field_set rollbackVerdict.trip
+  trip="$(gate_field rollbackVerdict.trip)"
+  at="$(gate_field rollbackVerdict.interval)"
+  [ "$trip" = Line3CanaryLatency ] || die "the rollback trips ${trip}, not Line3CanaryLatency"
+  # The trip and the latch are one status write: the latch before anything moves.
+  canary_active_is False/BreachRolledBack || die "CanaryActive is $(canary_active) with the rollback recorded"
+  gate_field_set rollbackVerdict.rolledBackAt || die "status.gate's rollback verdict carries no rolledBackAt"
+  for i in $((at - 1)) "$at"; do
+    rec="$(gate_levels | awk -F'|' -v i="$i" '$1 == i')"
+    IFS='|' read -r _ verdict reasons level <<<"$rec"
+    [ "$verdict $reasons $level" = 'Breach ["LatencyRatio"] ActRollback' ] \
+      || die "interval ${i} of the two in a row reads '${rec}'"
+  done
+  if gate_levels | awk -F'|' '$4 != "ActRollback"' | grep -q .; then
+    die "a record of the armed window was evaluated below ActRollback: $(gate_levels | tr '\n' ' ')"
+  fi
+  gate_events | grep -qx GateRolledBack || die "no GateRolledBack Event"
+
+  # Steady, by the close's order: the canary's pods gone before the shadow
+  # scorer returns (D37), as for an expired window.
+  poll_within "$GATE_TIMEOUT_SECONDS" "statefulset/shadow-scorer back at 1" shadow_back
+  no_live_pods app=api,role=canary || die "the shadow scorer is back at 1 while a canary pod still runs"
+  [ "$(field deployment/api-canary '{.spec.replicas}')" = 0 ] || die "deployment/api-canary is not at 0 after the rollback"
+  k rollout status statefulset/shadow-scorer --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: statefulset/shadow-scorer"
+  k wait "$SERVINGDEPLOYMENT" --for=condition=ShadowPaused=false --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  expected="the gate tripped ${trip} at interval ${at} and rolled the canary window back; the spec keeps its canary fields until the close-window patch clears them, and no window opens before it does"
+  poll_until "CanaryActive's message on its fixed line" canary_active_message_is "$expected"
+  canary_active_is False/BreachRolledBack || die "CanaryActive is $(canary_active) once steady"
+  # No spec write: the generation and every canary and gate field as the
+  # open patch left them.
+  [ "$(field "$SERVINGDEPLOYMENT" '{.metadata.generation}')" = "$generation" ] \
+    || die "the spec moved during the rollback: generation $(field "$SERVINGDEPLOYMENT" '{.metadata.generation}'), not ${generation}"
+  [ "$(canary_spec)" = "${CANARY_TAG}|1|ActRollback|${CANARY_TAG}" ] \
+    || die "the spec's canary fields and gate read '$(canary_spec)' after the rollback"
+  acted_records="$(gate_levels)"
+  echo "ok: intervals $((at - 1)) and ${at} breached at ActRollback: ${trip}; CanaryActive False, BreachRolledBack, on its fixed line; the canary gone before the shadow scorer returned; the spec untouched at generation ${generation}"
+
+  # --- 8d. the latch: canary-field edits do not reopen the window -------------
+
+  k patch "$SERVINGDEPLOYMENT" --type merge -p '{"spec":{"canaryReplicas":0}}' >/dev/null
+  poll_until "the operator at the half-cleared spec's generation" observed_current
+  canary_active_is False/BreachRolledBack || die "a half-cleared spec released the latch: CanaryActive $(canary_active)"
+  k patch "$SERVINGDEPLOYMENT" --type merge -p '{"spec":{"canaryReplicas":1}}' >/dev/null
+  poll_until "the operator at the re-requested window's generation" observed_current
+  canary_active_is False/BreachRolledBack || die "editing the canary fields reopened the window: CanaryActive $(canary_active)"
+  [ "$(field deployment/api-canary '{.spec.replicas}')" = 0 ] || die "deployment/api-canary moved on a latched window"
+  shadow_back || die "the shadow scorer moved on a latched window"
+  no_live_pods app=api,role=canary || die "a canary pod runs on a latched window"
+  echo "ok: the latch held: canaryReplicas 0 then 1, with the tag kept, left CanaryActive False, BreachRolledBack, and the stack steady"
+
+  # --- 8e. the closed shape releases it; the next window starts fresh ---------
+
+  k patch "$SERVINGDEPLOYMENT" --type merge -p "$close_patch" >/dev/null
+  poll_until "the operator at the closed shape's generation" observed_current
+  canary_active_is False/NoCanary || die "apply.sh's close-window patch left CanaryActive $(canary_active)"
+  [ "$(gate_field rollbackVerdict.trip)" = "$trip" ] || die "status.gate's evidence did not survive the release"
+  k patch "$SERVINGDEPLOYMENT" --type merge -p \
+    "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1}}" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  poll_until "status.gate for the next window" gate_window_other_than "$acted_start"
+  [ -z "$(gate_field rollbackVerdict.trip)" ] || die "the next window's status.gate carries the last one's rollback"
+  [ "$(gate_field mode) $(gate_field arming)" = "ActRollback Armed" ] \
+    || die "the next window runs as '$(gate_field mode) $(gate_field arming)', not 'ActRollback Armed'"
+  k patch "$SERVINGDEPLOYMENT" --type merge -p "$close_patch" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive=false --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  poll_until "statefulset/shadow-scorer back at 1" shadow_back
+  echo "ok: apply.sh's close-window patch released the latch, and the next window opened with fresh evidence, armed again at ActRollback; closed by the same patch"
+
+  echo "ok: the rolled-back window's ring, INDEX|VERDICT|REASONS|EFFECTIVE_LEVEL:"
+  printf '%s\n' "$acted_records" | sed 's/^/    /'
+  echo "ok: the gate's events: $(gate_events | sort | uniq -c | awk '{ printf "%s x%s; ", $2, $1 }')"
+}
+
 # --- the flattened manifests, then the chart ---------------------------------
 
 install_flattened
 assert_operator "the flattened manifests"
 assert_gate
+assert_gate_acting
 uninstall_flattened
 
 echo "ok: helm $("$HELM" version --template '{{.Version}}')"

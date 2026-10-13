@@ -34,8 +34,8 @@ func canaryRequested(spec servingv1alpha1.ServingDeploymentSpec) bool {
 
 // canaryCleared reports whether spec is in the closed shape apply.sh's
 // constant close-window patch leaves: no canary image tag and no canary
-// replicas (D32). An expired window's latch releases only once a reconcile
-// observes this shape.
+// replicas (D32). The latch of an expired or rolled-back window releases only
+// once a reconcile observes this shape.
 func canaryCleared(spec servingv1alpha1.ServingDeploymentSpec) bool {
 	return spec.CanaryImageTag == "" && spec.CanaryReplicas == 0
 }
@@ -58,19 +58,32 @@ type window struct {
 	// progress completes CanaryActive's message with what the stack is
 	// waiting on, if anything.
 	progress string
+	// rollback is the gate's trip that rolled the window back, which a
+	// BreachRolledBack message names: status.gate's rollback verdict.
+	rollback *servingv1alpha1.GateRollbackVerdict
 }
+
+// latchedTail ends the message of a latched window, expired or rolled back.
+const latchedTail = "; the spec keeps its canary fields until the close-window patch clears them, " +
+	"and no window opens before it does"
 
 // message is CanaryActive's message: a fixed sentence per reason, then the
 // progress. Nothing in it is read back from the previous condition, so it
-// cannot grow across reconciles.
+// cannot grow across reconciles; a rolled-back window's names its trip from
+// status.gate.
 func (w window) message() string {
 	var head string
 	switch w.reason {
 	case servingv1alpha1.ReasonWindowOpen:
 		head = "canary window open until " + w.deadline.UTC().Format(time.RFC3339)
 	case servingv1alpha1.ReasonWindowExpired:
-		head = fmt.Sprintf("the canary window reached its %s TTL and was closed; the spec keeps its canary "+
-			"fields until the close-window patch clears them, and no window opens before it does", canaryWindowTTL)
+		head = fmt.Sprintf("the canary window reached its %s TTL and was closed", canaryWindowTTL) + latchedTail
+	case servingv1alpha1.ReasonBreachRolledBack:
+		head = "the gate rolled the canary window back" + latchedTail
+		if w.rollback != nil {
+			head = fmt.Sprintf("the gate tripped %s at interval %d and rolled the canary window back",
+				w.rollback.Trip, w.rollback.Interval) + latchedTail
+		}
 	default:
 		head = "no canary window is requested"
 	}
@@ -89,14 +102,16 @@ func (w window) message() string {
 // because CanaryActive does not transition. It closes when the spec stops
 // requesting it, or at the deadline. An expired window latches: it stays
 // closed, whatever the canary fields say, until the spec is observed in the
-// cleared shape (D32 clarification and D37 addendum of O2). The operator
-// never writes the spec, so the latch lives in the condition alone.
+// cleared shape (D32 clarification and D37 addendum of O2). A window an
+// acting gate rolled back latches exactly the same way, the one latch (D47).
+// The operator never writes the spec, so the latch lives in the condition
+// alone.
 func decideWindow(spec servingv1alpha1.ServingDeploymentSpec, prev *metav1.Condition, now time.Time) window {
 	latched := prev != nil && prev.Status == metav1.ConditionFalse &&
-		prev.Reason == servingv1alpha1.ReasonWindowExpired
+		(prev.Reason == servingv1alpha1.ReasonWindowExpired || prev.Reason == servingv1alpha1.ReasonBreachRolledBack)
 	switch {
 	case latched && !canaryCleared(spec):
-		return window{reason: servingv1alpha1.ReasonWindowExpired}
+		return window{reason: prev.Reason}
 	case !canaryRequested(spec):
 		return window{reason: servingv1alpha1.ReasonNoCanary}
 	case prev != nil && prev.Status == metav1.ConditionTrue:

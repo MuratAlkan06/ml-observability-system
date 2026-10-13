@@ -22,11 +22,19 @@ import (
 	"github.com/MuratAlkan06/ml-observability-system/operator/internal/scrape"
 )
 
-// The gate's wiring (docs/PLAN.md D42, D45): at each boundary of the window's
-// interval grid the controller reads the two pods (package scrape), hands the
-// interval to the decision engine (package gate), and records what it decided
-// in status.gate. In this version every mode runs as Observe: a verdict is
-// recorded, and nothing acts on it — no spec write, no close, no dispatch.
+// The gate's wiring (docs/PLAN.md D42, D45, D47): at each boundary of the
+// window's interval grid the controller reads the two pods (package scrape),
+// hands the interval to the decision engine (package gate), and records what
+// it decided in status.gate. What follows from a decision is the window's
+// acting level, by the owner's ruling on #119: sampled when the window opens,
+// lowered at the next boundary by a lowered or mismatched spec.gate and at once
+// by its removal, and never raised before the next window. At Observe a verdict
+// is recorded and nothing acts on it. At ActRollback a tripped line rolls the
+// window back: the gate latches CanaryActive False with BreachRolledBack, and
+// the window's latch restores steady exactly as for an expired window, with no
+// spec write (D47). ActPromote's dispatch does not act in this version: armed,
+// it runs at ActRollback, the level it contains (D42), and the promote verdict
+// is recorded and never dispatched.
 
 // gateGridInterval is the gate's interval: the O4 interval, watch-window.sh's
 // INTERVAL_SECONDS. It is compiled, not a setting.
@@ -52,14 +60,36 @@ const gateIntervalFloor = 4 * scrape.ReadTimeout
 const gateRingSize = 50
 
 // Event reasons the gate records, on transitions only (D42): the gate armed or
-// degraded, the window's first breach, and the first verdict of each kind.
+// degraded, the window's first breach, and the first verdict of each kind —
+// a rollback verdict acted on at an acting level, or recorded only.
 const (
 	eventReasonGateArmed         = "GateArmed"
 	eventReasonGateDegraded      = "GateDegraded"
 	eventReasonGateBreach        = "GateBreach"
+	eventReasonGateRolledBack    = "GateRolledBack"
 	eventReasonGateWouldRollBack = "GateWouldRollBack"
 	eventReasonGateWouldPromote  = "GateWouldPromote"
 )
+
+// gateLevels are the acting levels in the order of D42's lattice, each
+// containing the ones before it: the modes, as status.gate records the one in
+// effect.
+var gateLevels = []servingv1alpha1.GateMode{
+	servingv1alpha1.GateModeObserve, servingv1alpha1.GateModeActRollback, servingv1alpha1.GateModeActPromote,
+}
+
+// lowerLevel is the lower of two acting levels, a value outside the lattice
+// counting as Observe.
+func lowerLevel(a, b servingv1alpha1.GateMode) servingv1alpha1.GateMode {
+	rank := func(m servingv1alpha1.GateMode) int { return max(slices.Index(gateLevels, m), 0) }
+	return gateLevels[min(rank(a), rank(b))]
+}
+
+// rollsBack reports whether a window at level rolls back on a tripped line:
+// ActRollback, and ActPromote, which still acts on rollback breaches (D42).
+func rollsBack(level servingv1alpha1.GateMode) bool {
+	return level == servingv1alpha1.GateModeActRollback || level == servingv1alpha1.GateModeActPromote
+}
 
 // boundaryReader reads the window's two pods at a boundary. In the operator it
 // is a *scrape.Scraper, which SetupWithManager wires.
@@ -189,6 +219,9 @@ type gateStep struct {
 	// boundary just handled was missed and read nothing.
 	forget bool
 	events []gateEvent
+	// rollBack is the act: an interval this boundary recorded tripped a line
+	// at an acting level, and the window is to be rolled back (D47).
+	rollBack bool
 }
 
 // errNoScraper is a reconciler built without SetupWithManager meeting a gate.
@@ -196,19 +229,25 @@ var errNoScraper = errors.New("the gate has no boundary reader; SetupWithManager
 
 // observe runs the gate for one reconcile of sd, whose window is open or not,
 // at now, after setConditions has written CanaryActive: its
-// lastTransitionTime anchors the grid. With no spec.gate, or no open window,
-// it does nothing at all. Otherwise it reads only at a boundary: the first
-// boundary read on time starts the window's evidence, and each later one
-// records the interval that ends there. A boundary passed without a read on
-// time is missed, and the interval it ends is forfeited, as is the one it
-// starts, which has no baseline; so is the interval whose baseline an operator
-// restart lost. Between boundaries nothing is read and status.gate is left
-// exactly as it is.
+// lastTransitionTime anchors the grid. opened marks the reconcile that opened
+// the window, where its acting level is sampled. With no open window it does
+// nothing at all, and with no spec.gate nothing but lower the level of a
+// window whose gate was removed (disarm). Otherwise it reads only at a
+// boundary: the first boundary read on time starts the window's evidence, and
+// each later one records the interval that ends there, at the window's level,
+// and asks for the act if one tripped a line at an acting level. A boundary
+// passed without a read on time is missed, and the interval it ends is
+// forfeited, as is the one it starts, which has no baseline; so is the
+// interval whose baseline an operator restart lost. Between boundaries nothing
+// is read and status.gate is left exactly as it is.
 func (r *ServingDeploymentReconciler) observe(
-	ctx context.Context, sd *servingv1alpha1.ServingDeployment, open bool, now time.Time,
+	ctx context.Context, sd *servingv1alpha1.ServingDeployment, open, opened bool, now time.Time,
 ) (gateStep, error) {
-	if sd.Spec.Gate == nil || !open {
+	if !open {
 		return gateStep{forget: true}, nil
+	}
+	if sd.Spec.Gate == nil {
+		return gateStep{forget: true, events: r.disarm(sd)}, nil
 	}
 	if r.scraper == nil {
 		return gateStep{forget: true}, errNoScraper
@@ -235,7 +274,7 @@ func (r *ServingDeploymentReconciler) observe(
 			IntervalSeconds: seconds(g.interval),
 			NextBoundary:    k + 1,
 		}
-		step.events = armGate(sd, st, g, true)
+		step.events = armGate(sd, st, g, true, opened)
 		sd.Status.Gate = st
 		step.baseline = &gateBaseline{uid: sd.UID, windowStart: g.anchor, boundary: k, samples: b.Baseline}
 		logf.FromContext(ctx).Info("The gate read its first boundary", "boundary", k,
@@ -247,7 +286,8 @@ func (r *ServingDeploymentReconciler) observe(
 		return step, nil
 	}
 
-	step.events = armGate(sd, st, g, false)
+	step.events = armGate(sd, st, g, false, false)
+	level := st.Mode
 	kept, haveKept := r.baselines.get(gateKey(sd))
 	session := sessionOf(st)
 	for j := st.NextBoundary; j <= k; j++ {
@@ -272,15 +312,44 @@ func (r *ServingDeploymentReconciler) observe(
 		rec := session.Evaluate(iv)
 		var d gate.Decision
 		session, d = session.Fold(rec)
-		step.events = append(step.events, recordInterval(st, j-1, rec, d)...)
+		step.events = append(step.events, recordInterval(st, j-1, rec, d, level)...)
+		step.rollBack = step.rollBack || (d.Rollback != "" && rollsBack(level))
 		logf.FromContext(ctx).Info("The gate recorded an interval", "interval", j-1,
-			"verdict", rec.Verdict, "reasons", rec.Reasons)
+			"verdict", rec.Verdict, "reasons", rec.Reasons, "level", level)
 	}
 	st.NextBoundary = k + 1
 	storeSession(st, session)
 	step.next = g.boundary(k + 1)
 	step.forget = step.baseline == nil
+	if step.rollBack && st.RollbackVerdict.RolledBackAt == nil {
+		// The act's time, stamped as CanaryActive's False transition is.
+		st.RollbackVerdict.RolledBackAt = new(metav1.NewTime(now.Truncate(time.Second)))
+		logf.FromContext(ctx).Info("The gate tripped a line at an acting level; rolling the window back",
+			"interval", st.RollbackVerdict.Interval, "trip", st.RollbackVerdict.Trip, "level", level)
+	}
 	return step, nil
+}
+
+// disarm lowers the acting level of sd's open window to Observe when its
+// spec.gate is removed, a lower that takes effect at once (#119): the gate
+// stops reading, and its evidence stays, so a gate set again before the window
+// closes is a raise, which waits for the next window. It changes nothing for a
+// window the gate never ran in, or already ran at Observe, and returns the
+// Event of the lower.
+func (r *ServingDeploymentReconciler) disarm(sd *servingv1alpha1.ServingDeployment) []gateEvent {
+	st := sd.Status.Gate
+	active := meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionCanaryActive)
+	if active == nil || st == nil || !rollsBack(st.Mode) {
+		return nil
+	}
+	if !(grid{anchor: active.LastTransitionTime.Time, interval: r.gridInterval()}).owns(st) {
+		return nil
+	}
+	st.Mode = servingv1alpha1.GateModeObserve
+	return []gateEvent{{corev1.EventTypeWarning, eventReasonGateDegraded, fmt.Sprintf(
+		"spec.gate was removed from the open window: the gate stops at once and acts on nothing, status.gate "+
+			"keeps the window's evidence at %s, and a gate set again before the window closes runs as %s",
+		st.Mode, st.Mode)}}
 }
 
 // finishGate does what step held back, once the status recording it is
@@ -305,53 +374,101 @@ func gateKey(sd *servingv1alpha1.ServingDeployment) types.NamespacedName {
 
 // gateArming decides how the gate arms spec.gate.mode for the canary the spec
 // runs. Observe is always armed. An acting mode is armed only for the canary
-// tag it names (D42), and armed, it does not act yet in this version.
+// tag it names (D42); armed, ActRollback acts, and ActPromote, whose dispatch
+// does not act in this version, is not yet active.
 func gateArming(spec servingv1alpha1.ServingDeploymentSpec) servingv1alpha1.GateArming {
 	switch {
 	case spec.Gate.Mode == servingv1alpha1.GateModeObserve:
 		return servingv1alpha1.GateArmingArmed
 	case spec.Gate.ForCanaryImageTag != spec.CanaryImageTag:
 		return servingv1alpha1.GateArmingTagMismatch
-	default:
+	case spec.Gate.Mode == servingv1alpha1.GateModeActPromote:
 		return servingv1alpha1.GateArmingNotYetActive
+	default:
+		return servingv1alpha1.GateArmingArmed
 	}
 }
 
-// armGate writes the gate's mode and arming for sd's spec on st, and returns
-// the Event that says so when they are new to the window or have changed.
-// Whatever the arming, the gate runs as Observe in this version: the acting
-// modes' behavior lands with their own slices.
-func armGate(sd *servingv1alpha1.ServingDeployment, st *servingv1alpha1.GateStatus, g grid, fresh bool) []gateEvent {
-	mode, arming := servingv1alpha1.GateModeObserve, gateArming(sd.Spec)
-	if !fresh && st.Mode == mode && st.Arming == arming {
+// armedLevel is the acting level spec.gate asks for, as armed: a mismatched
+// tag degrades an acting mode to Observe (D42), and ActPromote, its dispatch
+// not active in this version, runs at ActRollback, the level it contains.
+func armedLevel(spec servingv1alpha1.ServingDeploymentSpec, arming servingv1alpha1.GateArming) servingv1alpha1.GateMode {
+	switch {
+	case arming == servingv1alpha1.GateArmingTagMismatch:
+		return servingv1alpha1.GateModeObserve
+	case spec.Gate.Mode == servingv1alpha1.GateModeActPromote:
+		return servingv1alpha1.GateModeActRollback
+	}
+	return spec.Gate.Mode
+}
+
+// gateDoes says what the gate does at level.
+func gateDoes(level servingv1alpha1.GateMode) string {
+	if rollsBack(level) {
+		return "records every interval in status.gate and rolls the window back on a tripped line"
+	}
+	return "records every interval in status.gate and acts on nothing"
+}
+
+// armGate writes on st the gate's arming for sd's spec and the window's acting
+// level, and returns the Event that says so when they are new to the window or
+// have changed. The level is the owner's ruling on #119: sampled when the
+// window opens — fresh evidence started on the reconcile that opened it, while
+// evidence started mid-window is for a window that opened with no gate, at
+// Observe — and at each later boundary the lower of the level in effect and
+// the one armed now, so a lower takes effect at once and a raise only from the
+// next window.
+func armGate(
+	sd *servingv1alpha1.ServingDeployment, st *servingv1alpha1.GateStatus, g grid, fresh, opened bool,
+) []gateEvent {
+	arming := gateArming(sd.Spec)
+	armed := armedLevel(sd.Spec, arming)
+	level := armed
+	switch {
+	case fresh && !opened:
+		level = servingv1alpha1.GateModeObserve
+	case !fresh:
+		level = lowerLevel(st.Mode, armed)
+	}
+	if !fresh && st.Mode == level && st.Arming == arming {
 		return nil
 	}
-	st.Mode, st.Arming = mode, arming
+	st.Mode, st.Arming = level, arming
 	requested := sd.Spec.Gate.Mode
-	switch arming {
-	case servingv1alpha1.GateArmingTagMismatch:
+	switch {
+	case arming == servingv1alpha1.GateArmingTagMismatch:
 		return []gateEvent{{corev1.EventTypeWarning, eventReasonGateDegraded, fmt.Sprintf(
-			"spec.gate.mode %s is armed for canary tag %q, not spec.canaryImageTag %s: the gate runs as %s, "+
-				"records every interval in status.gate and acts on nothing",
-			requested, sd.Spec.Gate.ForCanaryImageTag, sd.Spec.CanaryImageTag, mode)}}
-	case servingv1alpha1.GateArmingNotYetActive:
+			"spec.gate.mode %s is armed for canary tag %q, not spec.canaryImageTag %s: the gate runs as %s, %s",
+			requested, sd.Spec.Gate.ForCanaryImageTag, sd.Spec.CanaryImageTag, level, gateDoes(level))}}
+	case level != armed:
 		return []gateEvent{{corev1.EventTypeWarning, eventReasonGateDegraded, fmt.Sprintf(
-			"spec.gate.mode %s does not act in this version of the operator: the gate runs as %s for canary tag %s, "+
-				"records every interval in status.gate and acts on nothing",
-			requested, mode, sd.Spec.CanaryImageTag)}}
+			"spec.gate.mode %s is armed for canary tag %s from the next window: a window acts at the level "+
+				"sampled when it opened, so the gate runs this one as %s: it %s",
+			requested, sd.Spec.CanaryImageTag, level, gateDoes(level))}}
+	case arming == servingv1alpha1.GateArmingNotYetActive:
+		return []gateEvent{{corev1.EventTypeWarning, eventReasonGateDegraded, fmt.Sprintf(
+			"spec.gate.mode %s does not dispatch in this version of the operator: the gate runs as %s for canary "+
+				"tag %s, %s; the promote verdict is recorded and nothing is dispatched",
+			requested, level, sd.Spec.CanaryImageTag, gateDoes(level))}}
+	}
+	acts := "the gate acts on nothing"
+	if rollsBack(level) {
+		acts = "a tripped line rolls the window back"
 	}
 	return []gateEvent{{corev1.EventTypeNormal, eventReasonGateArmed, fmt.Sprintf(
-		"the gate is armed in %s for canary tag %s: every %s interval from %s is recorded in status.gate, "+
-			"and the gate acts on nothing",
-		mode, sd.Spec.CanaryImageTag, g.interval, g.anchor.UTC().Format(time.RFC3339))}}
+		"the gate is armed in %s for canary tag %s: every %s interval from %s is recorded in status.gate, and %s",
+		level, sd.Spec.CanaryImageTag, g.interval, g.anchor.UTC().Format(time.RFC3339), acts)}}
 }
 
-// recordInterval appends interval index's record to st's ring, counts it,
-// latches the first verdict of each kind, and returns the Events of the
-// transitions it made: the window's first breach, and each first verdict.
-func recordInterval(st *servingv1alpha1.GateStatus, index int32, rec gate.Record, d gate.Decision) []gateEvent {
+// recordInterval appends interval index's record, evaluated at level, to st's
+// ring, counts it, latches the first verdict of each kind, and returns the
+// Events of the transitions it made: the window's first breach, and each first
+// verdict — a rollback verdict at an acting level as the act.
+func recordInterval(
+	st *servingv1alpha1.GateStatus, index int32, rec gate.Record, d gate.Decision, level servingv1alpha1.GateMode,
+) []gateEvent {
 	var events []gateEvent
-	st.Records = append(st.Records, gateRecord(index, rec))
+	st.Records = append(st.Records, gateRecord(index, rec, level))
 	if n := len(st.Records); n > gateRingSize {
 		st.Records = slices.Clone(st.Records[n-gateRingSize:])
 	}
@@ -367,17 +484,25 @@ func recordInterval(st *servingv1alpha1.GateStatus, index int32, rec gate.Record
 		st.RollbackVerdict = &servingv1alpha1.GateRollbackVerdict{
 			Interval: index, At: at, Trip: servingv1alpha1.GateTrip(d.Rollback),
 		}
-		events = append(events, gateEvent{corev1.EventTypeWarning, eventReasonGateWouldRollBack, fmt.Sprintf(
-			"interval %d tripped %s: an acting gate would close the window here; in %s nothing is done, "+
-				"and the window stays open until its TTL or a close",
-			index, d.Rollback, st.Mode)})
+		if rollsBack(level) {
+			events = append(events, gateEvent{corev1.EventTypeWarning, eventReasonGateRolledBack, fmt.Sprintf(
+				"interval %d tripped %s: in %s the gate rolls the canary window back, CanaryActive False with %s; "+
+					"steady is restored with no spec write, and no window opens before the close-window patch "+
+					"clears the canary fields",
+				index, d.Rollback, level, servingv1alpha1.ReasonBreachRolledBack)})
+		} else {
+			events = append(events, gateEvent{corev1.EventTypeWarning, eventReasonGateWouldRollBack, fmt.Sprintf(
+				"interval %d tripped %s: an acting gate would close the window here; in %s nothing is done, "+
+					"and the window stays open until its TTL or a close",
+				index, d.Rollback, level)})
+		}
 	}
 	if d.Promote && st.PromoteVerdict == nil {
 		st.PromoteVerdict = &servingv1alpha1.GatePromoteVerdict{Interval: index, At: at}
 		events = append(events, gateEvent{corev1.EventTypeNormal, eventReasonGateWouldPromote, fmt.Sprintf(
 			"interval %d completed %d consecutive clean intervals, the promote verdict: in %s it is recorded "+
 				"and nothing is dispatched",
-			index, gate.PromoteAfter, st.Mode)})
+			index, gate.PromoteAfter, level)})
 	}
 	return events
 }
@@ -398,18 +523,19 @@ func countVerdict(t *servingv1alpha1.GateTotals, v gate.Verdict) {
 }
 
 // gateRecord is rec as status.gate's ring keeps it, interval index on the
-// grid. Its numbers are written as the decimals that read back as exactly the
-// numbers the engine decided on, and a p95 or ratio that is not a number is
-// left out.
-func gateRecord(index int32, rec gate.Record) servingv1alpha1.GateRecord {
+// grid, evaluated at level. Its numbers are written as the decimals that read
+// back as exactly the numbers the engine decided on, and a p95 or ratio that
+// is not a number is left out.
+func gateRecord(index int32, rec gate.Record, level servingv1alpha1.GateMode) servingv1alpha1.GateRecord {
 	out := servingv1alpha1.GateRecord{
-		Index:   index,
-		Start:   metav1.NewTime(rec.Start),
-		End:     metav1.NewTime(rec.End),
-		Stable:  podDelta(rec.Stable),
-		Canary:  podDelta(rec.Canary),
-		Ratio:   decimal(rec.Ratio),
-		Verdict: servingv1alpha1.GateVerdict(rec.Verdict),
+		Index:          index,
+		Start:          metav1.NewTime(rec.Start),
+		End:            metav1.NewTime(rec.End),
+		Stable:         podDelta(rec.Stable),
+		Canary:         podDelta(rec.Canary),
+		Ratio:          decimal(rec.Ratio),
+		Verdict:        servingv1alpha1.GateVerdict(rec.Verdict),
+		EffectiveLevel: level,
 	}
 	for _, reason := range rec.Reasons {
 		out.Reasons = append(out.Reasons, servingv1alpha1.GateReason(reason))
