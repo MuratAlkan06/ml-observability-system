@@ -118,6 +118,35 @@ stack runs, against a stream trimmed past a paused group.
    above 400MB) is that evidence. Until it has passed, no live window is
    opened. Keep `canaryReplicas` at 1: each further replica is another torch
    pod the rehearsal did not measure.
+5. **Under `ActPromote`, the canary tag is a commit on `main`** (D43). Item 3
+   asks it of every window. Here it is also the dispatch's precondition: the
+   operator dispatches `deploy.yml` with that tag, and the run's first step
+   refuses a SHA that is not an ancestor of `origin/main`, after the gate did
+   everything right. Check it the way the run does:
+
+   ```bash
+   git fetch origin main && git merge-base --is-ancestor <40-hex sha> origin/main && echo "ok: on main"
+   ```
+
+6. **Under `ActPromote`, the token's Secret exists at least 2 minutes before
+   the window opens** (D43). The gate samples the window's acting level when
+   it opens and never raises it before the next window, and the kubelet takes
+   typically 1–2 minutes to carry a new Secret into the operator's pod. A
+   Secret created later than that leaves the whole window at `ActRollback`:
+   the promote verdict is recorded, and a human actuates it. Once the window
+   is open, confirm the level it opened at: the `GateArmed` Event stamped at
+   the open, not one left from an earlier window, and the status beside it.
+
+   ```bash
+   kubectl -n mlobs get events --field-selector involvedObject.kind=ServingDeployment,reason=GateArmed \
+     -o jsonpath='{range .items[*]}{.lastTimestamp} {.message}{"\n"}{end}'   # "the gate is armed in ActPromote ..."
+   kubectl -n mlobs get servingdeployment api -o jsonpath='{.status.gate.mode} {.status.gate.arming}{"\n"}'  # ActPromote Armed
+   ```
+
+   A `GateDegraded` Event naming the absent token in its place, with
+   `ActRollback TokenAbsent` in the status, means the window runs at
+   `ActRollback` to its end. Act on its verdict by hand, or close it and open
+   the next one once the token reads.
 
 ## Opening a window (host)
 
@@ -161,6 +190,72 @@ that starts the pause, and its `lastTransitionTime` is the TTL's clock.
   deploy of that SHA: `IMAGE_TAG` is one tag for all five images, so the
   consumer, the drift jobs, the shadow scorer and the operator move to it
   with the api.
+- **The dispatch token, its rotation and its revocation** (`ActPromote`,
+  D43). Under `ActPromote` the operator sends that dispatch itself, with the
+  token in `secret/operator-dispatch-token`, key `token`, which
+  `deployment/operator` alone mounts. The token's scope is checked and
+  recorded on the slice issue when it is minted: Actions read/write on this
+  repository and nothing else, no Deployments permission, its expiry inside
+  the live-window season. Create the Secret on the host only, never through
+  CI or the repository, and at least 2 minutes before the window opens
+  ("Before opening a window", item 6). Rotate by replacing it in place, which
+  needs no operator restart, since the operator reads the file at every use
+  and the kubelet carries the change, typically in 1–2 minutes. Then revoke
+  the old token at GitHub: the replaced value can stay in the k3s datastore
+  until compaction.
+
+  ```bash
+  read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
+    --from-file=token=/dev/stdin; unset TOKEN                                                      # create
+  read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
+    --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl replace -f -; unset TOKEN       # rotate
+  ```
+
+  Beyond the one dispatch the operator makes, the token's Actions write lets
+  it:
+
+  - dispatch all three `workflow_dispatch` workflows (CI, Deploy, Operator):
+    CI and Operator on any branch, and Deploy with any SHA on `main`. While
+    the `ec2-deploy` reviewer is lifted for the promote demonstration (D43),
+    that is an unreviewed deploy of any earlier release, a downgrade;
+  - re-run past main-push runs, rebuilding GhcrPublish and ShadowPublish on
+    the same SHA, and re-run any workflow run with debug logging on;
+  - cancel an in-flight Deploy run, which stops the watching and not the
+    deploy, or force-cancel any run, past its `always()` steps;
+  - enable or disable workflows;
+  - delete workflow runs, their logs, artifacts and caches: the evidence the
+    slice issues cite;
+  - approve a fork pull request's workflow run. The repository is public and
+    asks approval of first-time contributors, so the token can let an
+    outsider's code run in CI;
+  - change the repository's OIDC subject template. The AWS roles each trust
+    exact subjects (`infra/ec2/iam.tf`, `infra/ec2/deploy.tf`), so a template
+    that changes the subject's format matches none of them: TerraformPlan,
+    ShadowPublish and Deploy cannot assume their roles, and the pipeline's
+    way back stays broken until the template is reset. It cannot forge a
+    match, because each part of a customized subject carries its key name.
+    Reset it, then read it back:
+
+    ```bash
+    gh api -X PUT repos/MuratAlkan06/ml-observability-system/actions/oidc/customization/sub \
+      -F use_default=true -F use_immutable_subject=false
+    gh api repos/MuratAlkan06/ml-observability-system/actions/oidc/customization/sub   # "use_default": true
+    ```
+
+  It cannot approve a deployment, its own dispatch included: that needs
+  Deployments write.
+
+  Who can read it, stated plainly. Anyone who can create a workload in
+  `mlobs` can mount the Secret into a pod of their own, with no grant on
+  Secrets at all. Today that is cluster-admin, which the host's kubeconfig
+  holds, and the operator's own ServiceAccount, whose Role creates and
+  patches Deployments. Root on the node reads the kubelet's copy and the k3s
+  datastore. The datastore keeps Secrets unencrypted at rest by default, and
+  a replaced or deleted value can stay in it until compaction. So revoke the
+  token at GitHub first, which ends it wherever a copy sits, then delete the
+  Secret: `kubectl -n mlobs delete secret operator-dispatch-token`.
+  Without it `ActPromote` degrades to verdict-only at the next boundary
+  (`status.gate.arming` reads `TokenAbsent`), and rollback still acts.
 
 Every close follows the same order: the canary's pods are gone before the
 shadow returns.

@@ -1521,3 +1521,21 @@ retention jobs, Alembic.
 > promote dispatch is not yet active, an armed `ActPromote` acts as `ActRollback` — D42's "a
 > mode that promotes but will not abort is not offered" admits no other reading. Ruled at
 > V1-S4 (issue #119); no frozen text edited.
+
+> **D43 clarification (2026-10-13, V1-S5):** two additions from the slice's independent
+> security review, no frozen text edited. First, D43's residual-capability enumeration was
+> incomplete: Actions read/write on this repository also permits deleting workflow runs, logs,
+> artifacts and caches (evidence erasure); changing the repository's OIDC subject-format
+> customization, which breaks the exact-match AWS trusts and with them the pipeline way back
+> until reset (it cannot forge a match — each subject part carries its key name); approving
+> fork-PR workflow runs; force-cancelling and debug re-running; and dispatching deploy.yml
+> with any main SHA — during a reviewer lift, an unreviewed downgrade. The runbook carries the
+> full list and the token's honest reader set (a workload-creating principal in `mlobs` mounts
+> the Secret without Secret RBAC; node root; the k3s datastore until compaction). Second, two
+> mechanics ratified at the review: the dispatch is tied to its evidence — the measured canary
+> pod must run the image the dispatched tag renders and must not be terminating, else the
+> verdict ends `CanaryPodStale`, one Event, a human actuates — and the status write carrying
+> the latch is optimistically locked, so a write landing between read and latch conflicts it
+> and nothing is sent. The token-identity mechanism is ruled separately on the slice issue:
+> the frozen bot-held fine-grained PAT cannot be minted for a personal repository. Ruled at
+> V1-S5 (issue #121); no frozen text edited.

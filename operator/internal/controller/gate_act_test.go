@@ -31,6 +31,7 @@ var (
 const (
 	levelObserve     = servingv1alpha1.GateModeObserve
 	levelActRollback = servingv1alpha1.GateModeActRollback
+	levelActPromote  = servingv1alpha1.GateModeActPromote
 )
 
 // levels is each record's effectiveLevel, oldest first.
@@ -331,24 +332,24 @@ var _ = Describe("The gate in ActRollback (D45, D47)", func() {
 		Expect(st.BreachRun).To(BeEquivalentTo(2))
 	})
 
-	It("runs ActPromote, armed for the canary's tag, as ActRollback in this version: NotYetActive, named in an "+
-		"Event, and a tripped line rolls the window back", func() {
+	It("degrades ActPromote with no dispatch token to ActRollback, the off-season posture: TokenAbsent, named in "+
+		"an Event, and a tripped line still rolls the window back (D42, D43)", func() {
 		h := newGateHarness(actPromote)
 		h.addCanary(at(windowStart.Add(-time.Minute)))
 		h.open()
-		Expect(h.gateEvents()).To(ConsistOf("Warning GateDegraded spec.gate.mode ActPromote does not dispatch in " +
-			"this version of the operator: the gate runs as ActRollback for canary tag " + canaryImageTag + ", " +
-			"records every interval in status.gate and rolls the window back on a tripped line; the promote verdict " +
-			"is recorded and nothing is dispatched"))
+		Expect(h.gateEvents()).To(ConsistOf("Warning GateDegraded spec.gate.mode ActPromote has no dispatch token, " +
+			"secret/operator-dispatch-token being absent or its token unreadable: the gate runs as ActRollback for " +
+			"canary tag " + canaryImageTag + ", records every interval in status.gate and rolls the window back on a " +
+			"tripped line; the promote verdict is recorded and a human actuates it"))
 		st := h.gate()
 		Expect(st.Mode).To(Equal(levelActRollback))
-		Expect(st.Arming).To(Equal(servingv1alpha1.GateArmingNotYetActive))
+		Expect(st.Arming).To(Equal(servingv1alpha1.GateArmingTokenAbsent))
 		h.clean(1)
 		h.next(0, perInterval, 0)
 		h.next(0, perInterval, 0)
 		st = expectRolledBack(h, "Line3CanaryLatency", 2, h.boundaryTime(3))
 		Expect(levels(st)).To(Equal(repeat(levelActRollback, 3)))
-		Expect(st.Arming).To(Equal(servingv1alpha1.GateArmingNotYetActive))
+		Expect(st.Arming).To(Equal(servingv1alpha1.GateArmingTokenAbsent))
 	})
 
 	DescribeTable("records the promote verdict and dispatches nothing: the window stays open and nothing moves (D43)",
@@ -368,13 +369,16 @@ var _ = Describe("The gate in ActRollback (D45, D47)", func() {
 			expectOpen(h)
 		},
 		Entry("ActRollback, where a human actuates it", actRollback),
-		Entry("ActPromote, armed, its dispatch not active in this version", actPromote),
+		Entry("ActPromote with no dispatch token, run as ActRollback (TokenAbsent)", actPromote),
 	)
 
 	DescribeTable("expires at 45 minutes in every mode, the TTL unchanged; and when a breach would trip line 3 at "+
 		"the very boundary the TTL ends the window at, expiry wins: nothing is read there and nothing acts (D47)",
-		func(spec *servingv1alpha1.GateSpec, level servingv1alpha1.GateMode) {
+		func(spec *servingv1alpha1.GateSpec, level servingv1alpha1.GateMode, withToken bool) {
 			h := newGateHarness(spec)
+			if withToken {
+				armDispatch(h)
+			}
 			h.addCanary(at(windowStart.Add(-time.Minute)))
 			h.open()
 			h.clean(43)
@@ -400,9 +404,11 @@ var _ = Describe("The gate in ActRollback (D45, D47)", func() {
 			Expect(events).NotTo(ContainElement(ContainSubstring("Gate")))
 			expectCanaryReplicas(h.ns, 0)
 		},
-		Entry("Observe", observe, levelObserve),
-		Entry("ActRollback", actRollback, levelActRollback),
-		Entry("ActPromote, armed: at ActRollback in this version", actPromote, levelActRollback),
+		Entry("Observe", observe, levelObserve, false),
+		Entry("ActRollback", actRollback, levelActRollback, false),
+		Entry("ActPromote, armed with its token: its verdict dispatched at boundary 11, and the TTL unmoved",
+			actPromote, levelActPromote, true),
+		Entry("ActPromote with no dispatch token, at ActRollback", actPromote, levelActRollback, false),
 	)
 })
 

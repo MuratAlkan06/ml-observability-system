@@ -49,10 +49,11 @@ type ServingDeploymentReconciler struct {
 	// Recorder must write core/v1 Events: those are what the operator's Role
 	// grants create and patch on (docs/PLAN.md D33).
 	Recorder record.EventRecorder
-	// Now is the reconciler's clock, read once per reconcile, and once more
-	// after a gate boundary's reads to schedule the next boundary from when
-	// they ended; nil means time.Now. Tests set it, so the 45-minute window
-	// TTL and the gate's grid are exercised without waiting on them.
+	// Now is the reconciler's clock, read once per reconcile, and again after
+	// a gate boundary's reads: to judge a promote dispatch's floor and to
+	// schedule the next boundary from when they ended; nil means time.Now.
+	// Tests set it, so the 45-minute window TTL and the gate's grid are
+	// exercised without waiting on them.
 	Now func() time.Time
 	// ImagePrefix is the registry and owner of the api images the operator
 	// writes, as <ImagePrefix>/mlobs-api:<tag>; empty means
@@ -70,6 +71,11 @@ type ServingDeploymentReconciler struct {
 	gateInterval time.Duration
 	// baselines are the gate's last boundary reads, in memory alone (D45).
 	baselines gateBaselines
+	// dispatcher makes ActPromote's GitHub calls (D43). SetupWithManager sets
+	// it to read the token from dispatchTokenPath and call githubAPI, unless
+	// the test-only knob, githubAPIEnv, moves the API; this package's tests
+	// set one of their own. nil has no token, so ActPromote is TokenAbsent.
+	dispatcher *dispatcher
 }
 
 // now reads the reconciler's clock.
@@ -132,9 +138,12 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // the Ready, CanaryActive and ShadowPaused conditions,
 // status.observedGeneration and status.gate. The status is written on failure
 // too, so a refused adoption shows on the resource and not only in the
-// operator's log. While a window is open the request is requeued for the
-// earlier of its deadline and the gate's next boundary. The spec is never
-// written (docs/PLAN.md D31, D32, D37 and their O2 rulings; D42, D47).
+// operator's log. A status write that latches a promote dispatch is locked to
+// the ServingDeployment as read, the dispatch is sent only after it lands, and
+// GitHub's answer is written after (D43). While a window is open the request
+// is requeued for the earlier of its deadline and the gate's next boundary.
+// The spec is never written (docs/PLAN.md D31, D32, D37 and their O2 rulings;
+// D42, D43, D47).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -188,12 +197,24 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	reconcileErr := joinErrors(stableErr, windowErr, gateErr)
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
-		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {
+		// A promote dispatch's latch rides this write; if it fails, nothing
+		// is sent. That write is optimistically locked to the object this
+		// reconcile read, a cached read: a ServingDeployment written since,
+		// its tag pair above all, conflicts it, and the retry decides again
+		// from what was written (#121, F4).
+		patch := client.MergeFrom(base)
+		if step.dispatch != nil {
+			patch = client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		}
+		if err := r.Status().Patch(ctx, sd, patch); err != nil {
 			return ctrl.Result{}, errors.Join(reconcileErr,
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
 	r.finishGate(sd, step)
+	if step.dispatch != nil {
+		reconcileErr = joinErrors(reconcileErr, r.sendDispatch(ctx, sd, step.dispatch))
+	}
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
@@ -350,9 +371,27 @@ func apiContainer(dep *appsv1.Deployment) *corev1.Container {
 // them at its boundaries, which the reconciler's requeue keeps. And the grid
 // interval is the O4 interval unless the test-only knob, gateIntervalEnv,
 // shortens it; a knob outside its bounds stops the operator here.
+//
+// It wires ActPromote's dispatch the same way: a dispatcher that reads its
+// token from the Secret's mounted file at each use, with no client to set,
+// so its GitHub calls go through dispatchClient and nothing of the manager's.
+// The API is GitHub's unless the test-only knob, githubAPIEnv, points it at
+// the e2e's stand-in; a malformed knob stops the operator here. An absent
+// Secret stops nothing: ActPromote runs as TokenAbsent.
 func (r *ServingDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.scraper == nil {
 		r.scraper = &scrape.Scraper{Reader: mgr.GetAPIReader()}
+	}
+	if r.dispatcher == nil {
+		api, err := githubAPIFrom(os.LookupEnv)
+		if err != nil {
+			return err
+		}
+		if api != githubAPI {
+			mgr.GetLogger().Info("The promote dispatch's GitHub API is moved by its test-only knob", "env", githubAPIEnv,
+				"api", api)
+		}
+		r.dispatcher = &dispatcher{baseURL: api, tokenPath: dispatchTokenPath}
 	}
 	if r.gateInterval == 0 {
 		interval, err := gateIntervalFrom(os.LookupEnv)

@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -108,15 +110,25 @@ func (s *scriptedReads) count() int {
 	return s.reads
 }
 
-// createAPIPod creates one of the window's api pods in ns and writes the
-// status a kubelet would report for it: Running, its api container running,
-// and Ready since readyAt, or not yet Ready if readyAt is nil. It has no pod
-// IP: its /metrics is scriptedReads'.
-func createAPIPod(ns, name string, lbls map[string]string, readyAt *time.Time) *corev1.Pod {
+// createAPIPod creates one of the window's api pods in ns, its api container
+// at image, and writes the status a kubelet would report for it: Running, its
+// api container running, and Ready since readyAt, or not yet Ready if readyAt
+// is nil. It has no pod IP: its /metrics is scriptedReads'. Its name is one
+// the Deployment controller gives, <deployment>-<pod-template-hash>-<suffix>,
+// and it is owned as that controller owns one: controlled by the ReplicaSet
+// the name's first two parts make, labelled with the hash (envtest runs
+// neither controller).
+func createAPIPod(ns, name string, lbls map[string]string, image string, readyAt *time.Time) *corev1.Pod {
+	replicaSet := name[:strings.LastIndex(name, "-")]
+	podLabels := maps.Clone(lbls)
+	podLabels[appsv1.DefaultDeploymentUniqueLabelKey] = replicaSet[strings.LastIndex(replicaSet, "-")+1:]
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: lbls},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Labels: podLabels,
+			OwnerReferences: []metav1.OwnerReference{replicaSetOwner(replicaSet)},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
-			Name: apiContainerName, Image: stableImage(validImageTag),
+			Name: apiContainerName, Image: image,
 		}}},
 	}
 	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
@@ -124,13 +136,22 @@ func createAPIPod(ns, name string, lbls map[string]string, readyAt *time.Time) *
 		Phase: corev1.PodRunning,
 		ContainerStatuses: []corev1.ContainerStatus{{
 			Name:  apiContainerName,
-			Image: stableImage(validImageTag),
+			Image: image,
 			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 		}},
 	}
 	setReady(&pod.Status, readyAt)
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 	return pod
+}
+
+// replicaSetOwner is the controller reference a ReplicaSet named name puts on
+// its pods. Its uid is arbitrary: nothing reads the ReplicaSet.
+func replicaSetOwner(name string) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: "apps/v1", Kind: "ReplicaSet", Name: name,
+		UID: "6c2e9f41-3b7a-4d58-a1f0-8e9d2c7b5a34", Controller: new(true),
+	}
 }
 
 func setReady(status *corev1.PodStatus, readyAt *time.Time) {
@@ -183,7 +204,8 @@ func newGateHarness(spec *servingv1alpha1.GateSpec) *gateHarness {
 	ns, sd, r, writes, clock := steadyStack()
 	h := &gateHarness{ns: ns, sd: sd, r: r, writes: writes, clock: clock, reads: newScriptedReads()}
 	r.scraper = h.reads
-	stable := createAPIPod(ns, "api-6f7c9d8b5-q2xkz", apiLabels(), at(windowStart.Add(-time.Hour)))
+	stable := createAPIPod(ns, "api-6f7c9d8b5-q2xkz", apiLabels(), stableImage(validImageTag),
+		at(windowStart.Add(-time.Hour)))
 	h.reads.stable = &podTraffic{pod: podIdentity(stable)}
 	if spec != nil {
 		setGate(sd, spec)
@@ -191,10 +213,10 @@ func newGateHarness(spec *servingv1alpha1.GateSpec) *gateHarness {
 	return h
 }
 
-// addCanary creates the canary pod, Ready since readyAt or not yet Ready, and
-// scripts its /metrics.
+// addCanary creates the canary pod at the window's canary image, Ready since
+// readyAt or not yet Ready, and scripts its /metrics.
 func (h *gateHarness) addCanary(readyAt *time.Time) *corev1.Pod {
-	pod := createAPIPod(h.ns, "api-canary-7b8d9c6f4-m4tnw", canaryLabels(), readyAt)
+	pod := createAPIPod(h.ns, "api-canary-7b8d9c6f4-m4tnw", canaryLabels(), stableImage(canaryImageTag), readyAt)
 	h.reads.mu.Lock()
 	defer h.reads.mu.Unlock()
 	h.reads.canary = &podTraffic{pod: podIdentity(pod)}
@@ -875,7 +897,8 @@ var _ = Describe("Shipping the gate", func() {
 		Expect(maxItems).To(BeNumerically("==", gateRingSize))
 	})
 
-	It("ships no manifest and no chart file that sets the gate's test-only knob", func() {
+	It("ships no manifest and no chart file that sets a test-only knob: the gate's grid, or the promote "+
+		"dispatch's GitHub API", func() {
 		chart := filepath.Join("..", "..", "..", "deploy", "helm", "mlobs-operator")
 		var files int
 		for _, root := range []string{filepath.Join(k3sDir, "manifests"), chart} {
@@ -886,6 +909,7 @@ var _ = Describe("Shipping the gate", func() {
 				data, err := os.ReadFile(path)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(data)).NotTo(ContainSubstring(gateIntervalEnv), path)
+				Expect(string(data)).NotTo(ContainSubstring(githubAPIEnv), path)
 				files++
 				return nil
 			})).To(Succeed())

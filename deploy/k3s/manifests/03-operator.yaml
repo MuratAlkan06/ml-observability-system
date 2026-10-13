@@ -13,6 +13,15 @@
 # Metrics bind to loopback with authn/authz off: nothing off the pod reads
 # them in v0, and serving them to the cluster would need the cluster-scoped
 # review grants D33 rules out.
+#
+# The promote dispatch's token (D43): secret/operator-dispatch-token, key
+# token, is created on the host only, never through CI or the repository, and
+# this Deployment alone mounts it. The mount is optional: with the Secret
+# absent the operator runs, and ActPromote degrades to verdict-only, the
+# off-season posture. A mount is not an API read, so the Role grants nothing
+# on Secrets. There is no subPath, so a rotated Secret reaches the file, which
+# the operator reads at each use. The file is mode 0440, owned by root and the
+# pod's fsGroup, the operator image's group (65532).
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,8 +44,15 @@ spec:
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: dispatch-token
+          secret:
+            secretName: operator-dispatch-token
+            optional: true
+            defaultMode: 0440
       containers:
         - name: manager
           image: IMAGE_PREFIX/mlobs-operator:IMAGE_TAG
@@ -56,6 +72,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          volumeMounts:
+            - name: dispatch-token
+              mountPath: /var/run/secrets/mlobs/dispatch
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz

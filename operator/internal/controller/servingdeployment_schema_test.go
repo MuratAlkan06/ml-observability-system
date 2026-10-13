@@ -116,7 +116,47 @@ var _ = Describe("ServingDeployment CRD schema", func() {
 			func(st *servingv1alpha1.GateStatus) { st.RollbackVerdict.Trip = "Line4WindowState" }, false),
 		Entry("an arming outside the vocabulary",
 			func(st *servingv1alpha1.GateStatus) { st.Arming = "Disarmed" }, false),
+		Entry("arming TokenAbsent, ActPromote with no dispatch token",
+			func(st *servingv1alpha1.GateStatus) { st.Arming = servingv1alpha1.GateArmingTokenAbsent }, true),
+		Entry("arming NotYetActive, retired with the interim lattice note (V1-S5)",
+			func(st *servingv1alpha1.GateStatus) { st.Arming = "NotYetActive" }, false),
 		Entry("a mode outside the enum", func(st *servingv1alpha1.GateStatus) { st.Mode = "Act" }, false),
+		Entry("a promote verdict's dispatch as the operator writes it, answered", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+		}, true),
+		Entry("a dispatch turned down, with its reason", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch = &servingv1alpha1.GateDispatch{
+				State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchBelowFloor,
+			}
+		}, true),
+		Entry("a dispatch turned down because the canary pod read is not the dispatched tag's (#121, F1)",
+			func(st *servingv1alpha1.GateStatus) {
+				st.PromoteVerdict = schemaPromoteVerdict()
+				st.PromoteVerdict.Dispatch = &servingv1alpha1.GateDispatch{
+					State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
+				}
+			}, true),
+		Entry("a dispatch state outside the vocabulary", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch.State = "Sent"
+		}, false),
+		Entry("a dispatch with no state", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch.State = ""
+		}, false),
+		Entry("a dispatch reason outside the vocabulary", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch.Reason = "Busy"
+		}, false),
+		Entry("a dispatched sha that is not 40-hex", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch.SHA = "latest"
+		}, false),
+		Entry("a status code outside HTTP's", func(st *servingv1alpha1.GateStatus) {
+			st.PromoteVerdict = schemaPromoteVerdict()
+			st.PromoteVerdict.Dispatch.StatusCode = 600
+		}, false),
 	)
 })
 
@@ -138,6 +178,15 @@ func schemaGateStatus() *servingv1alpha1.GateStatus {
 		RollbackVerdict: &servingv1alpha1.GateRollbackVerdict{Interval: 4, At: at, Trip: "Line3CanaryLatency"},
 		Records:         schemaRecords(1),
 	}
+}
+
+// schemaPromoteVerdict is a promote verdict whose dispatch GitHub accepted, in
+// the shape the operator writes it.
+func schemaPromoteVerdict() *servingv1alpha1.GatePromoteVerdict {
+	at := metav1.NewTime(windowStart.Add(11 * time.Minute))
+	return &servingv1alpha1.GatePromoteVerdict{Interval: 10, At: at, Dispatch: &servingv1alpha1.GateDispatch{
+		State: servingv1alpha1.GateDispatchDispatched, AttemptedAt: &at, SHA: canaryImageTag, StatusCode: 204,
+	}}
 }
 
 // schemaRecords is n records, each a latency breach.
