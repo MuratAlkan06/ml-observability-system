@@ -1539,3 +1539,19 @@ retention jobs, Alembic.
 > and nothing is sent. The token-identity mechanism is ruled separately on the slice issue:
 > the frozen bot-held fine-grained PAT cannot be minted for a personal repository. Ruled at
 > V1-S5 (issue #121); no frozen text edited.
+
+> **D43 clarification (2026-10-13, V1-S6):** the token identity D43 froze — a fine-grained PAT
+> held by a dedicated machine account — cannot be minted: GitHub's fine-grained tokens reach
+> only resources their selected owner holds, and a collaborator's token cannot target another
+> user's personal repository. Ruled on #121 (2026-10-13), superseding R3(b)'s machine account;
+> no second account will be created. The dispatch credential is a GitHub App owned by the
+> repository owner and installed on this one repository, granted Actions read/write and nothing
+> else — explicitly no environment or deployment-approval capability. One-hour installation
+> tokens are minted off-cluster per acting window, each mint response recorded on the window's
+> issue as the scope record; the cluster Secret holds the installation token, and its absence
+> is the `TokenAbsent` degrade. The App's private key is the long-lived secret: it never enters
+> the repository, CI, or the cluster, is kept where tokens are minted under the handling
+> discipline D43 set for the PAT, and is deleted with the App after the promote demonstration
+> and in any case before 2026-11-20 (D48). The operator is unchanged by this ruling: it mints
+> nothing and reads a ready-made bearer token. Ruled at V1-S6 (issue #121); no frozen text
+> edited.
