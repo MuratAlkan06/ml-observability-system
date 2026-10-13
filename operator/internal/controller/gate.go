@@ -32,9 +32,11 @@ import (
 // is recorded and nothing acts on it. At ActRollback a tripped line rolls the
 // window back: the gate latches CanaryActive False with BreachRolledBack, and
 // the window's latch restores steady exactly as for an expired window, with no
-// spec write (D47). ActPromote's dispatch does not act in this version: armed,
-// it runs at ActRollback, the level it contains (D42), and the promote verdict
-// is recorded and never dispatched.
+// spec write (D47); the promote verdict is recorded, and a human actuates it.
+// ActPromote still rolls back, and dispatches the promote verdict to the Deploy
+// workflow, latched before it is sent and sent at most once (promote.go; D43).
+// With no dispatch token to read it is armed TokenAbsent and runs at
+// ActRollback, the level it contains (D42).
 
 // gateGridInterval is the gate's interval: the O4 interval, watch-window.sh's
 // INTERVAL_SECONDS. It is compiled, not a setting.
@@ -61,7 +63,9 @@ const gateRingSize = 50
 
 // Event reasons the gate records, on transitions only (D42): the gate armed or
 // degraded, the window's first breach, and the first verdict of each kind —
-// a rollback verdict acted on at an acting level, or recorded only.
+// a rollback verdict acted on at an acting level, or recorded only; a promote
+// verdict recorded below ActPromote, where at ActPromote its dispatch's
+// Events announce it (promote.go).
 const (
 	eventReasonGateArmed         = "GateArmed"
 	eventReasonGateDegraded      = "GateDegraded"
@@ -222,6 +226,10 @@ type gateStep struct {
 	// rollBack is the act: an interval this boundary recorded tripped a line
 	// at an acting level, and the window is to be rolled back (D47).
 	rollBack bool
+	// dispatch is the promote dispatch this boundary latched, sent only once
+	// the status write carrying its latch has landed (D43); nil when there is
+	// none.
+	dispatch *dispatchPlan
 }
 
 // errNoScraper is a reconciler built without SetupWithManager meeting a gate.
@@ -238,8 +246,10 @@ var errNoScraper = errors.New("the gate has no boundary reader; SetupWithManager
 // and asks for the act if one tripped a line at an acting level. A boundary
 // passed without a read on time is missed, and the interval it ends is
 // forfeited, as is the one it starts, which has no baseline; so is the
-// interval whose baseline an operator restart lost. Between boundaries nothing
-// is read and status.gate is left exactly as it is.
+// interval whose baseline an operator restart lost. At ActPromote, a boundary
+// read with the promote verdict latched takes the verdict's dispatch its next
+// step (promote). Between boundaries nothing is read, nothing is dispatched,
+// and status.gate is left exactly as it is.
 func (r *ServingDeploymentReconciler) observe(
 	ctx context.Context, sd *servingv1alpha1.ServingDeployment, open, opened bool, now time.Time,
 ) (gateStep, error) {
@@ -274,7 +284,7 @@ func (r *ServingDeploymentReconciler) observe(
 			IntervalSeconds: seconds(g.interval),
 			NextBoundary:    k + 1,
 		}
-		step.events = armGate(sd, st, g, true, opened)
+		step.events = armGate(sd, st, g, true, opened, r.tokenPresent(sd))
 		sd.Status.Gate = st
 		step.baseline = &gateBaseline{uid: sd.UID, windowStart: g.anchor, boundary: k, samples: b.Baseline}
 		logf.FromContext(ctx).Info("The gate read its first boundary", "boundary", k,
@@ -286,15 +296,21 @@ func (r *ServingDeploymentReconciler) observe(
 		return step, nil
 	}
 
-	step.events = armGate(sd, st, g, false, false)
+	step.events = armGate(sd, st, g, false, false, r.tokenPresent(sd))
 	level := st.Mode
 	kept, haveKept := r.baselines.get(gateKey(sd))
 	session := sessionOf(st)
+	// b is this boundary's read, and last the decision on the interval it
+	// ended: what the promote arm acts on.
+	var (
+		b    scrape.Boundary
+		last gate.Decision
+	)
 	for j := st.NextBoundary; j <= k; j++ {
 		iv := gate.Interval{Start: g.boundary(j - 1), End: g.boundary(j)}
 		read := j == k && onTime
 		if read {
-			b := r.scraper.ReadBoundary(ctx, sd.Namespace)
+			b = r.scraper.ReadBoundary(ctx, sd.Namespace)
 			iv.Current, iv.CanaryReadyAt, iv.CanaryOOMKilled = b.Current, b.CanaryReadyAt, b.CanaryOOMKilled
 			step.baseline = &gateBaseline{uid: sd.UID, windowStart: g.anchor, boundary: j, samples: b.Baseline}
 			if b.StableErr != nil || b.CanaryErr != nil {
@@ -310,10 +326,9 @@ func (r *ServingDeploymentReconciler) observe(
 			iv.Interrupted = true
 		}
 		rec := session.Evaluate(iv)
-		var d gate.Decision
-		session, d = session.Fold(rec)
-		step.events = append(step.events, recordInterval(st, j-1, rec, d, level)...)
-		step.rollBack = step.rollBack || (d.Rollback != "" && rollsBack(level))
+		session, last = session.Fold(rec)
+		step.events = append(step.events, recordInterval(st, j-1, rec, last, level)...)
+		step.rollBack = step.rollBack || (last.Rollback != "" && rollsBack(level))
 		logf.FromContext(ctx).Info("The gate recorded an interval", "interval", j-1,
 			"verdict", rec.Verdict, "reasons", rec.Reasons, "level", level)
 	}
@@ -327,7 +342,17 @@ func (r *ServingDeploymentReconciler) observe(
 		logf.FromContext(ctx).Info("The gate tripped a line at an acting level; rolling the window back",
 			"interval", st.RollbackVerdict.Interval, "trip", st.RollbackVerdict.Trip, "level", level)
 	}
+	if level == servingv1alpha1.GateModeActPromote && st.PromoteVerdict != nil && onTime && !step.rollBack {
+		deadline := active.LastTransitionTime.Add(canaryWindowTTL)
+		step.events = append(step.events, r.promote(ctx, sd, st, b, last.Promote, deadline, &step)...)
+	}
 	return step, nil
+}
+
+// tokenPresent reports whether sd's gate asks for ActPromote and a dispatch
+// token can be read for it now. Only ActPromote reads the token's file.
+func (r *ServingDeploymentReconciler) tokenPresent(sd *servingv1alpha1.ServingDeployment) bool {
+	return sd.Spec.Gate.Mode == servingv1alpha1.GateModeActPromote && r.dispatcher != nil && r.dispatcher.tokenPresent()
 }
 
 // disarm lowers the acting level of sd's open window to Observe when its
@@ -373,30 +398,31 @@ func gateKey(sd *servingv1alpha1.ServingDeployment) types.NamespacedName {
 }
 
 // gateArming decides how the gate arms spec.gate.mode for the canary the spec
-// runs. Observe is always armed. An acting mode is armed only for the canary
-// tag it names (D42); armed, ActRollback acts, and ActPromote, whose dispatch
-// does not act in this version, is not yet active.
-func gateArming(spec servingv1alpha1.ServingDeploymentSpec) servingv1alpha1.GateArming {
+// runs, token being whether a dispatch token can be read. Observe is always
+// armed. An acting mode is armed only for the canary tag it names (D42);
+// armed, ActRollback acts, and so does ActPromote while it has its token,
+// without which it degrades to verdict-only, the off-season posture (D43).
+func gateArming(spec servingv1alpha1.ServingDeploymentSpec, token bool) servingv1alpha1.GateArming {
 	switch {
 	case spec.Gate.Mode == servingv1alpha1.GateModeObserve:
 		return servingv1alpha1.GateArmingArmed
 	case spec.Gate.ForCanaryImageTag != spec.CanaryImageTag:
 		return servingv1alpha1.GateArmingTagMismatch
-	case spec.Gate.Mode == servingv1alpha1.GateModeActPromote:
-		return servingv1alpha1.GateArmingNotYetActive
+	case spec.Gate.Mode == servingv1alpha1.GateModeActPromote && !token:
+		return servingv1alpha1.GateArmingTokenAbsent
 	default:
 		return servingv1alpha1.GateArmingArmed
 	}
 }
 
 // armedLevel is the acting level spec.gate asks for, as armed: a mismatched
-// tag degrades an acting mode to Observe (D42), and ActPromote, its dispatch
-// not active in this version, runs at ActRollback, the level it contains.
+// tag degrades an acting mode to Observe (D42), and ActPromote with no token
+// runs at ActRollback, the level it contains, so its rollback still acts.
 func armedLevel(spec servingv1alpha1.ServingDeploymentSpec, arming servingv1alpha1.GateArming) servingv1alpha1.GateMode {
-	switch {
-	case arming == servingv1alpha1.GateArmingTagMismatch:
+	switch arming {
+	case servingv1alpha1.GateArmingTagMismatch:
 		return servingv1alpha1.GateModeObserve
-	case spec.Gate.Mode == servingv1alpha1.GateModeActPromote:
+	case servingv1alpha1.GateArmingTokenAbsent:
 		return servingv1alpha1.GateModeActRollback
 	}
 	return spec.Gate.Mode
@@ -404,7 +430,11 @@ func armedLevel(spec servingv1alpha1.ServingDeploymentSpec, arming servingv1alph
 
 // gateDoes says what the gate does at level.
 func gateDoes(level servingv1alpha1.GateMode) string {
-	if rollsBack(level) {
+	switch level {
+	case servingv1alpha1.GateModeActPromote:
+		return "records every interval in status.gate, rolls the window back on a tripped line, and dispatches " +
+			"the promote verdict to " + deployWorkflow + " at most once"
+	case servingv1alpha1.GateModeActRollback:
 		return "records every interval in status.gate and rolls the window back on a tripped line"
 	}
 	return "records every interval in status.gate and acts on nothing"
@@ -417,11 +447,11 @@ func gateDoes(level servingv1alpha1.GateMode) string {
 // evidence started mid-window is for a window that opened with no gate, at
 // Observe — and at each later boundary the lower of the level in effect and
 // the one armed now, so a lower takes effect at once and a raise only from the
-// next window.
+// next window. token is whether a dispatch token can be read now.
 func armGate(
-	sd *servingv1alpha1.ServingDeployment, st *servingv1alpha1.GateStatus, g grid, fresh, opened bool,
+	sd *servingv1alpha1.ServingDeployment, st *servingv1alpha1.GateStatus, g grid, fresh, opened, token bool,
 ) []gateEvent {
-	arming := gateArming(sd.Spec)
+	arming := gateArming(sd.Spec, token)
 	armed := armedLevel(sd.Spec, arming)
 	level := armed
 	switch {
@@ -445,14 +475,18 @@ func armGate(
 			"spec.gate.mode %s is armed for canary tag %s from the next window: a window acts at the level "+
 				"sampled when it opened, so the gate runs this one as %s: it %s",
 			requested, sd.Spec.CanaryImageTag, level, gateDoes(level))}}
-	case arming == servingv1alpha1.GateArmingNotYetActive:
+	case arming == servingv1alpha1.GateArmingTokenAbsent:
 		return []gateEvent{{corev1.EventTypeWarning, eventReasonGateDegraded, fmt.Sprintf(
-			"spec.gate.mode %s does not dispatch in this version of the operator: the gate runs as %s for canary "+
-				"tag %s, %s; the promote verdict is recorded and nothing is dispatched",
-			requested, level, sd.Spec.CanaryImageTag, gateDoes(level))}}
+			"spec.gate.mode %s has no dispatch token, secret/%s being absent or its token unreadable: the gate "+
+				"runs as %s for canary tag %s, %s; the promote verdict is recorded and a human actuates it",
+			requested, dispatchTokenSecret, level, sd.Spec.CanaryImageTag, gateDoes(level))}}
 	}
 	acts := "the gate acts on nothing"
-	if rollsBack(level) {
+	switch level {
+	case servingv1alpha1.GateModeActPromote:
+		acts = "a tripped line rolls the window back, and the promote verdict is dispatched to " + deployWorkflow +
+			" at most once"
+	case servingv1alpha1.GateModeActRollback:
 		acts = "a tripped line rolls the window back"
 	}
 	return []gateEvent{{corev1.EventTypeNormal, eventReasonGateArmed, fmt.Sprintf(
@@ -488,8 +522,8 @@ func recordInterval(
 			events = append(events, gateEvent{corev1.EventTypeWarning, eventReasonGateRolledBack, fmt.Sprintf(
 				"interval %d tripped %s: in %s the gate rolls the canary window back, CanaryActive False with %s; "+
 					"steady is restored with no spec write, and no window opens before the close-window patch "+
-					"clears the canary fields",
-				index, d.Rollback, level, servingv1alpha1.ReasonBreachRolledBack)})
+					"clears the canary fields%s",
+				index, d.Rollback, level, servingv1alpha1.ReasonBreachRolledBack, sentDispatch(st))})
 		} else {
 			events = append(events, gateEvent{corev1.EventTypeWarning, eventReasonGateWouldRollBack, fmt.Sprintf(
 				"interval %d tripped %s: an acting gate would close the window here; in %s nothing is done, "+
@@ -499,12 +533,29 @@ func recordInterval(
 	}
 	if d.Promote && st.PromoteVerdict == nil {
 		st.PromoteVerdict = &servingv1alpha1.GatePromoteVerdict{Interval: index, At: at}
-		events = append(events, gateEvent{corev1.EventTypeNormal, eventReasonGateWouldPromote, fmt.Sprintf(
-			"interval %d completed %d consecutive clean intervals, the promote verdict: in %s it is recorded "+
-				"and nothing is dispatched",
-			index, gate.PromoteAfter, level)})
+		if level != servingv1alpha1.GateModeActPromote {
+			events = append(events, gateEvent{corev1.EventTypeNormal, eventReasonGateWouldPromote, fmt.Sprintf(
+				"interval %d completed %d consecutive clean intervals, the promote verdict: in %s it is recorded "+
+					"and nothing is dispatched",
+				index, gate.PromoteAfter, level)})
+		}
 	}
 	return events
+}
+
+// sentDispatch is what a rollback's Event adds when a promote dispatch was
+// latched before the trip: its run may be pending, and the reviewer's reject
+// is the human override (D47).
+func sentDispatch(st *servingv1alpha1.GateStatus) string {
+	if st.PromoteVerdict == nil || st.PromoteVerdict.Dispatch == nil || st.PromoteVerdict.Dispatch.AttemptedAt == nil {
+		return ""
+	}
+	switch d := st.PromoteVerdict.Dispatch; d.State {
+	case servingv1alpha1.GateDispatchAttempted, servingv1alpha1.GateDispatchDispatched:
+		return fmt.Sprintf("; the promote dispatch sent at %s may have a pending Deploy run: check Actions and "+
+			"reject it", stamp(d.AttemptedAt.Time))
+	}
+	return ""
 }
 
 func countVerdict(t *servingv1alpha1.GateTotals, v gate.Verdict) {

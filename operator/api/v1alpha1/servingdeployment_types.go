@@ -140,13 +140,13 @@ const (
 // GateSpec is the gate a ServingDeployment opts into (docs/PLAN.md D42).
 type GateSpec struct {
 	// mode is the gate's mode. ActRollback acts: a tripped line rolls the
-	// window back (D47). ActPromote's promote dispatch does not act in this
-	// version of the operator: armed, it runs as ActRollback, records the
-	// promote verdict without dispatching it, and says so in an Event, until
-	// the slice that gives it its dispatch lands. A window acts at the level
-	// sampled when it opens: a mode raised mid-window takes effect from the
-	// next window, and one lowered, or its tag mismatched, from the next
-	// boundary.
+	// window back (D47). ActPromote acts on the promote verdict as well: it
+	// dispatches the Deploy workflow for the canary's tag, at most once per
+	// verdict (D43), and still rolls back. With no dispatch token mounted it
+	// runs as ActRollback, the level it contains, and a human actuates the
+	// verdict. A window acts at the level sampled when it opens: a mode raised
+	// mid-window takes effect from the next window, and one lowered, or its
+	// tag mismatched, from the next boundary.
 	// +required
 	Mode GateMode `json:"mode"`
 
@@ -162,7 +162,7 @@ type GateSpec struct {
 
 // GateArming is how the gate armed the mode spec.gate asks for, as of the
 // last boundary it read.
-// +kubebuilder:validation:Enum=Armed;TagMismatch;NotYetActive
+// +kubebuilder:validation:Enum=Armed;TagMismatch;TokenAbsent
 type GateArming string
 
 const (
@@ -173,10 +173,12 @@ const (
 	// GateArmingTagMismatch: an acting mode whose forCanaryImageTag is not
 	// spec.canaryImageTag runs as Observe (D42).
 	GateArmingTagMismatch GateArming = "TagMismatch"
-	// GateArmingNotYetActive: ActPromote, armed for the canary's tag, whose
-	// promote dispatch this version of the operator does not act on yet: it
-	// runs as ActRollback, the level it contains.
-	GateArmingNotYetActive GateArming = "NotYetActive"
+	// GateArmingTokenAbsent: ActPromote, armed for the canary's tag, with no
+	// dispatch token to read: the Secret the operator Deployment mounts it
+	// from is absent, the off-season posture. It runs as ActRollback, the
+	// level it contains, and the promote verdict is recorded for a human to
+	// actuate (D43).
+	GateArmingTokenAbsent GateArming = "TokenAbsent"
 )
 
 // GateVerdict classifies one interval, in the decision engine's vocabulary
@@ -222,8 +224,8 @@ type GateStatus struct {
 
 	// arming says how the gate armed spec.gate.mode at its last boundary:
 	// Armed; TagMismatch, an acting mode armed for another canary tag, run as
-	// Observe; or NotYetActive, ActPromote, whose dispatch this version of the
-	// operator does not act on, run as ActRollback.
+	// Observe; or TokenAbsent, ActPromote with no dispatch token to read, run
+	// as ActRollback.
 	// +required
 	Arming GateArming `json:"arming"`
 
@@ -265,15 +267,16 @@ type GateStatus struct {
 
 	// rollbackVerdict is the first interval whose verdict tripped a line of
 	// the table. At Observe it is recorded and nothing acts on it: the window
-	// stays open until its TTL or a close. At ActRollback it is the trip that
-	// rolled the window back, CanaryActive False with BreachRolledBack (D47).
+	// stays open until its TTL or a close. At ActRollback and ActPromote it is
+	// the trip that rolled the window back, CanaryActive False with
+	// BreachRolledBack (D47).
 	// +optional
 	RollbackVerdict *GateRollbackVerdict `json:"rollbackVerdict,omitempty"`
 
 	// promoteVerdict is the first interval that completed 11 consecutive
-	// clean intervals (D44). It is recorded and nothing is dispatched: at
-	// ActRollback a human actuates it (D43), and ActPromote's dispatch does
-	// not act in this version of the operator.
+	// clean intervals (D44). Below ActPromote it is recorded and a human
+	// actuates it (D43); at ActPromote its dispatch says what the gate did
+	// with it.
 	// +optional
 	PromoteVerdict *GatePromoteVerdict `json:"promoteVerdict,omitempty"`
 
@@ -344,6 +347,94 @@ type GatePromoteVerdict struct {
 	// at is the boundary that interval ends at.
 	// +required
 	At metav1.Time `json:"at"`
+	// dispatch is what the gate did with this verdict at ActPromote (D43,
+	// D47), absent below it.
+	// +optional
+	Dispatch *GateDispatch `json:"dispatch,omitempty"`
+}
+
+// GateDispatchState is how far the gate took a promote verdict's dispatch
+// (docs/PLAN.md D43, D47).
+// +kubebuilder:validation:Enum=Deferred;NotDispatched;Attempted;Dispatched;Failed
+type GateDispatchState string
+
+const (
+	// GateDispatchDeferred: a Deploy run was queued, waiting, pending,
+	// requested or in progress, and nothing was sent, so as neither to evict
+	// a pending run from deploy.yml's concurrency group nor to queue behind
+	// one. The gate checks again at each later boundary while the window runs
+	// at ActPromote, and dispatches at the first that finds no such run, its
+	// clean run whole and 15 minutes of the TTL left.
+	GateDispatchDeferred GateDispatchState = "Deferred"
+	// GateDispatchNotDispatched: the gate does not dispatch this verdict, for
+	// the reason recorded. The verdict stays recorded and a human actuates it.
+	GateDispatchNotDispatched GateDispatchState = "NotDispatched"
+	// GateDispatchAttempted: the latch, written before the dispatch is sent.
+	// A verdict left here — the operator stopped between the latch and
+	// GitHub's answer — is never dispatched again: whether a run exists is
+	// the human's to read in Actions, and a human actuates.
+	GateDispatchAttempted GateDispatchState = "Attempted"
+	// GateDispatchDispatched: GitHub accepted the dispatch. Its answer names
+	// no run, so the run's URL is recorded by hand on the slice issue.
+	GateDispatchDispatched GateDispatchState = "Dispatched"
+	// GateDispatchFailed: GitHub refused the dispatch or did not answer. It is
+	// not retried; a human actuates the verdict.
+	GateDispatchFailed GateDispatchState = "Failed"
+)
+
+// GateDispatchReason says why a promote verdict was deferred or not
+// dispatched.
+// +kubebuilder:validation:Enum=RunPending;BelowFloor;TagInvalid;OwnerChainUnverified;TokenAbsent;RunsUnreadable
+type GateDispatchReason string
+
+const (
+	// GateDispatchRunPending: a Deploy run was queued, waiting, pending,
+	// requested or in progress (Deferred).
+	GateDispatchRunPending GateDispatchReason = "RunPending"
+	// GateDispatchBelowFloor: less than 15 minutes of the window's TTL
+	// remained, the dispatch floor (D47).
+	GateDispatchBelowFloor GateDispatchReason = "BelowFloor"
+	// GateDispatchTagInvalid: spec.canaryImageTag is not a 40-character
+	// lowercase hex commit SHA.
+	GateDispatchTagInvalid GateDispatchReason = "TagInvalid"
+	// GateDispatchOwnerChainUnverified: a pod the gate read is not shown to
+	// be deployment/api's or deployment/api-canary's.
+	GateDispatchOwnerChainUnverified GateDispatchReason = "OwnerChainUnverified"
+	// GateDispatchTokenAbsent: the dispatch token could not be read when the
+	// dispatch was due.
+	GateDispatchTokenAbsent GateDispatchReason = "TokenAbsent"
+	// GateDispatchRunsUnreadable: the Deploy runs could not be listed, so a
+	// queued human deploy could not be ruled out.
+	GateDispatchRunsUnreadable GateDispatchReason = "RunsUnreadable"
+)
+
+// GateDispatch is what the gate did with a promote verdict at ActPromote: at
+// most one workflow_dispatch of deploy.yml on main, whose sha input is the
+// canary's tag (D43).
+type GateDispatch struct {
+	// state is how far the dispatch went.
+	// +required
+	State GateDispatchState `json:"state"`
+	// reason says why a Deferred or NotDispatched verdict was not
+	// dispatched.
+	// +optional
+	Reason GateDispatchReason `json:"reason,omitempty"`
+	// attemptedAt is the latch's time, to the second. The status write that
+	// carries it lands before the dispatch is sent, and nothing sends a
+	// latched verdict again.
+	// +optional
+	AttemptedAt *metav1.Time `json:"attemptedAt,omitempty"`
+	// sha is the dispatch's sha input: spec.canaryImageTag, as validated at
+	// the attempt.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	SHA string `json:"sha,omitempty"`
+	// statusCode is the HTTP status GitHub answered the dispatch with,
+	// absent when no answer came.
+	// +optional
+	// +kubebuilder:validation:Minimum=100
+	// +kubebuilder:validation:Maximum=599
+	StatusCode int32 `json:"statusCode,omitempty"`
 }
 
 // GateRecord is one interval's evidence and verdict (D42).

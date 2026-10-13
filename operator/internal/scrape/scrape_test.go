@@ -338,6 +338,36 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 		Expect(b.CanaryOOMKilled).To(BeFalse())
 	})
 
+	It("carries the pod each of Current's reads selected, as the list returned it, owner references and labels "+
+		"included, for the controller's owner-chain check (#108, N1): the selected pod even when its /metrics "+
+		"read failed, and none when no one pod was Running", func() {
+		stable := createPod(ns, "api-6f7c9d8b5-q2xkz", stableLabels, stableIP)
+		canary := createPod(ns, "api-canary-7b8d9c6f4-m4tnw", canaryLabels, canaryIP)
+		owner := metav1.OwnerReference{
+			APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "api-canary-7b8d9c6f4",
+			UID: "5b0c2f9e-7d3a-4e61-8f2b-1c9d4a6e8b70", Controller: new(true),
+		}
+		canary.OwnerReferences = []metav1.OwnerReference{owner}
+		Expect(k8sClient.Update(ctx, canary)).To(Succeed())
+		st.answer(stableIP, servePage(predictPage(100)))
+		st.answer(canaryIP, serveStatus(http.StatusInternalServerError))
+
+		b := s.ReadBoundary(ctx, ns)
+		Expect(b.Current.Stable).NotTo(BeNil())
+		Expect(b.StablePod).To(HaveField("UID", stable.UID))
+		Expect(b.StablePod.Labels).To(Equal(stableLabels))
+		Expect(b.Current.Canary).To(BeNil(), "the canary's /metrics read failed")
+		Expect(b.CanaryPod).To(HaveField("UID", canary.UID), "and the pod it selected is carried all the same")
+		Expect(b.CanaryPod.OwnerReferences).To(Equal([]metav1.OwnerReference{owner}))
+		Expect(b.CanaryPod.Labels).To(HaveKeyWithValue(hashLabel, "7b8d9c6f4"))
+
+		By("a second Running canary pod: no one pod is selected, and none is carried")
+		createPod(ns, "api-canary-7b8d9c6f4-h2k8p", canaryLabels, otherIP)
+		b = s.ReadBoundary(ctx, ns)
+		Expect(b.CanaryPod).To(BeNil())
+		Expect(b.StablePod).To(HaveField("UID", stable.UID))
+	})
+
 	It("holds its selectors, port and read bound to watch-window.sh's own", func() {
 		data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "k3s", "watch-window.sh"))
 		Expect(err).NotTo(HaveOccurred())
@@ -443,7 +473,7 @@ var _ = Describe("Reading the window's two pods at a boundary", func() {
 		st.answer(canaryIP, hang(abandoned))
 
 		start := time.Now()
-		sample, pods, err := s.read(spec, ns, RoleCanary)
+		sample, _, pods, err := s.read(spec, ns, RoleCanary)
 		elapsed := time.Since(start)
 		Expect(sample).To(BeNil())
 		Expect(err).To(MatchError(context.DeadlineExceeded))

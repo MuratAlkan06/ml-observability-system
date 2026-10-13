@@ -118,6 +118,15 @@ stack runs, against a stream trimmed past a paused group.
    above 400MB) is that evidence. Until it has passed, no live window is
    opened. Keep `canaryReplicas` at 1: each further replica is another torch
    pod the rehearsal did not measure.
+5. **Under `ActPromote`, the canary tag is a commit on `main`** (D43). Item 3
+   asks it of every window. Here it is also the dispatch's precondition: the
+   operator dispatches `deploy.yml` with that tag, and the run's first step
+   refuses a SHA that is not an ancestor of `origin/main`, after the gate did
+   everything right. Check it the way the run does:
+
+   ```bash
+   git fetch origin main && git merge-base --is-ancestor <40-hex sha> origin/main && echo "ok: on main"
+   ```
 
 ## Opening a window (host)
 
@@ -161,6 +170,34 @@ that starts the pause, and its `lastTransitionTime` is the TTL's clock.
   deploy of that SHA: `IMAGE_TAG` is one tag for all five images, so the
   consumer, the drift jobs, the shadow scorer and the operator move to it
   with the api.
+- **The dispatch token, its rotation and its revocation** (`ActPromote`,
+  D43). Under `ActPromote` the operator sends that dispatch itself, with the
+  token in `secret/operator-dispatch-token`, key `token`, which
+  `deployment/operator` alone mounts. The token's scope is checked and
+  recorded on the slice issue when it is minted: Actions read/write on this
+  repository and nothing else, no Deployments permission, its expiry inside
+  the live-window season. Create the Secret on the host only, never through
+  CI or the repository; rotate by replacing it in place, which needs no
+  operator restart, since the operator reads the file at every use and the
+  kubelet carries the change within about a minute:
+
+  ```bash
+  read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
+    --from-file=token=/dev/stdin; unset TOKEN                                                      # create
+  read -rs TOKEN && printf '%s' "$TOKEN" | kubectl -n mlobs create secret generic operator-dispatch-token \
+    --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl replace -f -; unset TOKEN       # rotate
+  ```
+
+  Beyond the one dispatch the operator makes, the token can dispatch all
+  three `workflow_dispatch` workflows (CI, Deploy, Operator); re-run past
+  main-push runs, rebuilding GhcrPublish and ShadowPublish on the same SHA;
+  cancel an in-flight Deploy run, which stops the watching and not the deploy;
+  and enable or disable workflows. It cannot approve a deployment, its own
+  dispatch included. k3s keeps Secrets unencrypted at rest by default. So
+  revoke it at GitHub first, which ends it wherever a copy sits, then delete
+  the Secret: `kubectl -n mlobs delete secret operator-dispatch-token`.
+  Without it `ActPromote` degrades to verdict-only at the next boundary
+  (`status.gate.arming` reads `TokenAbsent`), and rollback still acts.
 
 Every close follows the same order: the canary's pods are gone before the
 shadow returns.

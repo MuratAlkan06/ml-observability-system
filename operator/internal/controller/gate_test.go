@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -111,10 +113,19 @@ func (s *scriptedReads) count() int {
 // createAPIPod creates one of the window's api pods in ns and writes the
 // status a kubelet would report for it: Running, its api container running,
 // and Ready since readyAt, or not yet Ready if readyAt is nil. It has no pod
-// IP: its /metrics is scriptedReads'.
+// IP: its /metrics is scriptedReads'. Its name is one the Deployment
+// controller gives, <deployment>-<pod-template-hash>-<suffix>, and it is owned
+// as that controller owns one: controlled by the ReplicaSet the name's first
+// two parts make, labelled with the hash (envtest runs neither controller).
 func createAPIPod(ns, name string, lbls map[string]string, readyAt *time.Time) *corev1.Pod {
+	replicaSet := name[:strings.LastIndex(name, "-")]
+	podLabels := maps.Clone(lbls)
+	podLabels[appsv1.DefaultDeploymentUniqueLabelKey] = replicaSet[strings.LastIndex(replicaSet, "-")+1:]
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: lbls},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Labels: podLabels,
+			OwnerReferences: []metav1.OwnerReference{replicaSetOwner(replicaSet)},
+		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name: apiContainerName, Image: stableImage(validImageTag),
 		}}},
@@ -131,6 +142,15 @@ func createAPIPod(ns, name string, lbls map[string]string, readyAt *time.Time) *
 	setReady(&pod.Status, readyAt)
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 	return pod
+}
+
+// replicaSetOwner is the controller reference a ReplicaSet named name puts on
+// its pods. Its uid is arbitrary: nothing reads the ReplicaSet.
+func replicaSetOwner(name string) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: "apps/v1", Kind: "ReplicaSet", Name: name,
+		UID: "6c2e9f41-3b7a-4d58-a1f0-8e9d2c7b5a34", Controller: new(true),
+	}
 }
 
 func setReady(status *corev1.PodStatus, readyAt *time.Time) {
@@ -875,7 +895,8 @@ var _ = Describe("Shipping the gate", func() {
 		Expect(maxItems).To(BeNumerically("==", gateRingSize))
 	})
 
-	It("ships no manifest and no chart file that sets the gate's test-only knob", func() {
+	It("ships no manifest and no chart file that sets a test-only knob: the gate's grid, or the promote "+
+		"dispatch's GitHub API", func() {
 		chart := filepath.Join("..", "..", "..", "deploy", "helm", "mlobs-operator")
 		var files int
 		for _, root := range []string{filepath.Join(k3sDir, "manifests"), chart} {
@@ -886,6 +907,7 @@ var _ = Describe("Shipping the gate", func() {
 				data, err := os.ReadFile(path)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(data)).NotTo(ContainSubstring(gateIntervalEnv), path)
+				Expect(string(data)).NotTo(ContainSubstring(githubAPIEnv), path)
 				files++
 				return nil
 			})).To(Succeed())

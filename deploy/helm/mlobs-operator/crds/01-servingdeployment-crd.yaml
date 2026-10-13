@@ -104,13 +104,13 @@ spec:
                   mode:
                     description: |-
                       mode is the gate's mode. ActRollback acts: a tripped line rolls the
-                      window back (D47). ActPromote's promote dispatch does not act in this
-                      version of the operator: armed, it runs as ActRollback, records the
-                      promote verdict without dispatching it, and says so in an Event, until
-                      the slice that gives it its dispatch lands. A window acts at the level
-                      sampled when it opens: a mode raised mid-window takes effect from the
-                      next window, and one lowered, or its tag mismatched, from the next
-                      boundary.
+                      window back (D47). ActPromote acts on the promote verdict as well: it
+                      dispatches the Deploy workflow for the canary's tag, at most once per
+                      verdict (D43), and still rolls back. With no dispatch token mounted it
+                      runs as ActRollback, the level it contains, and a human actuates the
+                      verdict. A window acts at the level sampled when it opens: a mode raised
+                      mid-window takes effect from the next window, and one lowered, or its
+                      tag mismatched, from the next boundary.
                     enum:
                     - Observe
                     - ActRollback
@@ -204,12 +204,12 @@ spec:
                     description: |-
                       arming says how the gate armed spec.gate.mode at its last boundary:
                       Armed; TagMismatch, an acting mode armed for another canary tag, run as
-                      Observe; or NotYetActive, ActPromote, whose dispatch this version of the
-                      operator does not act on, run as ActRollback.
+                      Observe; or TokenAbsent, ActPromote with no dispatch token to read, run
+                      as ActRollback.
                     enum:
                     - Armed
                     - TagMismatch
-                    - NotYetActive
+                    - TokenAbsent
                     type: string
                   breachRun:
                     description: |-
@@ -282,14 +282,64 @@ spec:
                   promoteVerdict:
                     description: |-
                       promoteVerdict is the first interval that completed 11 consecutive
-                      clean intervals (D44). It is recorded and nothing is dispatched: at
-                      ActRollback a human actuates it (D43), and ActPromote's dispatch does
-                      not act in this version of the operator.
+                      clean intervals (D44). Below ActPromote it is recorded and a human
+                      actuates it (D43); at ActPromote its dispatch says what the gate did
+                      with it.
                     properties:
                       at:
                         description: at is the boundary that interval ends at.
                         format: date-time
                         type: string
+                      dispatch:
+                        description: |-
+                          dispatch is what the gate did with this verdict at ActPromote (D43,
+                          D47), absent below it.
+                        properties:
+                          attemptedAt:
+                            description: |-
+                              attemptedAt is the latch's time, to the second. The status write that
+                              carries it lands before the dispatch is sent, and nothing sends a
+                              latched verdict again.
+                            format: date-time
+                            type: string
+                          reason:
+                            description: |-
+                              reason says why a Deferred or NotDispatched verdict was not
+                              dispatched.
+                            enum:
+                            - RunPending
+                            - BelowFloor
+                            - TagInvalid
+                            - OwnerChainUnverified
+                            - TokenAbsent
+                            - RunsUnreadable
+                            type: string
+                          sha:
+                            description: |-
+                              sha is the dispatch's sha input: spec.canaryImageTag, as validated at
+                              the attempt.
+                            pattern: ^[0-9a-f]{40}$
+                            type: string
+                          state:
+                            description: state is how far the dispatch went.
+                            enum:
+                            - Deferred
+                            - NotDispatched
+                            - Attempted
+                            - Dispatched
+                            - Failed
+                            type: string
+                          statusCode:
+                            description: |-
+                              statusCode is the HTTP status GitHub answered the dispatch with,
+                              absent when no answer came.
+                            format: int32
+                            maximum: 599
+                            minimum: 100
+                            type: integer
+                        required:
+                        - state
+                        type: object
                       interval:
                         description: interval is the index of that interval.
                         format: int32
@@ -437,8 +487,9 @@ spec:
                     description: |-
                       rollbackVerdict is the first interval whose verdict tripped a line of
                       the table. At Observe it is recorded and nothing acts on it: the window
-                      stays open until its TTL or a close. At ActRollback it is the trip that
-                      rolled the window back, CanaryActive False with BreachRolledBack (D47).
+                      stays open until its TTL or a close. At ActRollback and ActPromote it is
+                      the trip that rolled the window back, CanaryActive False with
+                      BreachRolledBack (D47).
                     properties:
                       at:
                         description: at is the boundary that interval ends at.

@@ -156,6 +156,13 @@ type Boundary struct {
 	// did not: for the operator's log. The verdict reads only the nil Sample.
 	StableErr error
 	CanaryErr error
+	// StablePod and CanaryPod are the pods Current's reads selected, as the
+	// list returned them, owner references and labels included, nil where no
+	// one Running pod was. Nothing here judges them: the controller checks
+	// their owner chain before a promote acts on what they reported (#108,
+	// N1).
+	StablePod *corev1.Pod
+	CanaryPod *corev1.Pod
 }
 
 // ReadBoundary reads the window's two pods in namespace at one boundary, the
@@ -164,18 +171,18 @@ type Boundary struct {
 // ReadBoundary always returns: a read that fails or times out is a nil Sample.
 func (s *Scraper) ReadBoundary(ctx context.Context, namespace string) Boundary {
 	var b Boundary
-	b.Current.Stable, _, b.StableErr = s.read(ctx, namespace, RoleStable)
+	b.Current.Stable, b.StablePod, _, b.StableErr = s.read(ctx, namespace, RoleStable)
 	var canaryPods []corev1.Pod
-	b.Current.Canary, canaryPods, b.CanaryErr = s.read(ctx, namespace, RoleCanary)
+	b.Current.Canary, b.CanaryPod, canaryPods, b.CanaryErr = s.read(ctx, namespace, RoleCanary)
 	b.CanaryReadyAt = latestReady(canaryPods)
 	b.CanaryOOMKilled = oomKilled(canaryPods)
 
 	b.Baseline = b.Current
 	if b.Baseline.Stable == nil {
-		b.Baseline.Stable, _, _ = s.read(ctx, namespace, RoleStable)
+		b.Baseline.Stable, _, _, _ = s.read(ctx, namespace, RoleStable)
 	}
 	if b.Baseline.Canary == nil {
-		b.Baseline.Canary, _, _ = s.read(ctx, namespace, RoleCanary)
+		b.Baseline.Canary, _, _, _ = s.read(ctx, namespace, RoleCanary)
 	}
 	return b
 }
@@ -183,19 +190,22 @@ func (s *Scraper) ReadBoundary(ctx context.Context, namespace string) Boundary {
 // read is watch-window.sh's pod_snapshot for role, under one ReadTimeout:
 // the role's pods listed in namespace, and the /metrics of the one Running
 // pod among them read and parsed. It returns the sample, nil when the read
-// failed, and the pods the list returned, nil when it failed.
-func (s *Scraper) read(ctx context.Context, namespace string, role Role) (*gate.Sample, []corev1.Pod, error) {
+// failed; that one Running pod, nil when there was not exactly one; and the
+// pods the list returned, nil when it failed.
+func (s *Scraper) read(
+	ctx context.Context, namespace string, role Role,
+) (*gate.Sample, *corev1.Pod, []corev1.Pod, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.readTimeout())
 	defer cancel()
 
 	selector, err := labels.Parse(selectors[role])
 	if err != nil {
-		return nil, nil, fmt.Errorf("the %s selector: %w", role, err)
+		return nil, nil, nil, fmt.Errorf("the %s selector: %w", role, err)
 	}
 	list := &corev1.PodList{}
 	if err := s.Reader.List(ctx, list, client.InNamespace(namespace),
 		client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		return nil, nil, fmt.Errorf("the %s pod list is unreadable: %w", role, err)
+		return nil, nil, nil, fmt.Errorf("the %s pod list is unreadable: %w", role, err)
 	}
 	pods := list.Items
 
@@ -209,15 +219,15 @@ func (s *Scraper) read(ctx context.Context, namespace string, role Role) (*gate.
 		}
 	}
 	if len(running) != 1 {
-		return nil, pods, fmt.Errorf("%d Running %s pods, not 1", len(running), role)
+		return nil, nil, pods, fmt.Errorf("%d Running %s pods, not 1", len(running), role)
 	}
 	pod := running[0]
 	sample, err := s.metrics(ctx, pod)
 	if err != nil {
-		return nil, pods, fmt.Errorf("%s pod/%s /metrics unreadable: %w", role, pod.Name, err)
+		return nil, pod, pods, fmt.Errorf("%s pod/%s /metrics unreadable: %w", role, pod.Name, err)
 	}
 	sample.Pod = gate.Pod{Name: pod.Name, UID: string(pod.UID)}
-	return &sample, pods, nil
+	return &sample, pod, pods, nil
 }
 
 // metrics GETs pod's /metrics at its pod IP on MetricsPort and parses it. A

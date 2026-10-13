@@ -11,12 +11,40 @@
 # second, is a clean pod. While /www/hang exists, /metrics is a FIFO nothing
 # writes: a read of it never answers, while /health still does. The shell
 # traps TERM so a pod goes as soon as it is told to, which the pause and
-# resume steps of a canary window wait on. Built from stdin, with no context:
+# resume steps of a canary window wait on.
+#
+# The same image is the e2e's stand-in for GitHub's REST API (D43), through
+# httpd's CGI: /cgi-bin/github answers the two calls the operator's promote
+# dispatch makes, under the path the test-only knob MLOBS_E2E_GITHUB_API_URL
+# points it at. A Deploy runs list is answered with the count /www/github-runs
+# holds, 0 unless operator/hack/e2e.sh writes another, for every status; a
+# dispatch of deploy.yml with 204, GitHub's answer under the API version the
+# operator pins; anything else with 404. Every request is appended to
+# /tmp/github-requests — method, path and query, the Authorization header,
+# the body — for the e2e to read. Built from stdin, with no context:
 #   docker build -t mlobs-stub:e2e - < operator/hack/e2e-stub.Dockerfile
 FROM busybox:1.37
-RUN mkdir -p /www /usr/local/bin \
+RUN mkdir -p /www/cgi-bin /usr/local/bin \
   && echo ok > /www/health \
   && echo '10 0 0' > /www/profile \
+  && echo 0 > /www/github-runs \
+  && printf '%s\n' \
+    '#!/bin/sh' \
+    '# github: see operator/hack/e2e-stub.Dockerfile.' \
+    'workflow=/repos/MuratAlkan06/ml-observability-system/actions/workflows/deploy.yml' \
+    'body=""' \
+    'if [ "${CONTENT_LENGTH:-0}" -gt 0 ]; then body="$(head -c "$CONTENT_LENGTH")"; fi' \
+    'echo "${REQUEST_METHOD} ${PATH_INFO}?${QUERY_STRING} ${HTTP_AUTHORIZATION:-none} ${body}" >> /tmp/github-requests' \
+    'case "${REQUEST_METHOD} ${PATH_INFO}" in' \
+    '  "GET ${workflow}/runs")' \
+    '    printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"total_count\":%s,\"workflow_runs\":[]}\n" "$(cat /www/github-runs)" ;;' \
+    '  "POST ${workflow}/dispatches")' \
+    '    printf "HTTP/1.0 204 No Content\r\n\r\n" ;;' \
+    '  *)' \
+    '    printf "HTTP/1.0 404 Not Found\r\n\r\n" ;;' \
+    'esac' \
+    > /www/cgi-bin/github \
+  && chmod 0755 /www/cgi-bin/github \
   && printf '%s\n' \
     '#!/bin/sh' \
     '# stub-metrics: see operator/hack/e2e-stub.Dockerfile.' \

@@ -40,7 +40,9 @@
 #      no pods before the canary exists — and apply.sh's own close-window
 #      patch closes it in the reverse order; with no spec.gate the operator
 #      is v0 — no status.gate, no gate Event — and the installed operator
-#      does not set the gate's test-only interval knob
+#      sets neither test-only knob, the gate's interval nor the promote
+#      dispatch's GitHub API, and runs with the dispatch token's Secret absent
+#      (its mount is optional, D43)
 # for the flattened install only:
 #   7. the gate in Observe (D42, D45), on one window whose grid the test-only
 #      knob shortens to 20 s — the operator's own Deployment patched here and
@@ -62,6 +64,16 @@
 #      it; the ring records the breach at ActRollback; the latch holds against
 #      canary-field edits until apply.sh's close-window patch passes the spec
 #      through the closed shape, and the next window starts fresh evidence
+#   9. the gate in ActPromote (D43, D47), on the same 20 s grid, its dispatch
+#      pointed by the second test-only knob at an in-cluster stand-in for
+#      GitHub (the stub image's CGI, e2e-stub.Dockerfile), with the token's
+#      Secret created as the host creates it: a Deploy run pending defers the
+#      promote verdict, nothing sent; the run gone, exactly one dispatch of
+#      deploy.yml on main with the canary's sha and the Secret's token, the
+#      latch Dispatched on 204; no second dispatch across later boundaries;
+#      then the pipeline's landing — the CR apply at the canary's SHA and
+#      apply.sh's close-window patch — closes the window and promotes the
+#      stable, the completion signal, with spec.gate left as it was
 # and, for the chart install only:
 #   6. the release is deployed and the operator it runs is the release's, and
 #      `helm uninstall` leaves the CRD in place: crds/ is install-only
@@ -249,6 +261,17 @@ gate_knob="$(sed -n 's/^const gateIntervalEnv = "\(.*\)"$/\1/p' "${REPO_ROOT}/op
 [ -n "$gate_knob" ] || die "gateIntervalEnv not found in operator/internal/controller/gate.go"
 GATE_INTERVAL=20s
 
+# The promote dispatch's test-only knob and the token's Secret, read from the
+# operator's source; step 9 points the knob at the stub's GitHub stand-in.
+dispatch_go="${REPO_ROOT}/operator/internal/controller/dispatch.go"
+github_knob="$(sed -n 's/^[[:space:]]*githubAPIEnv[[:space:]]*= "\(.*\)"$/\1/p' "$dispatch_go")"
+[ -n "$github_knob" ] || die "githubAPIEnv not found in operator/internal/controller/dispatch.go"
+token_secret="$(sed -n 's/^[[:space:]]*dispatchTokenSecret[[:space:]]*= "\(.*\)"$/\1/p' "$dispatch_go")"
+[ -n "$token_secret" ] || die "dispatchTokenSecret not found in operator/internal/controller/dispatch.go"
+GITHUB_STUB_API="http://github-stub.${NAMESPACE}.svc.cluster.local:8000/cgi-bin/github"
+# A fake token, of a fine-grained PAT's shape: the stand-in checks what it is sent.
+E2E_TOKEN=github_pat_e2e0fake0token0for0the0in0cluster0stand0in
+
 # gate_events: the reasons of the gate's Events on the ServingDeployment, one
 # a line.
 gate_events() {
@@ -256,11 +279,11 @@ gate_events() {
     -o 'jsonpath={range .items[*]}{.reason}{"\n"}{end}' | grep '^Gate' || true
 }
 
-# knob_unset: the operator Deployment as installed does not set the knob.
+# knob_unset KNOB: the operator Deployment as installed does not set KNOB.
 knob_unset() {
   local names
   names="$(field deployment/operator '{.spec.template.spec.containers[*].env[*].name}')" || return 1
-  ! printf '%s\n' "$names" | tr ' ' '\n' | grep -qxF "$gate_knob"
+  ! printf '%s\n' "$names" | tr ' ' '\n' | grep -qxF "$1"
 }
 
 # assert_operator INSTALL: steps 2 to 5 against the operator INSTALL put in
@@ -378,8 +401,17 @@ EOF
   [ -z "$(field "$SERVINGDEPLOYMENT" '{.spec.gate}')" ] || die "the ServingDeployment of step 4 has a spec.gate"
   [ -z "$(field "$SERVINGDEPLOYMENT" '{.status.gate}')" ] || die "a ServingDeployment with no spec.gate has a status.gate"
   [ -z "$(gate_events)" ] || die "a ServingDeployment with no spec.gate has gate Events: $(gate_events | tr '\n' ' ')"
-  knob_unset || die "deployment/operator as installed from $1 sets ${gate_knob}"
-  echo "ok: with no spec.gate the window was v0: no status.gate and no gate Event; deployment/operator as installed does not set ${gate_knob}"
+  knob_unset "$gate_knob" || die "deployment/operator as installed from $1 sets ${gate_knob}"
+  knob_unset "$github_knob" || die "deployment/operator as installed from $1 sets ${github_knob}"
+  echo "ok: with no spec.gate the window was v0: no status.gate and no gate Event; deployment/operator as installed sets neither ${gate_knob} nor ${github_knob}"
+  # The token's mount is optional (D43): the operator above ran its window
+  # with the Secret absent.
+  if k get secret "$token_secret" >/dev/null 2>&1; then
+    die "secret/${token_secret} exists; nothing but the host creates it"
+  fi
+  [ "$(field deployment/operator "{.spec.template.spec.volumes[?(@.secret.secretName==\"${token_secret}\")].secret.optional}")" = true ] \
+    || die "deployment/operator does not mount secret/${token_secret} optionally"
+  echo "ok: deployment/operator mounts secret/${token_secret} optionally, and ran with it absent"
 
   echo "ok: the operator's events, oldest first:"
   k get events --field-selector involvedObject.kind=ServingDeployment \
@@ -442,14 +474,17 @@ assert_gate() {
   echo "ok: --- the gate in Observe, on a ${GATE_INTERVAL} grid ---"
   local count records promote_at trip at rec verdict reasons stable_n canary_n i after rendered_spec mode
 
-  # --- 7a. the test-only knob: shipped nowhere, set here alone ---------------
+  # --- 7a. the test-only knobs: shipped nowhere, set here alone --------------
 
-  count="$(render 03-operator.yaml | grep -cF "$gate_knob" || true)"
-  [ "$count" = 0 ] || die "03-operator.yaml as apply.sh renders it sets ${gate_knob}"
-  count="$("$HELM" template "$RELEASE" "$CHART" --namespace "$NAMESPACE" \
-    --set image.prefix="$IMAGE_PREFIX" --set image.tag="$IMAGE_TAG" | grep -cF "$gate_knob" || true)"
-  [ "$count" = 0 ] || die "the chart, rendered, sets ${gate_knob}"
-  echo "ok: ${gate_knob} is set neither by 03-operator.yaml as apply.sh renders it nor by the chart"
+  local knob
+  for knob in "$gate_knob" "$github_knob"; do
+    count="$(render 03-operator.yaml | grep -cF "$knob" || true)"
+    [ "$count" = 0 ] || die "03-operator.yaml as apply.sh renders it sets ${knob}"
+    count="$("$HELM" template "$RELEASE" "$CHART" --namespace "$NAMESPACE" \
+      --set image.prefix="$IMAGE_PREFIX" --set image.tag="$IMAGE_TAG" | grep -cF "$knob" || true)"
+    [ "$count" = 0 ] || die "the chart, rendered, sets ${knob}"
+    echo "ok: ${knob} is set neither by 03-operator.yaml as apply.sh renders it nor by the chart"
+  done
 
   k set env deployment/operator "${gate_knob}=${GATE_INTERVAL}" >/dev/null
   k rollout status deployment/operator --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
@@ -730,12 +765,163 @@ assert_gate_acting() {
   echo "ok: the gate's events: $(gate_events | sort | uniq -c | awk '{ printf "%s x%s; ", $2, $1 }')"
 }
 
+# --- 9. the gate in ActPromote -----------------------------------------------
+
+# github_exec COMMAND: run COMMAND in the GitHub stand-in's pod.
+github_exec() {
+  k exec deployment/github-stub -- sh -c "$1"
+}
+
+# stub_dispatches: the dispatches the stand-in has served, one a line, as it
+# logs them: METHOD PATH?QUERY AUTHORIZATION BODY.
+stub_dispatches() {
+  github_exec 'cat /tmp/github-requests 2>/dev/null || true' | grep '^POST ' || true
+}
+
+# dispatch_field NAME: one field of status.gate's promote verdict's dispatch.
+dispatch_field() {
+  gate_field "promoteVerdict.dispatch.$1"
+}
+
+# dispatch_state_is STATE: the promote verdict's dispatch reads STATE.
+dispatch_state_is() {
+  [ "$(dispatch_field state)" = "$1" ]
+}
+
+# next_boundary_at_least N: the gate's next boundary is N or later.
+next_boundary_at_least() {
+  local next
+  next="$(gate_field nextBoundary)"
+  [ -n "$next" ] && [ "$next" -ge "$1" ]
+}
+
+# api_at_canary: deployment/api runs the canary's image.
+api_at_canary() {
+  [ "$(field deployment/api '{.spec.template.spec.containers[?(@.name=="api")].image}')" = "${IMAGE_PREFIX}/mlobs-api:${CANARY_TAG}" ]
+}
+
+# assert_gate_promote: step 9, against the operator installed from the
+# flattened manifests, with step 7's knob still set and step 8's window closed.
+assert_gate_promote() {
+  echo "ok: --- the gate in ActPromote, on a ${GATE_INTERVAL} grid, dispatching to an in-cluster GitHub stand-in ---"
+  local previous_start sent expected boundary landed
+
+  # --- 9a. the stand-in, the token's Secret, the knob: set here alone --------
+
+  kubectl apply -f - >/dev/null <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-stub
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: github-stub
+  template:
+    metadata:
+      labels:
+        app: github-stub
+    spec:
+      containers:
+        - name: github-stub
+          image: ${STUB_IMAGE}
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-stub
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: github-stub
+  ports:
+    - port: 8000
+      targetPort: 8000
+EOF
+  k rollout status deployment/github-stub --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/github-stub"
+  # The Secret as the host creates it (docs/RUNBOOK.md), the token from stdin.
+  printf '%s' "$E2E_TOKEN" | k create secret generic "$token_secret" --from-file=token=/dev/stdin >/dev/null
+  k set env deployment/operator "${github_knob}=${GITHUB_STUB_API}" >/dev/null
+  k rollout status deployment/operator --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/operator with ${github_knob}"
+  poll_until "the operator's earlier pod gone" one_operator_pod
+  operator_pod="$(k get pods -l app=operator -o 'jsonpath={.items[0].metadata.name}')"
+  poll_until "lease/${lease} held by pod/${operator_pod}" lease_held
+  echo "ok: the GitHub stand-in serving; secret/${token_secret} created; ${github_knob} set on this cluster's deployment/operator alone, pod/${operator_pod} holding the lease"
+
+  # --- 9b. a window armed in ActPromote, a Deploy run pending: deferred ------
+
+  github_exec 'echo 1 > /www/github-runs'
+  previous_start="$(gate_field windowStart)"
+  k patch "$SERVINGDEPLOYMENT" --type merge -p \
+    "{\"spec\":{\"canaryImageTag\":\"${CANARY_TAG}\",\"canaryReplicas\":1,\"gate\":{\"mode\":\"ActPromote\",\"forCanaryImageTag\":\"${CANARY_TAG}\"}}}" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  poll_until "status.gate for the ActPromote window" gate_window_other_than "$previous_start"
+  [ "$(gate_field mode) $(gate_field arming)" = "ActPromote Armed" ] \
+    || die "status.gate runs the window as '$(gate_field mode) $(gate_field arming)', not 'ActPromote Armed': the token unread?"
+  poll_until "deployment/api-canary scaled to 1" canary_scaled_up
+  k rollout status deployment/api-canary --timeout="${TIMEOUT_SECONDS}s" >/dev/null \
+    || die "rollout did not converge within ${TIMEOUT_SECONDS}s: deployment/api-canary"
+  poll_within "$GATE_TIMEOUT_SECONDS" "the promote verdict deferred" dispatch_state_is Deferred
+  [ "$(dispatch_field reason)" = RunPending ] || die "the deferred verdict's reason is '$(dispatch_field reason)'"
+  [ -z "$(stub_dispatches)" ] || die "a dispatch was sent while a Deploy run was pending: $(stub_dispatches)"
+  gate_events | grep -qx GatePromoteDeferred || die "no GatePromoteDeferred Event"
+  echo "ok: the promote verdict at interval $(gate_field promoteVerdict.interval), a Deploy run pending: deferred, RunPending, nothing sent"
+
+  # --- 9c. the run gone: one dispatch, the canary's sha, the Secret's token --
+
+  github_exec 'echo 0 > /www/github-runs'
+  poll_within "$GATE_TIMEOUT_SECONDS" "the promote verdict dispatched" dispatch_state_is Dispatched
+  sent="$(stub_dispatches)"
+  expected="POST /repos/MuratAlkan06/ml-observability-system/actions/workflows/deploy.yml/dispatches? Bearer ${E2E_TOKEN} {\"inputs\":{\"sha\":\"${CANARY_TAG}\"},\"ref\":\"main\"}"
+  [ "$sent" = "$expected" ] || die "the stand-in served '${sent}', not the one dispatch '${expected}'"
+  [ "$(dispatch_field statusCode) $(dispatch_field sha)" = "204 ${CANARY_TAG}" ] \
+    || die "the dispatch is recorded as '$(dispatch_field statusCode) $(dispatch_field sha)'"
+  [ -n "$(dispatch_field attemptedAt)" ] || die "the dispatch has no attemptedAt"
+  gate_events | grep -qx GatePromoteDispatched || die "no GatePromoteDispatched Event"
+  canary_active_is True/WindowOpen || die "CanaryActive is $(canary_active) after the dispatch: the pipeline closes the window"
+  echo "ok: the run gone, one dispatch of deploy.yml on main with sha ${CANARY_TAG} and the Secret's token; 204, Dispatched at $(dispatch_field attemptedAt)"
+
+  # --- 9d. at most once: later boundaries send nothing ----------------------
+
+  boundary="$(gate_field nextBoundary)"
+  poll_within "$GATE_TIMEOUT_SECONDS" "three more boundaries" next_boundary_at_least $((boundary + 3))
+  [ "$(stub_dispatches | grep -c . || true)" = 1 ] || die "a second dispatch: $(stub_dispatches)"
+  dispatch_state_is Dispatched || die "the dispatch reads $(dispatch_field state) three boundaries on"
+  echo "ok: three boundaries later, still the one dispatch"
+
+  # --- 9e. the pipeline lands: the CR at the canary's SHA, then the close ----
+
+  # What a Deploy run of the canary's SHA sends: the CR rendered at that SHA,
+  # then the close-window patch.
+  sed -e "s|IMAGE_PREFIX|${IMAGE_PREFIX}|g" -e "s|IMAGE_TAG|${CANARY_TAG}|g" \
+    "${MANIFESTS}/40-servingdeployment.yaml" | kubectl apply -f - >/dev/null
+  k patch "$SERVINGDEPLOYMENT" --type merge -p "$close_patch" >/dev/null
+  k wait "$SERVINGDEPLOYMENT" --for=condition=CanaryActive=false --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+  canary_active_is False/NoCanary || die "the pipeline's landing left CanaryActive $(canary_active)"
+  poll_until "deployment/api at the canary's image" api_at_canary
+  poll_until "${SERVINGDEPLOYMENT} Ready at its current generation" ready_at_generation
+  poll_until "statefulset/shadow-scorer back at 1" shadow_back
+  no_live_pods app=api,role=canary || die "a canary pod runs after the promotion"
+  landed="$(field "$SERVINGDEPLOYMENT" '{.spec.imageTag} {.spec.gate.mode}')"
+  [ "$landed" = "${CANARY_TAG} ActPromote" ] || die "after the landing the spec reads '${landed}'"
+  [ "$(stub_dispatches | grep -c . || true)" = 1 ] || die "a second dispatch after the landing: $(stub_dispatches)"
+  dispatch_state_is Dispatched || die "the dispatch's evidence did not survive the close"
+  echo "ok: the pipeline's landing closed the window and promoted deployment/api to ${CANARY_TAG}; spec.gate left as it was; one dispatch in all"
+  echo "ok: the gate's events: $(gate_events | sort | uniq -c | awk '{ printf "%s x%s; ", $2, $1 }')"
+}
+
 # --- the flattened manifests, then the chart ---------------------------------
 
 install_flattened
 assert_operator "the flattened manifests"
 assert_gate
 assert_gate_acting
+assert_gate_promote
 uninstall_flattened
 
 echo "ok: helm $("$HELM" version --template '{{.Version}}')"

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -129,9 +130,19 @@ type clientWrite struct {
 type recordingClient struct {
 	mu     sync.Mutex
 	writes []clientWrite
+	// killAfter, when set, stands for the operator dying: once a subresource
+	// patch it matches has landed in the API server, the call panics with
+	// errOperatorKilled instead of returning, and the reconcile goes no
+	// further.
+	killAfter func(clientWrite) bool
 }
 
-func (rc *recordingClient) record(verb string, obj client.Object, subresource string, patch client.Patch) {
+// errOperatorKilled is the panic killAfter raises.
+var errOperatorKilled = errors.New("the operator was killed")
+
+func (rc *recordingClient) record(
+	verb string, obj client.Object, subresource string, patch client.Patch,
+) clientWrite {
 	gvk, err := apiutil.GVKForObject(obj, k8sClient.Scheme())
 	Expect(err).NotTo(HaveOccurred())
 	w := clientWrite{verb: verb, kind: gvk.Kind, name: obj.GetName(), subresource: subresource}
@@ -143,6 +154,18 @@ func (rc *recordingClient) record(verb string, obj client.Object, subresource st
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	rc.writes = append(rc.writes, w)
+	return w
+}
+
+// killIf panics with errOperatorKilled if w, a write that has landed, is one
+// killAfter matches.
+func (rc *recordingClient) killIf(w clientWrite) {
+	rc.mu.Lock()
+	kill := rc.killAfter
+	rc.mu.Unlock()
+	if kill != nil && kill(w) {
+		panic(errOperatorKilled)
+	}
 }
 
 // statefulSetWrites returns the recorded writes to any StatefulSet.
@@ -195,8 +218,12 @@ func newRecordingReconciler() (*ServingDeploymentReconciler, *recordingClient) {
 		},
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch,
 			opts ...client.SubResourcePatchOption) error {
-			rc.record("patch", obj, sub, patch)
-			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			w := rc.record("patch", obj, sub, patch)
+			if err := c.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+			rc.killIf(w)
+			return nil
 		},
 	})
 	return &ServingDeploymentReconciler{
