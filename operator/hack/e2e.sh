@@ -494,8 +494,9 @@ assert_gate() {
     rec="$(record_at "$i")"
     IFS='|' read -r _ verdict reasons stable_n canary_n <<<"$rec"
     [ "$verdict" = Clean ] || die "interval ${i} of the clean run reads '${rec}'"
-    [ "${stable_n:-0}" -ge 50 ] && [ "${canary_n:-0}" -ge 50 ] \
-      || die "interval ${i} is clean on ${stable_n:-no} stable and ${canary_n:-no} canary requests"
+    if ! { [ "${stable_n:-0}" -ge 50 ] && [ "${canary_n:-0}" -ge 50 ]; }; then
+      die "interval ${i} is clean on ${stable_n:-no} stable and ${canary_n:-no} canary requests"
+    fi
   done
   gate_events | grep -qx GateWouldPromote || die "no GateWouldPromote Event"
   [ "$(field "$SERVINGDEPLOYMENT" '{.status.conditions[?(@.type=="CanaryActive")].status}')" = True ] \
