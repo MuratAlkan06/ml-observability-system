@@ -63,9 +63,11 @@ needs on the 4GB host (the D37 addendum of O2):
   it; a changed `canaryImageTag` mid-window does not restart it. At the
   deadline the operator restores steady and sets `CanaryActive` False with
   reason `WindowExpired`, leaving the canary fields in the spec for the
-  close-window patch to clear. Until a reconcile sees the spec cleared, the
-  window stays closed whatever those fields say: a new window has to pass
-  through the closed shape first (the D32 clarification of O2).
+  close-window patch to clear. A gate acting on a tripped line (V1-S4, D47)
+  takes the same path with reason `BreachRolledBack`, the message naming the
+  line. Until a reconcile sees the spec cleared, the window stays closed
+  whatever those fields say and whichever reason latched it: a new window has
+  to pass through the closed shape first (the D32 clarification of O2).
 
 The stack is then in exactly one of two states, and
 `deploy/k3s/smoke.sh` judges which from the cluster, never from the spec's

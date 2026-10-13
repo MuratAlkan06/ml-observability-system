@@ -1509,3 +1509,15 @@ retention jobs, Alembic.
 > interval never increments `cleanRun`, and a warmup breach or unevaluable interval resets it,
 > erring away from promote. D45's line-for-line script mirror stands as written, and the memo's
 > fidelity-table line-3 "Same" stands. Ruled at V1-S1 (issue #111); no frozen text edited.
+
+> **D42 clarification (2026-10-12, V1-S4):** the acting level a window runs at is sampled when
+> `CanaryActive` transitions True; raising the armed level mid-window — arming, or any
+> escalation — takes effect at the next window, while lowering it — de-escalation to Observe,
+> tag mismatch, or removing `spec.gate` — takes effect at once (removal immediately, the rest
+> at the next boundary). Every per-interval evidence record carries the effective acting level
+> under which it was judged, so a mid-window lower is self-describing in the ring. Consent
+> precedes the window, as the window itself does; the operator never acts on evidence
+> accumulated under lesser arming; removal stays an instant brake. Interim lattice note: while
+> promote dispatch is not yet active, an armed `ActPromote` acts as `ActRollback` — D42's "a
+> mode that promotes but will not abort is not offered" admits no other reading. Ruled at
+> V1-S4 (issue #119); no frozen text edited.

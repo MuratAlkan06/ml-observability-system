@@ -126,14 +126,15 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // Deployment, deployment/api-canary, up or down, and the shadow scorer at 0 or
 // 1, in the order reconcileWindow keeps. With spec.gate set and a window open
 // it runs the gate, which reads the window's pods only at the boundaries of
-// its interval grid and records each interval in status.gate (observe). It
-// then writes the status for the generation it acted on: the Ready,
-// CanaryActive and ShadowPaused conditions, status.observedGeneration and
-// status.gate. The status is written on failure too, so a refused adoption
-// shows on the resource and not only in the operator's log. While a window is
-// open the request is requeued for the earlier of its deadline and the gate's
-// next boundary. The spec is never written (docs/PLAN.md D31, D32, D37 and
-// their O2 rulings; D42).
+// its interval grid and records each interval in status.gate (observe); a line
+// tripped at an acting level rolls the window back, latched as an expired
+// window is (D47). It then writes the status for the generation it acted on:
+// the Ready, CanaryActive and ShadowPaused conditions,
+// status.observedGeneration and status.gate. The status is written on failure
+// too, so a refused adoption shows on the resource and not only in the
+// operator's log. While a window is open the request is requeued for the
+// earlier of its deadline and the gate's next boundary. The spec is never
+// written (docs/PLAN.md D31, D32, D37 and their O2 rulings; D42, D47).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sd := &servingv1alpha1.ServingDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
@@ -153,7 +154,14 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	now := r.now()
 	dep, stableErr := r.reconcileStable(ctx, sd)
-	w := decideWindow(sd.Spec, meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionCanaryActive), now)
+	prev := meta.FindStatusCondition(sd.Status.Conditions, servingv1alpha1.ConditionCanaryActive)
+	w := decideWindow(sd.Spec, prev, now)
+	// The window opens on this reconcile, where the gate samples its acting
+	// level (#119).
+	opened := w.open && (prev == nil || prev.Status != metav1.ConditionTrue)
+	if w.reason == servingv1alpha1.ReasonBreachRolledBack && sd.Status.Gate != nil {
+		w.rollback = sd.Status.Gate.RollbackVerdict
+	}
 	if w.expiredNow {
 		logf.FromContext(ctx).Info("The canary window reached its TTL; closing it", "ttl", canaryWindowTTL)
 		r.Recorder.Eventf(sd, corev1.EventTypeNormal, eventReasonWindowExpired,
@@ -168,7 +176,16 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	base := sd.DeepCopy()
 	setConditions(sd, dep, stableErr, r.apiImage(sd.Spec.ImageTag), w, shadow, now)
 	sd.Status.ObservedGeneration = sd.Generation
-	step, gateErr := r.observe(ctx, sd, w.open, now)
+	step, gateErr := r.observe(ctx, sd, w.open, opened, now)
+	if step.rollBack {
+		// The gate tripped a line at an acting level (D47). The window is
+		// latched closed here, in the status write below, before anything in
+		// the cluster moves; from the next reconcile, which that write brings,
+		// decideWindow's latch restores steady exactly as for an expired
+		// window. A failed write moves nothing, and is retried.
+		w = window{reason: servingv1alpha1.ReasonBreachRolledBack, rollback: sd.Status.Gate.RollbackVerdict}
+		setConditions(sd, dep, stableErr, r.apiImage(sd.Spec.ImageTag), w, shadow, now)
+	}
 	reconcileErr := joinErrors(stableErr, windowErr, gateErr)
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
 		if err := r.Status().Patch(ctx, sd, client.MergeFrom(base)); err != nil {

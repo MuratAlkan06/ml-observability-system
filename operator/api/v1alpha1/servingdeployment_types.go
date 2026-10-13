@@ -19,7 +19,8 @@ const (
 	// replica, and fewer than 45 minutes have passed since the condition last
 	// turned True. It turns True on the reconcile that starts opening the
 	// window by pausing the shadow scorer, and its lastTransitionTime is the
-	// window's TTL clock (D37 addendum of O2).
+	// window's TTL clock (D37 addendum of O2). An acting gate that trips a
+	// line turns it False before the TTL (D47).
 	ConditionCanaryActive = "CanaryActive"
 	// ConditionShadowPaused is True while the shadow scorer's StatefulSet, as
 	// observed, is at zero replicas and reports no pods. It is computed from
@@ -53,6 +54,13 @@ const (
 	// through the closed shape the close-window patch leaves (D32
 	// clarification of O2).
 	ReasonWindowExpired = "WindowExpired"
+	// ReasonBreachRolledBack: CanaryActive is False because the gate, at an
+	// acting level, tripped a line of the O4 abort table; the message names
+	// the line, and status.gate holds the evidence. The window is closed and
+	// latched exactly as an expired one is: the spec is left alone, steady is
+	// restored in the cluster, and no window opens until the spec passes
+	// through the closed shape (D47).
+	ReasonBreachRolledBack = "BreachRolledBack"
 	// ReasonShadowRunning: ShadowPaused is False because the shadow scorer's
 	// StatefulSet requests replicas, still reports pods, or was scaled by the
 	// reconcile that wrote the condition and is not yet observed at its new
@@ -82,9 +90,9 @@ type ServingDeploymentSpec struct {
 	// canaryImageTag is the canary api image tag, in the same 40-character
 	// commit SHA form. It is set only by a host-side patch that opens a canary
 	// window and is never rendered by the pipeline (docs/PLAN.md D32). The
-	// operator never writes it: a window that reaches its 45-minute TTL is
-	// closed in the cluster, and this field stays until the close-window patch
-	// clears it.
+	// operator never writes it: a window that reaches its 45-minute TTL, or
+	// that an acting gate rolls back, is closed in the cluster, and this field
+	// stays until the close-window patch clears it.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	CanaryImageTag string `json:"canaryImageTag,omitempty"`
@@ -103,7 +111,10 @@ type ServingDeploymentSpec struct {
 	// status.gate and emits no gate Event, and promote and rollback stay
 	// human. Like the canary fields it is set by the host-side patch that
 	// opens a window and is never rendered by the pipeline (D32), so a
-	// pipeline deploy leaves it as it is.
+	// pipeline deploy leaves it as it is. Removed from an open window, the
+	// gate stops at once; the window's status.gate keeps its evidence, its
+	// mode lowered to Observe, so a gate set again before that window closes
+	// does not act in it.
 	// +optional
 	Gate *GateSpec `json:"gate,omitempty"`
 }
@@ -128,10 +139,14 @@ const (
 
 // GateSpec is the gate a ServingDeployment opts into (docs/PLAN.md D42).
 type GateSpec struct {
-	// mode is the gate's mode. In this version of the operator every mode
-	// runs as Observe: ActRollback and ActPromote are accepted, and a window
-	// that asks for one is observed and says so in an Event, until the slices
-	// that give them their acting behavior land.
+	// mode is the gate's mode. ActRollback acts: a tripped line rolls the
+	// window back (D47). ActPromote's promote dispatch does not act in this
+	// version of the operator: armed, it runs as ActRollback, records the
+	// promote verdict without dispatching it, and says so in an Event, until
+	// the slice that gives it its dispatch lands. A window acts at the level
+	// sampled when it opens: a mode raised mid-window takes effect from the
+	// next window, and one lowered, or its tag mismatched, from the next
+	// boundary.
 	// +required
 	Mode GateMode `json:"mode"`
 
@@ -151,13 +166,16 @@ type GateSpec struct {
 type GateArming string
 
 const (
-	// GateArmingArmed: the gate runs the mode spec.gate asks for.
+	// GateArmingArmed: the mode spec.gate asks for is armed for the canary's
+	// tag, and the gate runs it, from the next window if it was raised
+	// mid-window; status.gate.mode is the level in effect.
 	GateArmingArmed GateArming = "Armed"
 	// GateArmingTagMismatch: an acting mode whose forCanaryImageTag is not
 	// spec.canaryImageTag runs as Observe (D42).
 	GateArmingTagMismatch GateArming = "TagMismatch"
-	// GateArmingNotYetActive: an acting mode, armed for the canary's tag, that
-	// this version of the operator does not act in yet runs as Observe.
+	// GateArmingNotYetActive: ActPromote, armed for the canary's tag, whose
+	// promote dispatch this version of the operator does not act on yet: it
+	// runs as ActRollback, the level it contains.
 	GateArmingNotYetActive GateArming = "NotYetActive"
 )
 
@@ -195,11 +213,17 @@ type GateStatus struct {
 	// +kubebuilder:validation:Minimum=1
 	IntervalSeconds int32 `json:"intervalSeconds"`
 
-	// mode is the mode the gate ran its last boundary as.
+	// mode is the acting level the gate ran its last boundary at: sampled
+	// when the window opened, lowered at a boundary by a lowered or
+	// mismatched spec.gate and at once by its removal, and never raised
+	// before the next window.
 	// +required
 	Mode GateMode `json:"mode"`
 
-	// arming says how the gate armed spec.gate.mode at its last boundary.
+	// arming says how the gate armed spec.gate.mode at its last boundary:
+	// Armed; TagMismatch, an acting mode armed for another canary tag, run as
+	// Observe; or NotYetActive, ActPromote, whose dispatch this version of the
+	// operator does not act on, run as ActRollback.
 	// +required
 	Arming GateArming `json:"arming"`
 
@@ -240,14 +264,16 @@ type GateStatus struct {
 	LastVerdict GateVerdict `json:"lastVerdict,omitempty"`
 
 	// rollbackVerdict is the first interval whose verdict tripped a line of
-	// the table. In Observe it is recorded and nothing acts on it: the window
-	// stays open until its TTL or a close.
+	// the table. At Observe it is recorded and nothing acts on it: the window
+	// stays open until its TTL or a close. At ActRollback it is the trip that
+	// rolled the window back, CanaryActive False with BreachRolledBack (D47).
 	// +optional
 	RollbackVerdict *GateRollbackVerdict `json:"rollbackVerdict,omitempty"`
 
 	// promoteVerdict is the first interval that completed 11 consecutive
-	// clean intervals (D44). In Observe it is recorded and nothing is
-	// dispatched.
+	// clean intervals (D44). It is recorded and nothing is dispatched: at
+	// ActRollback a human actuates it (D43), and ActPromote's dispatch does
+	// not act in this version of the operator.
 	// +optional
 	PromoteVerdict *GatePromoteVerdict `json:"promoteVerdict,omitempty"`
 
@@ -301,6 +327,12 @@ type GateRollbackVerdict struct {
 	// trip names the line that tripped.
 	// +required
 	Trip GateTrip `json:"trip"`
+	// rolledBackAt is when the gate rolled the window back on this trip: the
+	// reconcile that latched CanaryActive False with BreachRolledBack, to the
+	// second. Absent when the trip was recorded at Observe, which acts on
+	// nothing.
+	// +optional
+	RolledBackAt *metav1.Time `json:"rolledBackAt,omitempty"`
 }
 
 // GatePromoteVerdict is the interval that completed the clean run.
@@ -346,6 +378,13 @@ type GateRecord struct {
 	// +optional
 	// +listType=atomic
 	Reasons []GateReason `json:"reasons,omitempty"`
+	// effectiveLevel is the acting level the interval was evaluated at, the
+	// gate's mode at the boundary that recorded it: at ActRollback a tripped
+	// line rolls the window back, and at Observe nothing acts. The operator
+	// writes it on every record; one without it predates the field and was
+	// evaluated at Observe.
+	// +optional
+	EffectiveLevel GateMode `json:"effectiveLevel,omitempty"`
 }
 
 // GatePodDelta is one pod's change over an interval: watch-window.sh's
