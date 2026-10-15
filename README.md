@@ -370,10 +370,22 @@ with no gate is v0. The host, the stable, the operator itself, opening any windo
 approval and the agreement/confidence judgement stay human, and a human attends every acting
 window ([the runbook's v1 line](docs/RUNBOOK.md#the-v1-gate-what-the-operator-decides-what-stays-human)).
 All three modes are exercised in CI on k3d, against a stub whose metrics the test shapes and an
-in-cluster stand-in for GitHub's API. The live demonstrations v4.0.0 is held to — an observed
-window, a rolled-back induced breach, a dispatched same-image promotion — run gated on issue
-[#123](https://github.com/MuratAlkan06/ml-observability-system/issues/123); the claim lands here
-with their evidence (D49, D50).
+in-cluster stand-in for GitHub's API — and all three ran live on the EC2 host, each gated on an
+owner go and evidenced on issue
+[#123](https://github.com/MuratAlkan06/ml-observability-system/issues/123): an observed window
+judged against a pre-declared agreement rule (2026-10-13/14, ruled satisfied with one named
+measurement limit), a rolled-back induced breach (2026-10-15, `BreachRolledBack` at 02:31:04Z,
+the close converging with no human patch), and a dispatched same-image promotion (2026-10-15,
+the verdict and dispatch at 18:12:19Z, run 38783679488 under the App's own identity, the
+pipeline's close patch ending the window). The claim v4.0.0 makes was sanctioned verbatim at
+the design freeze (D49) and became true in those windows:
+
+> The operator ran live windows and acted on the ratified O4 abort table: it observed, rolled back an induced breach, and dispatched a promotion — on the table's health lines alone. The #62 agreement/confidence signal is not mechanized: predictions carry no per-arm attribution, so that judgement stays human, deferred until the schema carries it.
+
+What the windows also showed, in the same honesty: a borderline minute scored on opposite
+sides of 1.25 by two faithful readers (ruled a measurement limit, not a defect), and a verdict
+that arrived one minute inside the D47 dispatch floor and was refused rather than raced — the
+operator declining to promote is as much the design as the operator promoting.
 
 The operator is also packaged as a Helm chart at
 [`deploy/helm/mlobs-operator/`](deploy/helm/mlobs-operator/README.md) (D38); the host and the
