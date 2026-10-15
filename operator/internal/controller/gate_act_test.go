@@ -298,6 +298,52 @@ var _ = Describe("The gate in ActRollback (D45, D47)", func() {
 		Expect(h.gateEvents()).To(ConsistOf(ContainSubstring("Normal GateArmed the gate is armed in ActRollback")))
 	})
 
+	It("holds the latch through a reconcile served the ServingDeployment it was decided from: that reconcile's "+
+		"write, Ready having moved since, would put CanaryActive back to WindowOpen over BreachRolledBack and open "+
+		"the rolled-back window again; it conflicts instead, and the close goes on to steady (V1-S7)", func() {
+		h := newGateHarness(actRollback)
+		h.addCanary(at(windowStart.Add(-time.Minute)))
+		h.open()
+		h.clean(2)
+		h.drainOpenEvents()
+		preLatch := getServingDeployment(h.sd)
+
+		By("one canary 5xx past warmup trips line 2 at interval 2: the latch is written")
+		h.next(perInterval, 0, 1)
+		evidence := expectRolledBack(h, "Line2CanaryErrors", 2, h.boundaryTime(3))
+		h.drainOpenEvents()
+
+		By("deployment/api no longer Available, then a reconcile served the object the latch was decided from")
+		markStableUnavailable(h.ns)
+		h.clock.t = h.boundaryTime(3).Add(time.Second)
+		stale := h.reconcileReading(preLatch)
+
+		By("the next reconcile reads the API server: still latched, the canary serving until deployment/api is " +
+			"Available")
+		h.clock.t = h.boundaryTime(3).Add(2 * time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		latest := getServingDeployment(h.sd)
+		active := condition(latest, servingv1alpha1.ConditionCanaryActive)
+		Expect(active.Status).To(Equal(metav1.ConditionFalse))
+		Expect(active.Reason).To(Equal(servingv1alpha1.ReasonBreachRolledBack))
+		Expect(active.Message).To(Equal(rolledBackMessage("Line2CanaryErrors", 2) +
+			"; deployment/api-canary keeps serving until deployment/api is Available"))
+		Expect(active.LastTransitionTime.Time).To(BeTemporally("==", h.boundaryTime(3)), "the latch does not move")
+		Expect(condition(latest, servingv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionFalse))
+		Expect(latest.Status.Gate).To(Equal(evidence))
+		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
+		expectCanaryReplicas(h.ns, 1)
+
+		By("deployment/api Available: the canary goes to 0 and stays there, the window never opened again")
+		markRolledOut(h.ns)
+		h.closeToSteady()
+		h.clock.t = h.boundaryTime(5)
+		Expect(reconcileResult(h.r, h.sd).RequeueAfter).To(BeZero())
+		expectCanaryReplicas(h.ns, 0)
+		Expect(expectRolledBack(h, "Line2CanaryErrors", 2, h.boundaryTime(3))).To(Equal(evidence))
+		Expect(h.gateEvents()).To(BeEmpty())
+	})
+
 	DescribeTable("rolls back at once on what the canary pod shows: its OOM kill, read from containerStatuses "+
 		"written directly, and a 5xx past warmup",
 		func(trip func(h *gateHarness, canary *corev1.Pod), want servingv1alpha1.GateTrip) {
