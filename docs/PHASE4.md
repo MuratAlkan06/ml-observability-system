@@ -59,7 +59,7 @@ Finalized at the design freeze; each slice names the D41–D50 decisions it exec
 | V1-S3 | Observe mode: `spec.gate` with the ordered mode enum, enum-validated verdict and reason vocabularies and Helm `crds/` parity; tag-bound arming (`spec.gate.forCanaryImageTag`, a mismatch degrading to Observe with an Event); the 50-slot evidence ring and counters in `status.gate`, byte-deterministic between boundaries; Events on transitions only; acts on nothing. The e2e stub gains controllable `/metrics` shaping histogram bucket deltas; k3d scenarios: clean pass, latency breach, unevaluable, warmup/pending; plus the assertions that a pipeline deploy leaves `spec.gate` intact and that the rendered CR manifest has no gate key (D42, D45). | done (#118 merged) |
 | V1-S4 | ActRollback: on a breach, steady restored through the TTL-expiry mechanism with no spec write; `CanaryActive` False with reason `BreachRolledBack`, the message naming the tripped line; the shared latch, released only through the closed spec shape (`decideWindow` gains one latched-reason check); the TTL unchanged; the promote verdict recorded, never dispatched; a k3d breach scenario (D45, D47). | done (#120 merged) |
 | V1-S5 | ActPromote: latch-then-dispatch of `deploy.yml`, at most once per latched verdict, the tag validated 40-hex; the 15-minute dispatch floor; the queued-run defer; a non-2xx left latched with no retry; the token Secret created host-side and mounted by the operator Deployment only, secret-absent degrading to verdict-only; the machine account and its mint-time scope check; the runbook's rotation/revocation line and the `main`-ancestry precondition for a window opened under ActPromote. Independent security review required (D43, D47). | done (#122 merged) |
-| V1-S6 | Live legs 1–3 per D50, all before 2026-11-20 (D48); the runbook v1 line — the acting-window abort checklist gains reject-the-pending-dispatch, a human attends every acting window with `watch-window.sh` beside it, what stays human per D46, the post-expiry rule (D47), no operator-image roll during an acting window (D45), D36 step 5's post-horizon target (D48); README's v0→v1 line updated with the D49 claim language (D46–D50). | done (#124 docs; legs 1–3 evidenced on #123 — leg 1 ruled satisfied 2026-10-14, legs 2–3 2026-10-15; close-out in this PR) |
+| V1-S6 | Live legs 1–3 per D50, all before 2026-11-20 (D48); the runbook v1 line — the acting-window abort checklist gains reject-the-pending-dispatch, a human attends every acting window with `watch-window.sh` beside it, what stays human per D46, the post-expiry rule (D47), no operator-image roll during an acting window (D45), D36 step 5's post-horizon target (D48); README's v0→v1 line updated with the D49 claim language (D46–D50). | done (#124 docs; legs 1–3 evidenced on #123 — leg 1 ruled satisfied 2026-10-14, legs 2–3 2026-10-15; close-out (#127)) |
 
 ## Acceptance criteria
 
@@ -159,16 +159,18 @@ Per slice:
 
 ## Phase-close criteria
 
-- Tag `v4.0.0` + release notes — pending the release gate (GO) and the tag window.
+- Tag `v4.0.0` + release notes — `v4.0.0` cut on the release
+  gate's GO, inside the gated tag window; release notes as the GitHub release body
+  (the v3.0.0 precedent).
 - Every #60 item this phase adds or touches is triaged: resolved or explicitly deferred — triaged
   on #60 (comment of 2026-10-15: one line executed, four deferrals with triggers, one option
   struck, the sittings' access key deleted after GO).
 - Every claim the phase adds ships with its evidence (`PRINCIPLES.md` §6) — #123 (the three
   legs, rings attached), #121 (the App record), #108 (rulings and obligations); the README
-  claim lands in this PR.
+  claim landed in #127.
 - The v0→v1 line updated in README and RUNBOOK: what the operator now decides, what stays
-  human — #124 (RUNBOOK v1 section, README v0→v1) and this PR (the sanctioned D49 claim with
-  its evidence).
+  human — #124 (RUNBOOK v1 section, README v0→v1) and #127 (the sanctioned D49 claim with its
+  evidence).
 
 ## Verification
 
