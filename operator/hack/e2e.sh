@@ -279,6 +279,13 @@ gate_events() {
     -o 'jsonpath={range .items[*]}{.reason}{"\n"}{end}' | grep '^Gate' || true
 }
 
+# gate_event_messages REASON: the messages of the gate's REASON Events on the
+# ServingDeployment, one a line.
+gate_event_messages() {
+  k get events --field-selector "involvedObject.kind=ServingDeployment,reason=$1" \
+    -o 'jsonpath={range .items[*]}{.message}{"\n"}{end}' || true
+}
+
 # knob_unset KNOB: the operator Deployment as installed does not set KNOB.
 knob_unset() {
   local names
@@ -696,7 +703,9 @@ assert_gate_acting() {
   at="$(gate_field rollbackVerdict.interval)"
   [ "$trip" = Line3CanaryLatency ] || die "the rollback trips ${trip}, not Line3CanaryLatency"
   # The trip and the latch are one status write: the latch before anything moves.
-  canary_active_is False/BreachRolledBack || die "CanaryActive is $(canary_active) with the rollback recorded"
+  # A window that ran below the level it opened at names itself here (#129).
+  canary_active_is False/BreachRolledBack \
+    || die "CanaryActive is $(canary_active) with the rollback recorded: status.gate.mode $(gate_field mode), the last record's effectiveLevel $(gate_levels | tail -n 1 | cut -d'|' -f4); GateDegraded: $(gate_event_messages GateDegraded | tr '\n' ' ')"
   gate_field_set rollbackVerdict.rolledBackAt || die "status.gate's rollback verdict carries no rolledBackAt"
   for i in $((at - 1)) "$at"; do
     rec="$(gate_levels | awk -F'|' -v i="$i" '$1 == i')"

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -9,7 +10,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	servingv1alpha1 "github.com/MuratAlkan06/ml-observability-system/operator/api/v1alpha1"
 	"github.com/MuratAlkan06/ml-observability-system/operator/internal/gate"
@@ -125,6 +130,27 @@ func (h *gateHarness) reopen(at time.Time) {
 	h.clock.t = at
 	setCanarySpec(h.sd, canaryImageTag, 1)
 	Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+}
+
+// reconcileReading reconciles h's ServingDeployment once, its reconciler served
+// read, a copy taken earlier, in place of the one the API server holds: the
+// manager's informer cache, lagging a write for a moment. Everything else is
+// read and written as before; the reconcile's error is returned.
+func (h *gateHarness) reconcileReading(read *servingv1alpha1.ServingDeployment) error {
+	live := h.r.Client
+	defer func() { h.r.Client = live }()
+	h.r.Client = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if sd, ok := obj.(*servingv1alpha1.ServingDeployment); ok && key == client.ObjectKeyFromObject(read) {
+				read.DeepCopyInto(sd)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	_, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
+	return err
 }
 
 var _ = Describe("The gate in ActRollback (D45, D47)", func() {
@@ -533,6 +559,84 @@ var _ = Describe("The acting level, sampled at window open (#119)", func() {
 			HavePrefix("Warning GateDegraded spec.gate.mode ActRollback is armed for canary tag "+canaryImageTag+
 				" from the next window")),
 	)
+
+	It("keeps the level sampled at the open through reconciles served a stale ServingDeployment: a status write "+
+		"is locked to what its reconcile read, so one served the object from before the open conflicts, and "+
+		"neither the grid's anchor nor the level moves (V1-S7, CI run 38790492622)", func() {
+		h := newGateHarness(actRollback)
+		h.addCanary(at(windowStart.Add(-time.Minute)))
+		setCanarySpec(h.sd, canaryImageTag, 1)
+		beforeOpen := getServingDeployment(h.sd)
+
+		By("the reconcile that opens the window samples ActRollback")
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		opening := getServingDeployment(h.sd)
+		markStatefulSetObserved(h.ns, shadowStatefulSetName)
+
+		By("a second, a second later, is served the ServingDeployment from before the open")
+		h.clock.t = windowStart.Add(time.Second)
+		staleOpen := h.reconcileReading(beforeOpen)
+
+		By("a third is served the opening's write, and nothing written since conflicts its own")
+		h.clock.t = windowStart.Add(2 * time.Second)
+		Expect(h.reconcileReading(opening)).To(Succeed())
+
+		By("a fourth reads the API server: the gate armed once, at the open's anchor and level")
+		h.clock.t = windowStart.Add(3 * time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		Expect(h.gateEvents()).To(ConsistOf("Normal GateArmed the gate is armed in ActRollback for canary tag " +
+			canaryImageTag + ": every 1m0s interval from 2026-09-29T12:00:00Z is recorded in status.gate, and a " +
+			"tripped line rolls the window back"))
+		latest := getServingDeployment(h.sd)
+		Expect(latest.Status.Gate.Mode).To(Equal(levelActRollback))
+		Expect(condition(latest, servingv1alpha1.ConditionCanaryActive).LastTransitionTime.Time).
+			To(BeTemporally("==", windowStart))
+		Expect(latest.Status.Gate.WindowStart.Time).To(BeTemporally("==", windowStart))
+		Expect(apierrors.IsConflict(staleOpen)).To(BeTrue(), "the stale open's write: %v", staleOpen)
+
+		By("the window acts at that level: line 3's two in a row roll it back, every record at ActRollback")
+		h.clean(2)
+		h.next(0, perInterval, 0)
+		h.next(0, perInterval, 0)
+		st := expectRolledBack(h, "Line3CanaryLatency", 3, h.boundaryTime(4))
+		Expect(levels(st)).To(Equal(repeat(levelActRollback, 4)))
+		Expect(st.Mode).To(Equal(levelActRollback))
+	})
+
+	It("never arms a raise in the window it was made in, whatever a stale reconcile writes: one served the "+
+		"ServingDeployment from before the window was requested would put CanaryActive back to NoCanary over "+
+		"the open window, and the next reconcile would open it again at the raised level; its write conflicts "+
+		"instead (V1-S7)", func() {
+		h := newGateHarness(observe)
+		h.addCanary(at(windowStart.Add(-time.Minute)))
+		beforeRequest := getServingDeployment(h.sd)
+		h.open()
+		h.clean(2)
+		h.drainOpenEvents()
+		evidence := h.gate()
+
+		By("spec.gate raised to ActRollback mid-window, then a reconcile served the object from before the request")
+		setGate(h.sd, actRollback)
+		h.clock.t = h.boundaryTime(2).Add(10 * time.Second)
+		stale := h.reconcileReading(beforeRequest)
+
+		By("the next reconcile reads the API server: the window open on its own anchor, its evidence at Observe")
+		h.clock.t = h.boundaryTime(2).Add(20 * time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		Expect(h.gateEvents()).To(BeEmpty())
+		latest := getServingDeployment(h.sd)
+		Expect(condition(latest, servingv1alpha1.ConditionCanaryActive).LastTransitionTime.Time).
+			To(BeTemporally("==", windowStart))
+		Expect(latest.Status.Gate).To(Equal(evidence))
+		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
+		expectOpen(h)
+
+		By("the next boundary records at Observe")
+		h.clean(1)
+		st := h.gate()
+		Expect(st.Mode).To(Equal(levelObserve))
+		Expect(levels(st)).To(Equal(repeat(levelObserve, 3)))
+	})
 })
 
 var _ = Describe("The rolled-back window's latch and evidence", func() {

@@ -1555,3 +1555,18 @@ retention jobs, Alembic.
 > and in any case before 2026-11-20 (D48). The operator is unchanged by this ruling: it mints
 > nothing and reads a ready-made bearer token. Ruled at V1-S6 (issue #121); no frozen text
 > edited.
+
+> **D43 clarification (2026-10-15, V1-S7):** every status write that transitions the window is
+> optimistically locked (the F4 discipline), after the acting-level demotion race of 2026-10-15
+> (CI run 38790492622). The lock is on every status write a reconcile makes, not only the open,
+> the breach latch and the expiry latch: the reconcile reads the ServingDeployment from the
+> manager's cache, which can lag a write the API server holds, and a merge patch carries the
+> conditions list whole, so an unlocked write from a stale read puts back the `CanaryActive` it
+> read. In the race a reconcile served the object from before the open opened the window again a
+> second later, moving the grid's anchor; one served the opening's write put its conditions back
+> over that; and the gate, finding the evidence of another anchor, re-armed the window as
+> evidence started mid-window, at Observe, under `spec.gate.mode` ActRollback. Locked, such a
+> write conflicts and the retry decides again from what was written. D42's sampling, D47's latch
+> and the grid are unchanged; the write recording GitHub's answer to a dispatch stays as it was,
+> its base the API server's reply to the locked latch, not a cached read. Recorded at V1-S7
+> (issue #129); no frozen text edited.

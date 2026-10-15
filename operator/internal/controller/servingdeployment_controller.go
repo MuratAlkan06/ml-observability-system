@@ -138,8 +138,9 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // the Ready, CanaryActive and ShadowPaused conditions,
 // status.observedGeneration and status.gate. The status is written on failure
 // too, so a refused adoption shows on the resource and not only in the
-// operator's log. A status write that latches a promote dispatch is locked to
-// the ServingDeployment as read, the dispatch is sent only after it lands, and
+// operator's log. That write is locked to the ServingDeployment as read, so
+// one decided from a stale read conflicts and is decided again (#121, F4;
+// #129); a promote dispatch it latches is sent only after it lands, and
 // GitHub's answer is written after (D43). While a window is open the request
 // is requeued for the earlier of its deadline and the gate's next boundary.
 // The spec is never written (docs/PLAN.md D31, D32, D37 and their O2 rulings;
@@ -197,15 +198,20 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	reconcileErr := joinErrors(stableErr, windowErr, gateErr)
 	if !equality.Semantic.DeepEqual(base.Status, sd.Status) {
-		// A promote dispatch's latch rides this write; if it fails, nothing
-		// is sent. That write is optimistically locked to the object this
-		// reconcile read, a cached read: a ServingDeployment written since,
-		// its tag pair above all, conflicts it, and the retry decides again
-		// from what was written (#121, F4).
-		patch := client.MergeFrom(base)
-		if step.dispatch != nil {
-			patch = client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
-		}
+		// The write is optimistically locked to the object this reconcile
+		// read, a cached read that can lag a write the API server holds: a
+		// ServingDeployment written since, its tag pair above all, conflicts
+		// it, and the retry decides again from what was written (#121, F4).
+		// A promote dispatch's latch rides it; if it fails, nothing is sent.
+		// Every write is locked, not only the latch's and the window's
+		// transitions: a merge patch carries the conditions list whole, so
+		// any write from a stale read puts back the CanaryActive it read,
+		// over an open or a latch it never saw. Unlocked, a stale reconcile
+		// could move an open window's anchor, leave status.gate the evidence
+		// of another anchor for the gate to re-arm at Observe, or close a
+		// window the next reconcile then opens again at the level spec.gate
+		// asks by then (#129; D42, D47).
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
 		if err := r.Status().Patch(ctx, sd, patch); err != nil {
 			return ctrl.Result{}, errors.Join(reconcileErr,
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
