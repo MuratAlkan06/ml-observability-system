@@ -60,6 +60,7 @@ Finalized at the design freeze; each slice names the D41–D50 decisions it exec
 | V1-S4 | ActRollback: on a breach, steady restored through the TTL-expiry mechanism with no spec write; `CanaryActive` False with reason `BreachRolledBack`, the message naming the tripped line; the shared latch, released only through the closed spec shape (`decideWindow` gains one latched-reason check); the TTL unchanged; the promote verdict recorded, never dispatched; a k3d breach scenario (D45, D47). | done (#120 merged) |
 | V1-S5 | ActPromote: latch-then-dispatch of `deploy.yml`, at most once per latched verdict, the tag validated 40-hex; the 15-minute dispatch floor; the queued-run defer; a non-2xx left latched with no retry; the token Secret created host-side and mounted by the operator Deployment only, secret-absent degrading to verdict-only; the machine account and its mint-time scope check; the runbook's rotation/revocation line and the `main`-ancestry precondition for a window opened under ActPromote. Independent security review required (D43, D47). | done (#122 merged) |
 | V1-S6 | Live legs 1–3 per D50, all before 2026-11-20 (D48); the runbook v1 line — the acting-window abort checklist gains reject-the-pending-dispatch, a human attends every acting window with `watch-window.sh` beside it, what stays human per D46, the post-expiry rule (D47), no operator-image roll during an acting window (D45), D36 step 5's post-horizon target (D48); README's v0→v1 line updated with the D49 claim language (D46–D50). | done (#124 docs; legs 1–3 evidenced on #123 — leg 1 ruled satisfied 2026-10-14, legs 2–3 2026-10-15; close-out (#127)) |
+| V1-S7 | Hotfix, found by the release gate on 24e2b35 (CI run 38790492622, OperatorE2E): the acting-level demotion race — a reconcile served a stale ServingDeployment re-opened a window armed in ActRollback, moving its grid's anchor; another wrote the conditions back over the move; and the gate re-armed the window at Observe. Every status write a reconcile makes is now optimistically locked to the object it read (#121's F4 discipline; the D43 clarification of 2026-10-15), an envtest regression red on 24e2b35 and green with the lock; `operator/hack/e2e.sh` step 8c's failure names `status.gate.mode`, the last record's `effectiveLevel` and any `GateDegraded` Event (D42, D43, D47). | in review (#130) |
 
 ## Acceptance criteria
 
@@ -159,12 +160,11 @@ Per slice:
 
 ## Phase-close criteria
 
-- Tag `v4.0.0` + release notes — `v4.0.0` cut on the release
-  gate's GO, inside the gated tag window; release notes as the GitHub release body
-  (the v3.0.0 precedent).
+- Tag `v4.0.0` + release notes — pending the release gate (GO) and the gated tag window;
+  release notes as the GitHub release body (the v3.0.0 precedent).
 - Every #60 item this phase adds or touches is triaged: resolved or explicitly deferred — triaged
   on #60 (comment of 2026-10-15: one line executed, four deferrals with triggers, one option
-  struck, the sittings' access key deleted after GO).
+  struck, the sittings' access key to be deleted after GO).
 - Every claim the phase adds ships with its evidence (`PRINCIPLES.md` §6) — #123 (the three
   legs, rings attached), #121 (the App record), #108 (rulings and obligations); the README
   claim landed in #127.

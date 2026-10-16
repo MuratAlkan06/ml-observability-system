@@ -322,14 +322,19 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 		Expect(sent[0].contentType).To(Equal("application/json"))
 		Expect(sent[0].body).To(MatchJSON(dispatchBody(canaryImageTag)))
 
-		By("two status writes, the latch and then GitHub's answer, and no write to anything else")
+		By("two status writes, the latch and then GitHub's answer, its state and status code alone, and no write " +
+			"to anything else")
 		h.writes.mu.Lock()
 		last := h.writes.writes[len(h.writes.writes)-2:]
 		h.writes.mu.Unlock()
 		Expect(last[0].subresource).To(Equal(statusSubresource))
 		Expect(last[0].body).To(ContainSubstring(`"state":"Attempted"`))
 		Expect(last[1].subresource).To(Equal(statusSubresource))
-		Expect(last[1].body).To(ContainSubstring(`"state":"Dispatched"`))
+		// The answer's write is the one status write left unlocked, its base
+		// the API server's reply to the latch (D43, the clarification of
+		// 2026-10-15): it carries GitHub's answer and nothing else.
+		Expect(last[1].body).To(MatchJSON(
+			`{"status":{"gate":{"promoteVerdict":{"dispatch":{"state":"Dispatched","statusCode":204}}}}}`))
 		expectNoWorkloadWrites(h.writes, writesOpen)
 
 		By("one Event says so; the window stays open for the pipeline's close")
@@ -683,6 +688,46 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 		h.clean(2)
 		Expect(gh.dispatches()).To(BeEmpty())
 		Expect(gh.runLists()).To(HaveLen(len(pendingRunStatuses)))
+		expectOpen(h)
+	})
+
+	It("never dispatches from a window opened at Observe, whatever a stale reconcile writes: spec.gate raised to "+
+		"ActPromote mid-window, one served the ServingDeployment from before the window was requested would put "+
+		"CanaryActive back to NoCanary, and the next boundary would open the window again armed to dispatch; its "+
+		"write conflicts instead, and the verdict is recorded with nothing asked of GitHub (V1-S7)", func() {
+		h := newGateHarness(observe)
+		gh, _ := armDispatch(h)
+		h.addCanary(at(windowStart.Add(-time.Minute)))
+		beforeRequest := getServingDeployment(h.sd)
+		h.open()
+		h.clean(2)
+		h.drainOpenEvents()
+
+		By("spec.gate raised to ActPromote mid-window, then a reconcile served the object from before the request")
+		setGate(h.sd, actPromote)
+		h.clock.t = h.boundaryTime(2).Add(10 * time.Second)
+		stale := h.reconcileReading(beforeRequest)
+
+		By("twelve clean boundaries: the verdict at the ninth, and as many as a window opened again at the first " +
+			"would need for its own")
+		h.clean(12)
+
+		By("nothing asked of GitHub, and the window on its own anchor, its verdict recorded at Observe")
+		Expect(gh.dispatches()).To(BeEmpty(), "a dispatch from a window opened at Observe")
+		Expect(gh.all()).To(BeEmpty())
+		latest := getServingDeployment(h.sd)
+		Expect(condition(latest, servingv1alpha1.ConditionCanaryActive).LastTransitionTime.Time).
+			To(BeTemporally("==", windowStart))
+		st := latest.Status.Gate
+		Expect(st.WindowStart.Time).To(BeTemporally("==", windowStart))
+		Expect(st.Mode).To(Equal(levelObserve))
+		Expect(levels(st)).To(Equal(repeat(levelObserve, 14)))
+		Expect(st.PromoteVerdict.Interval).To(BeEquivalentTo(10))
+		Expect(st.PromoteVerdict.At.Time).To(BeTemporally("==", h.boundaryTime(11)))
+		Expect(st.PromoteVerdict.Dispatch).To(BeNil(), "below ActPromote, no dispatch")
+		Expect(h.gateEvents()).To(ConsistOf("Normal GateWouldPromote interval 10 completed 11 consecutive clean " +
+			"intervals, the promote verdict: in Observe it is recorded and nothing is dispatched"))
+		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
 		expectOpen(h)
 	})
 
