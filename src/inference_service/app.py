@@ -10,8 +10,9 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Optional
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -62,7 +63,7 @@ def _default_redis_client(settings: Settings) -> Any:
 
 
 def create_app(
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     *,
     model_loader: Callable[[Settings], Model] = load_model,
     redis_factory: Callable[[Settings], Any] = _default_redis_client,
@@ -122,7 +123,7 @@ def create_app(
 
     @app.post("/predict")
     async def predict(payload: PredictRequest, request: Request) -> Response:
-        model: Optional[Model] = getattr(request.app.state, "model", None)
+        model: Model | None = getattr(request.app.state, "model", None)
         if model is None:
             return JSONResponse(status_code=503, content={"detail": "model_not_loaded"})
 

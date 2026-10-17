@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Protocol, Tuple
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class Model(Protocol):
 
     model_version: str
 
-    def predict(self, text: str) -> "Tuple[str, float, int, float]":
+    def predict(self, text: str) -> tuple[str, float, int, float]:
         """Return ``(label, confidence, token_count, latency_ms)``."""
         ...
 
@@ -33,7 +33,7 @@ class SentimentModel:
         self._max_length = max_length
         self.model_version = model_version
 
-    def predict(self, text: str) -> Tuple[str, float, int, float]:
+    def predict(self, text: str) -> tuple[str, float, int, float]:
         # token_count = len(input_ids) after truncation, INCLUDING [CLS]/[SEP] ⇒ [3, 256].
         # Computed outside the timed window; the pipeline tokenizes identically.
         input_ids = self._tokenizer(

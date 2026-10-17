@@ -123,10 +123,9 @@ class Consumer:
 
     def _insert_batch(self, records: Sequence[tuple]) -> int:
         """Batch INSERT in ONE transaction; return rows actually inserted."""
-        with self.conn.transaction():
-            with self.conn.cursor() as cur:
-                cur.executemany(_INSERT_SQL, records)
-                return cur.rowcount
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            cur.executemany(_INSERT_SQL, records)
+            return cur.rowcount
 
     def _ack(self, ids: Sequence) -> None:
         if not ids:

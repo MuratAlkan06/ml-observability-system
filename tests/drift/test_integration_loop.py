@@ -12,7 +12,7 @@ hard failures (see conftest.skip_or_fail and the module guard below).
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,15 +31,15 @@ _import_or_skip("psycopg")
 _import_or_skip("prometheus_client")
 _import_or_skip("pydantic_settings")
 
-from prometheus_client import REGISTRY  # noqa: E402
+from prometheus_client import REGISTRY
 
-from src.drift import runner  # noqa: E402
-from src.drift.alerting import SlackAlerter  # noqa: E402
-from src.drift.baseline import load_baseline  # noqa: E402
-from src.drift.config import DriftSettings  # noqa: E402
+from src.drift import runner
+from src.drift.alerting import SlackAlerter
+from src.drift.baseline import load_baseline
+from src.drift.config import DriftSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BASE_TS = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+BASE_TS = datetime(2026, 7, 14, 12, 0, 0, tzinfo=UTC)
 
 # v1.1 D5: identity is config now (not a constant). These mirror the frozen
 # defaults / the shadow drift job env.

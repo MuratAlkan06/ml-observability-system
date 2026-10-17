@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # INSERT column order — the sole source of truth for record-tuple layout.
 COLUMNS = (
@@ -42,7 +42,7 @@ def parse_entry(fields: Mapping[str, str]) -> tuple:
         request_id = uuid.UUID(str(fields["request_id"]))
 
         ts_ms = int(fields["ts_ms"])
-        ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+        ts = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
 
         text = str(fields["text"])
         if not 1 <= len(text) <= 1000:

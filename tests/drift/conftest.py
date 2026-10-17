@@ -118,6 +118,7 @@ def pg_dsn():
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     if run.returncode != 0:
         skip_or_fail(f"docker run postgres:16-alpine failed: {run.stderr.strip()}")
@@ -141,7 +142,7 @@ def pg_dsn():
             conn.commit()
         yield dsn
     finally:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
 
 
 @pytest.fixture()

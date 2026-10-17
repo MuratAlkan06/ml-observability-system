@@ -9,7 +9,8 @@ increments ``mlobs_stream_publish_failures_total`` and logs an ERROR.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from . import metrics
 
@@ -39,7 +40,7 @@ class PredictionProducer:
             )
         except Exception:
             metrics.STREAM_PUBLISH_FAILURES.inc()
-            logger.error("XADD to %s failed; event dropped", self._stream_name, exc_info=True)
+            logger.error("XADD to %s failed; event dropped", self._stream_name, exc_info=True)  # noqa: G201
             return False
         metrics.STREAM_EVENTS_PUBLISHED.inc()
         return True
@@ -48,7 +49,7 @@ class PredictionProducer:
         """Return True iff Redis answers PING (within the client's timeout)."""
         try:
             return bool(self._client.ping())
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def close(self) -> None:

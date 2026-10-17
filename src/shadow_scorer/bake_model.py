@@ -50,7 +50,7 @@ def _prepare_weights(settings: Settings) -> None:
         )
         logger.info("simple path: Hub .bin weights loaded directly (no conversion)")
         return
-    except Exception as exc:  # transformers-v5 pickle refusal -> convert once
+    except Exception as exc:  # transformers-v5 pickle refusal -> convert once  # noqa: BLE001
         logger.warning("direct .bin load failed (%s); converting to safetensors", exc)
 
     from huggingface_hub import hf_hub_download

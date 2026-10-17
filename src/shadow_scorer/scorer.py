@@ -125,7 +125,7 @@ class ShadowScorer:
             except MalformedEntry as exc:
                 logger.warning("skipping malformed entry %s: %s", entry_id, exc)
             except Exception as exc:  # scoring failure: skip, never abort the batch
-                logger.exception("skipping entry %s (scoring failed): %s", entry_id, exc)
+                logger.exception("skipping entry %s (scoring failed): %s", entry_id, exc)  # noqa: TRY401
 
         if not records:
             return
@@ -172,10 +172,9 @@ class ShadowScorer:
 
     def _insert_batch(self, records: Sequence[tuple]) -> int:
         """Batch INSERT in ONE transaction; return rows actually inserted."""
-        with self.conn.transaction():
-            with self.conn.cursor() as cur:
-                cur.executemany(_INSERT_SQL, records)
-                return cur.rowcount
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            cur.executemany(_INSERT_SQL, records)
+            return cur.rowcount
 
     def _ack(self, ids: Sequence) -> None:
         if not ids:

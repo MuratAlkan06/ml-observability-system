@@ -4,14 +4,14 @@ No real network — the HTTP call is injected. httpx itself is only imported
 transitively (it is in requirements/dev.txt).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.drift.alerting import SlackAlerter, format_alert_text
 from src.drift.constants import ALERT_COOLDOWN_SECONDS
 from src.drift.evaluate import DriftResult
 
-WINDOW_START = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
-WINDOW_END = datetime(2026, 7, 14, 12, 5, 0, tzinfo=timezone.utc)
+WINDOW_START = datetime(2026, 7, 14, 12, 0, 0, tzinfo=UTC)
+WINDOW_END = datetime(2026, 7, 14, 12, 5, 0, tzinfo=UTC)
 
 
 def make_result(*, class_drift=False, length_drift=False, confidence_drift=False):

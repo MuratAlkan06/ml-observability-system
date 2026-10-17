@@ -32,20 +32,25 @@ import argparse
 import csv
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.drift.baseline import CLASS_LABELS, laplace_smooth, raw_probs, validate_baseline  # noqa: E402
-from src.drift.constants import (  # noqa: E402
+from src.drift.baseline import (
+    CLASS_LABELS,
+    laplace_smooth,
+    raw_probs,
+    validate_baseline,
+)
+from src.drift.constants import (
     BASELINE_SAMPLE_COUNT,
     BASELINE_SCHEMA_VERSION,
     CONFIDENCE_BIN_EDGES,
     TOKEN_LEN_BIN_EDGES,
 )
-from src.drift.stats import histogram_counts  # noqa: E402
+from src.drift.stats import histogram_counts
 
 # Defaults = the v1.0 primary hard-codes so `python scripts/build_baseline.py`
 # with no flags reproduces baseline/baseline.json bit-identically (modulo the
@@ -150,7 +155,7 @@ def build_document(
     return {
         "schema_version": BASELINE_SCHEMA_VERSION,
         "model_version": model_version,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "sample_count": len(labels),
         "class_probs": dict(zip(CLASS_LABELS, class_probs)),
         "token_len_bin_edges": list(TOKEN_LEN_BIN_EDGES),
