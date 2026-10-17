@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from src.simulator.__main__ import build_parser, resolve_rate
 from src.simulator.config import DEFAULT_RATE_RPS, rate_from_env
 from src.simulator.core import Simulator
-from src.simulator.__main__ import build_parser, resolve_rate
 
 
 def test_rate_default_is_five_when_unset():

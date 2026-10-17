@@ -1,7 +1,7 @@
 """evaluate_window: per-test no-drift and firing cases with hand-computed stats."""
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -9,7 +9,7 @@ from src.drift.baseline import Baseline
 from src.drift.constants import CONFIDENCE_BIN_EDGES, TOKEN_LEN_BIN_EDGES
 from src.drift.evaluate import WindowRow, evaluate_window
 
-BASE_TS = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+BASE_TS = datetime(2026, 7, 14, 12, 0, 0, tzinfo=UTC)
 
 
 def uniform_baseline() -> Baseline:

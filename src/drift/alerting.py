@@ -97,7 +97,7 @@ class SlackAlerter:
             text = format_alert_text(self._model_version, test, stat, threshold, result)
             try:
                 self._post(self._webhook_url, {"text": text})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - log type only, httpx exc embeds webhook URL
                 # Deliberately no traceback/exception message: httpx errors
                 # embed the request URL, which is the secret webhook itself.
                 logger.error(

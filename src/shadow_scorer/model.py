@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Protocol, Tuple
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class Model(Protocol):
 
     model_version: str
 
-    def predict(self, text: str) -> "Tuple[str, float, int, float]":
+    def predict(self, text: str) -> tuple[str, float, int, float]:
         """Return ``(label, confidence, token_count, latency_ms)``."""
         ...
 
@@ -56,7 +56,7 @@ class ShadowModel:
         self._max_length = max_length
         self.model_version = model_version
 
-    def predict(self, text: str) -> Tuple[str, float, int, float]:
+    def predict(self, text: str) -> tuple[str, float, int, float]:
         # token_count from the shadow's OWN tokenizer (never the event's), specials
         # counted, then clamped to the frozen [3, 256] contract so the DB CHECK can
         # never be violated by an odd tokenizer edge case.
@@ -78,7 +78,7 @@ class ShadowModel:
         return label, confidence, token_count, latency_ms
 
 
-def _resolve_source(settings: Any) -> Tuple[str, Any]:
+def _resolve_source(settings: Any) -> tuple[str, Any]:
     """Pick the load source: converted local safetensors dir if the bake wrote
     one (transformers-v5 ``.bin`` fallback), else the baked model@revision cache.
     """

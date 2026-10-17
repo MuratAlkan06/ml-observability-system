@@ -14,12 +14,12 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-from prometheus_client import REGISTRY  # noqa: E402
+import pytest
+from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
-from inference_service.app import create_app  # noqa: E402
-from inference_service.config import Settings  # noqa: E402
+from inference_service.app import create_app
+from inference_service.config import Settings
 
 MODEL_VERSION = "distilbert-sst2-v1"
 

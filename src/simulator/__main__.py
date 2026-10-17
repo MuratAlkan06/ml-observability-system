@@ -13,8 +13,8 @@ import sys
 import httpx
 
 from .config import DEFAULT_URL, rate_from_env
-from .corpus import get_corpus
 from .core import Simulator
+from .corpus import get_corpus
 
 logger = logging.getLogger("mlobs.simulator")
 
