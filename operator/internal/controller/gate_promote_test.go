@@ -15,13 +15,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	servingv1alpha1 "github.com/MuratAlkan06/ml-observability-system/operator/api/v1alpha1"
+	"github.com/MuratAlkan06/ml-observability-system/operator/internal/gate"
 )
 
 // ActPromote's dispatch against a stand-in for GitHub's REST API (docs/PLAN.md
@@ -251,10 +251,33 @@ func staleCanaryEvent(why string) string {
 // dispatchedEvent is the Event of a verdict at interval GitHub accepted the
 // dispatch of, sent at sentAt.
 func dispatchedEvent(interval int32, sentAt time.Time) string {
+	return dispatchedEventFor(interval, canaryImageTag, sentAt)
+}
+
+// dispatchedEventFor is dispatchedEvent for a dispatch of sha.
+func dispatchedEventFor(interval int32, sha string, sentAt time.Time) string {
 	return fmt.Sprintf("Normal GatePromoteDispatched interval %d completed 11 consecutive clean intervals, the "+
 		"promote verdict: in ActPromote the gate dispatched deploy.yml on main with sha %s at %s, and GitHub "+
 		"accepted it (204); the pipeline promotes, its guards and approval unchanged, and its close-window patch "+
-		"closes the window; the run's URL is recorded by hand", interval, canaryImageTag, stamp(sentAt))
+		"closes the window; the run's URL is recorded by hand", interval, sha, stamp(sentAt))
+}
+
+// deferredEvent is the Event of the verdict at interval 10, its clean run the
+// canary pod's running tag, deferred on a Deploy run in status.
+func deferredEvent(tag, status string) string {
+	return "Warning GatePromoteDeferred the promote verdict of interval 10 for canary tag " + tag + " is " +
+		"deferred: a Deploy run is " + status + ", and a dispatch beside it would evict it or queue behind it; the " +
+		"gate checks again at each boundary, and dispatches once no run is pending while the clean run holds and " +
+		"15m0s of the TTL remain"
+}
+
+// deferralEndedEvent is the audit pointer of the verdict at interval 10,
+// deferred and then dispatched on the clean run that interval completed,
+// cleanRun intervals long, read from a canary pod running tag (#60).
+func deferralEndedEvent(interval, cleanRun int32, tag string) string {
+	return fmt.Sprintf("Normal GatePromoteDeferralEnded the deferred promote verdict of interval 10 is dispatched "+
+		"on the clean run interval %d completed: %d consecutive clean intervals, read from a canary pod running "+
+		"tag %s", interval, cleanRun, tag)
 }
 
 var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func() {
@@ -453,10 +476,7 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 			}))
 			Expect(gh.dispatches()).To(BeEmpty())
 			Expect(gh.runLists()[len(gh.runLists())-1].status).To(Equal(status), "the list stops at the first run")
-			Expect(h.gateEvents()).To(ConsistOf("Warning GatePromoteDeferred the promote verdict of interval 10 is " +
-				"deferred: a Deploy run is " + status + ", and a dispatch beside it would evict it or queue behind " +
-				"it; the gate checks again at each boundary, and dispatches once no run is pending while the clean " +
-				"run holds and 15m0s of the TTL remain"))
+			Expect(h.gateEvents()).To(ConsistOf(deferredEvent(canaryImageTag, status)))
 
 			By("still pending at the next boundary: listed again, nothing written, no Event")
 			before := h.gate()
@@ -475,7 +495,8 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 				State: servingv1alpha1.GateDispatchDispatched, AttemptedAt: new(metav1.NewTime(h.boundaryTime(13))),
 				SHA: canaryImageTag, StatusCode: 204,
 			}))
-			Expect(h.gateEvents()).To(ConsistOf(dispatchedEvent(10, h.boundaryTime(13))))
+			Expect(h.gateEvents()).To(ConsistOf(deferralEndedEvent(12, 13, canaryImageTag),
+				dispatchedEvent(10, h.boundaryTime(13))))
 			h.clean(2)
 			Expect(gh.dispatches()).To(HaveLen(1))
 		},
@@ -610,7 +631,7 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 
 	DescribeTable("turns a verdict down for a human, asking nothing of GitHub, when the canary pod it read is not "+
 		"shown to run the tag it would dispatch: the dispatched sha is tied to the evidence (#121, F1)",
-		func(race func(h *gateHarness, canary *corev1.Pod), why string) {
+		func(race func(h *gateHarness, canary *corev1.Pod), why string, moved []string) {
 			h := newGateHarness(actPromote)
 			gh, _ := armDispatch(h)
 			canary := h.addCanary(at(windowStart.Add(-time.Minute)))
@@ -628,7 +649,7 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 				State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
 			}))
 			Expect(gh.all()).To(BeEmpty(), "turned down before the token is read or a run listed")
-			Expect(h.gateEvents()).To(ConsistOf(staleCanaryEvent(why)))
+			Expect(h.gateEvents()).To(ConsistOf(append(moved, staleCanaryEvent(why))))
 			Expect(apiContainer(getCanaryDeployment(h.ns)).Image).To(Equal(
 				stableImage(getServingDeployment(h.sd).Spec.CanaryImageTag)),
 				"deployment/api-canary runs the spec's tag: the pod read is what lags")
@@ -642,10 +663,11 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 			"before the read, and the old pod, Running while a Recreate rollout stops it, is the one read",
 			func(h *gateHarness, _ *corev1.Pod) { setTagPair(h.sd, laterCanaryImageTag) },
 			"runs "+stableImage(canaryImageTag)+", not "+stableImage(laterCanaryImageTag)+", the image "+
-				"spec.canaryImageTag renders: what it reported is not the dispatched tag's"),
+				"spec.canaryImageTag renders: what it reported is not the dispatched tag's",
+			[]string{tagMovedEvent(levelActPromote, laterCanaryImageTag)}),
 		Entry("the canary pod read is being deleted, its successor not yet Running",
 			func(_ *gateHarness, canary *corev1.Pod) { markDeleting(canary) },
-			"is being deleted: what it reported may be an image the canary no longer runs"),
+			"is being deleted: what it reported may be an image the canary no longer runs", []string(nil)),
 	)
 
 	It("sends nothing when the ServingDeployment is written between the boundary's read and the latch's write: "+
@@ -664,13 +686,16 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 		}
 		h.writes.mu.Unlock()
 
-		By("the boundary's reconcile: the latch's write conflicts, and nothing lands or is sent")
+		By("the boundary's reconcile: the latch's write conflicts and is requeued, and nothing lands or is sent")
 		h.serve(perInterval, 0, 0)
 		h.n++
 		h.clock.t = h.boundaryTime(h.n)
-		_, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
+		conflicts := h.writes.conflictCount()
+		result, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
 		Expect(raced).To(BeTrue(), "the tag pair was patched as the latch was sent")
-		Expect(apierrors.IsConflict(err)).To(BeTrue(), "%v", err)
+		Expect(err).NotTo(HaveOccurred(), "a conflict is requeued, not returned (#60, V1-S7)")
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: conflictRequeueAfter}))
+		Expect(h.writes.conflictCount()).To(Equal(conflicts+1), "the latch's write conflicted")
 		Expect(h.gate().PromoteVerdict).To(BeNil(), "the latch, and the verdict with it, never landed")
 		Expect(gh.dispatches()).To(BeEmpty())
 		Expect(gh.runLists()).To(HaveLen(len(pendingRunStatuses)), "listed once, before the latch")
@@ -682,9 +707,9 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 		Expect(dispatchOf(h.gate())).To(Equal(&servingv1alpha1.GateDispatch{
 			State: servingv1alpha1.GateDispatchNotDispatched, Reason: servingv1alpha1.GateDispatchCanaryPodStale,
 		}))
-		Expect(h.gateEvents()).To(ConsistOf(staleCanaryEvent("runs " + stableImage(canaryImageTag) + ", not " +
-			stableImage(laterCanaryImageTag) + ", the image spec.canaryImageTag renders: what it reported is not " +
-			"the dispatched tag's")))
+		Expect(h.gateEvents()).To(ConsistOf(tagMovedEvent(levelActPromote, laterCanaryImageTag),
+			staleCanaryEvent("runs "+stableImage(canaryImageTag)+", not "+stableImage(laterCanaryImageTag)+", the "+
+				"image spec.canaryImageTag renders: what it reported is not the dispatched tag's")))
 		h.clean(2)
 		Expect(gh.dispatches()).To(BeEmpty())
 		Expect(gh.runLists()).To(HaveLen(len(pendingRunStatuses)))
@@ -727,7 +752,130 @@ var _ = Describe("The gate in ActPromote: the promote dispatch (D43, D47)", func
 		Expect(st.PromoteVerdict.Dispatch).To(BeNil(), "below ActPromote, no dispatch")
 		Expect(h.gateEvents()).To(ConsistOf("Normal GateWouldPromote interval 10 completed 11 consecutive clean " +
 			"intervals, the promote verdict: in Observe it is recorded and nothing is dispatched"))
-		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
+		Expect(stale).To(BeTrue(), "the stale reconcile's write conflicts")
+		expectOpen(h)
+	})
+
+	It("bounds a stale reconcile's workload writes to the one reconcile that decides again, and never lets them "+
+		"reach a promote: served the ServingDeployment from before the window was requested, a reconcile one clean "+
+		"interval short of the verdict scales deployment/api-canary to 0 before its status write conflicts; the "+
+		"stale write loses, the next reconcile scales the canary back, and the replaced canary pod costs one "+
+		"unevaluable interval and a warmup, its clean run reset, with nothing asked of GitHub until the new pod's "+
+		"own eleven (#60, V1-S7 Low 3; owner ruling R-D)", func() {
+		h := newGateHarness(actPromote)
+		gh, _ := armDispatch(h)
+		h.addCanary(at(windowStart.Add(-time.Minute)))
+		beforeRequest := getServingDeployment(h.sd)
+		h.open()
+		h.clean(10)
+		h.drainOpenEvents()
+		held := getServingDeployment(h.sd)
+		Expect(held.Status.Gate.CleanRun).To(BeEquivalentTo(10), "one clean interval short of the promote verdict")
+
+		By("mid-interval 10, a reconcile served the ServingDeployment from before the window was requested")
+		shadowWrites := len(h.writes.statefulSetWrites())
+		h.clock.t = h.boundaryTime(10).Add(10 * time.Second)
+		Expect(h.reconcileReading(beforeRequest)).To(BeTrue(), "its status write conflicts")
+
+		By("the stale write loses: the ServingDeployment is as it was, and only the canary scale sent first landed")
+		latest := getServingDeployment(h.sd)
+		Expect(latest.ResourceVersion).To(Equal(held.ResourceVersion))
+		Expect(latest.Status).To(Equal(held.Status))
+		expectCanaryReplicas(h.ns, 0)
+		Expect(h.writes.statefulSetWrites()).To(HaveLen(shadowWrites), "the shadow is not moved")
+		Expect(gh.all()).To(BeEmpty())
+
+		By("the next reconcile reads the API server: the window open on its own anchor, and the canary scaled back")
+		h.clock.t = h.boundaryTime(10).Add(11 * time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		expectOpen(h)
+		Expect(getServingDeployment(h.sd).Status.Gate).To(Equal(held.Status.Gate))
+
+		By("the scale to 0 and back replaced the canary pod: a new one, Ready inside the interval")
+		h.replaceCanary(canaryImageTag, at(h.boundaryTime(10).Add(40*time.Second)))
+
+		By("boundary 11, where the verdict was due: the interval the replacement spans is unevaluable, and the " +
+			"clean run reset")
+		h.clean(1)
+		st := h.gate()
+		replaced := st.Records[len(st.Records)-1]
+		Expect(replaced.Index).To(BeEquivalentTo(10))
+		Expect(replaced.Verdict).To(Equal(gateVerdict(gate.VerdictUnevaluable)))
+		Expect(replaced.Reasons).To(Equal([]servingv1alpha1.GateReason{
+			servingv1alpha1.GateReason(gate.ReasonCanaryWarmup), servingv1alpha1.GateReason(gate.ReasonCanaryPodChanged),
+		}))
+		Expect(st.CleanRun).To(BeZero())
+		Expect(st.BreachRun).To(BeEquivalentTo(1))
+		Expect(st.PromoteVerdict).To(BeNil())
+		Expect(st.RollbackVerdict).To(BeNil())
+		Expect(gh.all()).To(BeEmpty())
+
+		By("then one warmup interval and the new pod's own clean run from zero: no verdict through its tenth")
+		h.clean(11)
+		st = h.gate()
+		Expect(verdicts(st)[10:]).To(Equal(append(verdictList("Unevaluable", "Warmup"),
+			repeat(gateVerdict(gate.VerdictClean), 10)...)))
+		Expect(st.CleanRun).To(BeEquivalentTo(10))
+		Expect(st.PromoteVerdict).To(BeNil())
+		Expect(gh.all()).To(BeEmpty(), "nothing asked of GitHub")
+
+		By("the verdict, when it comes, is the new pod's own: its eleventh clean interval, the window's interval 22")
+		h.clean(1)
+		Expect(h.gate().PromoteVerdict.Interval).To(BeEquivalentTo(22))
+		Expect(gh.dispatches()).To(HaveLen(1))
+		Expect(h.gateEvents()).To(ConsistOf(dispatchedEvent(22, h.boundaryTime(23))))
+		expectOpen(h)
+	})
+
+	It("points a deferred verdict's dispatch at the evidence it rests on: deferred for one canary tag, the canary "+
+		"moved to another and its pod replaced, the new tag is dispatched only on the new pod's own clean run, "+
+		"under the verdict's first record, and an Event names that run (#60)", func() {
+		h, gh, _ := newPromoteHarness()
+		h.drainOpenEvents()
+		gh.set(func(gh *githubStub) { gh.pending["waiting"] = 1 })
+		h.clean(11)
+		Expect(dispatchOf(h.gate())).To(Equal(&servingv1alpha1.GateDispatch{
+			State: servingv1alpha1.GateDispatchDeferred, Reason: servingv1alpha1.GateDispatchRunPending,
+		}))
+		Expect(h.gateEvents()).To(ConsistOf(deferredEvent(canaryImageTag, "waiting")))
+
+		By("the run done, the canary moved to another tag mid-interval, and its pod replaced by one running it")
+		gh.set(func(gh *githubStub) { gh.pending["waiting"] = 0 })
+		setTagPair(h.sd, laterCanaryImageTag)
+		h.clock.t = h.boundaryTime(11).Add(10 * time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		h.replaceCanary(laterCanaryImageTag, at(h.boundaryTime(11).Add(20*time.Second)))
+		lists := len(gh.runLists())
+
+		By("the replacement breaks the clean run: the deferred verdict waits, asking nothing of GitHub")
+		h.clean(1)
+		st := h.gate()
+		Expect(st.Records[len(st.Records)-1].Reasons).To(ContainElement(
+			servingv1alpha1.GateReason(gate.ReasonCanaryPodChanged)))
+		Expect(st.CleanRun).To(BeZero())
+		Expect(h.gateEvents()).To(ConsistOf(tagMovedEvent(levelActPromote, laterCanaryImageTag)))
+
+		By("a warmup interval, then the new pod's ten clean intervals: still waiting")
+		h.clean(11)
+		Expect(h.gate().CleanRun).To(BeEquivalentTo(10))
+		Expect(dispatchOf(h.gate()).State).To(Equal(servingv1alpha1.GateDispatchDeferred))
+		Expect(gh.runLists()).To(HaveLen(lists))
+		Expect(gh.dispatches()).To(BeEmpty())
+		Expect(h.gateEvents()).To(BeEmpty())
+
+		By("its eleventh: the new tag dispatched under the verdict's record, and the Event naming the run it rests on")
+		h.clean(1)
+		sentAt := h.boundaryTime(h.n)
+		st = h.gate()
+		Expect(st.PromoteVerdict.Interval).To(BeEquivalentTo(10), "the verdict's record stays its first interval's")
+		Expect(dispatchOf(st)).To(Equal(&servingv1alpha1.GateDispatch{
+			State: servingv1alpha1.GateDispatchDispatched, AttemptedAt: new(metav1.NewTime(sentAt)),
+			SHA: laterCanaryImageTag, StatusCode: 204,
+		}))
+		Expect(gh.dispatches()).To(HaveLen(1))
+		Expect(gh.dispatches()[0].body).To(MatchJSON(dispatchBody(laterCanaryImageTag)))
+		Expect(h.gateEvents()).To(ConsistOf(deferralEndedEvent(h.n-1, 11, laterCanaryImageTag),
+			dispatchedEventFor(10, laterCanaryImageTag, sentAt)))
 		expectOpen(h)
 	})
 

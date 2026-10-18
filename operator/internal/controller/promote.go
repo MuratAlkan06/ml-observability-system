@@ -46,8 +46,10 @@ import (
 // accepted, or refused or unanswered and not retried. A verdict that fails 1,
 // 3, 4, 5, 6 or the runs' listing is not dispatched at all, and a human
 // actuates it. One that fails 7 is deferred and checked again at each later
-// boundary, where it waits too while 2 fails, until 1 fails. Every way a
-// dispatch does not happen lands on a human or on waiting, never on a promote.
+// boundary, where it waits too while 2 fails, until 1 fails; dispatched, it
+// rests on the clean run whole at that boundary, a canary replaced since
+// included, and its Event names that run (#60). Every way a dispatch does not
+// happen lands on a human or on waiting, never on a promote.
 
 // dispatchFloor is the TTL a verdict must have left to be dispatched (D47):
 // 13 minutes, the longest way back on record (deploy run 36517554863, its
@@ -55,11 +57,13 @@ import (
 const dispatchFloor = 15 * time.Minute
 
 // Event reasons of the promote dispatch, on transitions only: the verdict
-// dispatched, its dispatch failed, deferred, or not dispatched.
+// dispatched, its dispatch failed, deferred, a deferral ended in a dispatch,
+// or not dispatched.
 const (
 	eventReasonGatePromoteDispatched     = "GatePromoteDispatched"
 	eventReasonGatePromoteDispatchFailed = "GatePromoteDispatchFailed"
 	eventReasonGatePromoteDeferred       = "GatePromoteDeferred"
+	eventReasonGatePromoteDeferralEnded  = "GatePromoteDeferralEnded"
 	eventReasonGatePromoteNotDispatched  = "GatePromoteNotDispatched"
 )
 
@@ -132,9 +136,10 @@ func (r *ServingDeploymentReconciler) promote(
 			State: servingv1alpha1.GateDispatchDeferred, Reason: servingv1alpha1.GateDispatchRunPending,
 		}
 		return []gateEvent{{corev1.EventTypeWarning, eventReasonGatePromoteDeferred, fmt.Sprintf(
-			"the promote verdict of interval %d is deferred: a Deploy run is %s, and a dispatch beside it would "+
-				"evict it or queue behind it; the gate checks again at each boundary, and dispatches once no run "+
-				"is pending while the clean run holds and %s of the TTL remain", pv.Interval, pending, dispatchFloor)}}
+			"the promote verdict of interval %d for canary tag %s is deferred: a Deploy run is %s, and a dispatch "+
+				"beside it would evict it or queue behind it; the gate checks again at each boundary, and "+
+				"dispatches once no run is pending while the clean run holds and %s of the TTL remain",
+			pv.Interval, tag, pending, dispatchFloor)}}
 	}
 
 	pv.Dispatch = &servingv1alpha1.GateDispatch{
@@ -145,6 +150,19 @@ func (r *ServingDeploymentReconciler) promote(
 	step.dispatch = &dispatchPlan{token: token, sha: tag}
 	logf.FromContext(ctx).Info("The gate latched the promote dispatch; it is sent once the latch is written",
 		"interval", pv.Interval, "sha", tag)
+	if deferred && len(st.Records) > 0 {
+		// The audit pointer (#60): a deferred verdict is dispatched on the
+		// clean run whole at this boundary, which a canary replaced since its
+		// interval, and its tag moved, makes another pod's than the one
+		// deferred. The verdict's record stays its first interval's (D43), so
+		// the Event names the run the dispatch rests on: the interval this
+		// boundary ended, the ring's last record, and the tag the canary pod
+		// read runs (canaryRuns).
+		return []gateEvent{{corev1.EventTypeNormal, eventReasonGatePromoteDeferralEnded, fmt.Sprintf(
+			"the deferred promote verdict of interval %d is dispatched on the clean run interval %d completed: %d "+
+				"consecutive clean intervals, read from a canary pod running tag %s",
+			pv.Interval, st.Records[len(st.Records)-1].Index, st.CleanRun, tag)}}
+	}
 	return nil
 }
 

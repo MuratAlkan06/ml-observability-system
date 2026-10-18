@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -346,6 +347,49 @@ var _ = Describe("The canary window", func() {
 		active := condition(getServingDeployment(sd), servingv1alpha1.ConditionCanaryActive)
 		Expect(active.Reason).To(Equal(servingv1alpha1.ReasonWindowExpired))
 		expectCanaryReplicas(ns, 0)
+	})
+
+	It("records WindowExpired once, held until the write that closes the window lands: a reconcile served a "+
+		"stale ServingDeployment at the deadline has its write refused and records none, and the next records it "+
+		"(#60, V1-S7)", func() {
+		h := newGateHarness(nil)
+		setCanarySpec(h.sd, canaryImageTag, 1)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		opening := getServingDeployment(h.sd)
+		markStatefulSetObserved(h.ns, shadowStatefulSetName)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		markCanaryObserved(h.ns, 0)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		drainEvents(h.r)
+		expired := func(events []string) []string {
+			var out []string
+			for _, e := range events {
+				if strings.Contains(e, eventReasonWindowExpired) {
+					out = append(out, e)
+				}
+			}
+			return out
+		}
+
+		By("at the deadline, a reconcile served the ServingDeployment as the window opened: its close conflicts")
+		h.clock.t = windowStart.Add(canaryWindowTTL)
+		Expect(h.reconcileReading(opening)).To(BeTrue(), "its status write conflicts")
+		Expect(expired(drainEvents(h.r))).To(BeEmpty(), "no Event for a close that did not land")
+		Expect(condition(getServingDeployment(h.sd), servingv1alpha1.ConditionCanaryActive).Status).
+			To(Equal(metav1.ConditionTrue))
+
+		By("the next reconcile reads the API server and closes the window: one WindowExpired")
+		h.clock.t = windowStart.Add(canaryWindowTTL + time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		Expect(condition(getServingDeployment(h.sd), servingv1alpha1.ConditionCanaryActive).Reason).
+			To(Equal(servingv1alpha1.ReasonWindowExpired))
+		Expect(expired(drainEvents(h.r))).To(ConsistOf("Normal WindowExpired the canary window reached its 45m0s " +
+			"TTL; closing it and leaving the spec's canary fields to the close-window patch"))
+
+		By("latched: later reconciles record no more")
+		h.clock.t = windowStart.Add(canaryWindowTTL + 2*time.Second)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		Expect(expired(drainEvents(h.r))).To(BeEmpty())
 	})
 
 	It("moves neither the canary nor the shadow when a deployment/api-canary it does not control exists", func() {
