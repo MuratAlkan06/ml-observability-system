@@ -131,18 +131,53 @@ jobs:
     # turn this job red with no change in the repository, though only at its
     # next run: it has no schedule, and runs only on the workflow's paths
     # filter and on manual dispatch. The standard library it checks is the
-    # go.mod toolchain's, not the builder image's go1.26.x (operator/Dockerfile).
+    # builder image's (#143): the Go version is derived at run time from
+    # operator/Dockerfile's builder tag, and the scan runs under
+    # GOTOOLCHAIN=local and CGO_ENABLED=0, mirroring the build. A builder bump
+    # moves the scan with it, and a bump of go.mod's toolchain line alone
+    # cannot leave it green against a standard library the shipped binary does
+    # not carry.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The pattern is anchored and must match exactly one line, so a builder
+      # line that is removed, duplicated or reworded fails here instead of
+      # handing setup-go some other version.
+      - name: Builder Go version (operator/Dockerfile)
+        id: builder-go
+        run: |
+          pattern='^FROM golang:([0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64} AS builder$'
+          count="$(grep -cE "$pattern" Dockerfile || true)"
+          line="$(grep -E "$pattern" Dockerfile || true)"
+          if [ "$count" != "1" ] || ! [[ "$line" =~ $pattern ]]; then
+            echo "::error::operator/Dockerfile has ${count:-no} lines matching the builder pattern, expected exactly one (#143)"
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "ok: builder Go ${version} (operator/Dockerfile)"
       - uses: actions/setup-go@v7
         with:
-          go-version-file: operator/go.mod
+          go-version: ${{ steps.builder-go.outputs.version }}
           cache-dependency-path: operator/go.sum
+      # GOTOOLCHAIN=local keeps go from switching to go.mod's toolchain line,
+      # which would defeat the pin; both variables mirror the builder's build.
+      # The literal match with its trailing space keeps 1.26.90 from passing
+      # for 1.26.9.
       - name: Scan (source mode, JSON)
+        env:
+          BUILDER_GO: ${{ steps.builder-go.outputs.version }}
+          GOTOOLCHAIN: local
+          CGO_ENABLED: "0"
         run: |
+          got="$(go version)"
+          if [ -z "$BUILDER_GO" ] || [[ "$got" != *"go${BUILDER_GO} "* ]]; then
+            echo "::error::go version reports '${got}', expected go${BUILDER_GO} from operator/Dockerfile (#143)"
+            exit 1
+          fi
+          echo "ok: ${got}"
           go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... \
             > "${RUNNER_TEMP}/govulncheck.json"
       - name: Classify findings against the accepted list

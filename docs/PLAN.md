@@ -1640,6 +1640,14 @@ retention jobs, Alembic.
   versions. And a job landed red on three findings already rated None is a check that gets
   ignored, which hides the next called finding that matters.
 
+> **D51 note (2026-10-18, #143):** the `Govulncheck` job now scans with the builder image's
+> Go, derived at run time from `operator/Dockerfile`'s builder tag, under
+> `GOTOOLCHAIN=local` and `CGO_ENABLED=0` mirroring the build. This closes M1 (#60, comment
+> 6248664638): a go.mod toolchain bump without a builder bump can no longer leave the scan
+> green against a standard library the shipped binary does not carry. D51's sentence "the
+> standard library it checks is the go.mod toolchain's, go1.27.2" describes the behavior
+> before this note. No frozen text edited.
+
 # Post-v4.0.0 hardening — ADR addendum (D52)
 
 > FROZEN (owner ruling 2026-10-18 recorded on #82, comment 6248173104; numbered D52, not D51, by
