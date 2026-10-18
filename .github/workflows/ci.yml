@@ -514,15 +514,14 @@ jobs:
         # --disable-network-policy are one atomic pair (the D34 erratum of
         # O2): k3s's network-policy controller refuses a single-port range
         # and crash-loops the server, so neither line goes in without the
-        # other. The two -p mappings publish the api's node port and
-        # grafana's hostPort off the server node's container, which is what
-        # lets smoke.sh curl 127.0.0.1:8000 and :3000 here exactly as it does
-        # on the EC2 box.
+        # other. The -p mapping publishes the api's node port off the server
+        # node's container, which is what lets smoke.sh curl 127.0.0.1:8000
+        # here exactly as it does on the EC2 box. Grafana has no host port to
+        # publish (D52): smoke.sh reaches it by port-forward, here as there.
         run: |
           k3d cluster create "$CLUSTER_NAME" \
             --image "$K3S_IMAGE" \
             -p '8000:8000@server:0' \
-            -p '3000:3000@server:0' \
             --k3s-arg '--disable=traefik@server:*' \
             --k3s-arg '--disable=servicelb@server:*' \
             --k3s-arg '--disable=metrics-server@server:*' \
@@ -1004,9 +1003,13 @@ jobs:
 
       - name: Create k3d cluster
         # K3sSmoke's cluster, flag for flag: the host's add-ons disabled, the
-        # D34 pair, and the api's port and grafana's published where smoke.sh
-        # looks. The pre-cutover tree's hostPort 8000 is reached through the
-        # same -p mapping as the NodePort after it.
+        # D34 pair, and the api's port published where smoke.sh looks. The
+        # pre-cutover tree's hostPort 8000 is reached through the same -p
+        # mapping as the NodePort after it. The 3000 mapping, which K3sSmoke
+        # dropped with D52, is the pre-cutover tree's alone: its Grafana still
+        # carries hostPort 3000, and its smoke.sh looks for it at
+        # 127.0.0.1:3000. This tree's smoke.sh port-forwards Grafana on 3001,
+        # clear of the mapping.
         run: |
           k3d cluster create "$CLUSTER_NAME" \
             --image "$K3S_IMAGE" \

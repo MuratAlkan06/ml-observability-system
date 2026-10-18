@@ -37,7 +37,7 @@
 #   5. Prometheus reports exactly the state's scrape jobs up: every job in
 #      prometheus/prometheus.yml, less api_canary when steady and less
 #      shadow_scorer in a window
-#   6. Grafana's /api/health answers 200
+#   6. Grafana's /api/health answers 200 through a port-forward (D52)
 #
 # Output is fixed lines. Nothing here reads the .env, but the same discipline
 # applies: no xtrace, and failures name the check rather than echoing a payload.
@@ -48,14 +48,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 NAMESPACE="${NAMESPACE:-mlobs}"
-# The api's node port (D34) and Grafana's host port (D19). Overridable so the
-# script can be pointed at a tunnel rather than the box it runs on.
+# The api's node port (D34). Overridable so the script can be pointed at a
+# tunnel rather than the box it runs on.
 API_URL="${API_URL:-http://127.0.0.1:8000}"
-GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
-# Prometheus has no host port, and the canary's metrics are read off its own
-# Service; both are reached over port-forwards this script opens and closes.
+# Prometheus has no host port, nor Grafana since D52, and the canary's metrics
+# are read off its own Service; all three are reached over port-forwards this
+# script opens and closes. Grafana's local port is not its own 3000, which a
+# reader's dashboard port-forward may hold (README, "Viewing the dashboards"),
+# as may the pre-cutover tree's host port in the D36 rehearsal's cluster.
 PROMETHEUS_LOCAL_PORT="${PROMETHEUS_LOCAL_PORT:-9090}"
 CANARY_LOCAL_PORT="${CANARY_LOCAL_PORT:-8001}"
+GRAFANA_LOCAL_PORT="${GRAFANA_LOCAL_PORT:-3001}"
 
 ROLLOUT_TIMEOUT_SECONDS="${ROLLOUT_TIMEOUT_SECONDS:-180}"
 STATE_TIMEOUT_SECONDS="${STATE_TIMEOUT_SECONDS:-180}"
@@ -351,9 +354,14 @@ stop_port_forwards
 
 # --- 6. grafana --------------------------------------------------------------
 
-grafana_code="$(curl -fsS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/api/health")" \
-  || die "GET ${GRAFANA_URL}/api/health did not return 2xx"
+# The way a reader reaches it: a port-forward to the Deployment, which has no
+# host port and no Service (D52).
+port_forward "deployment/grafana" "$GRAFANA_LOCAL_PORT" 3000 /api/health
+grafana_url="http://127.0.0.1:${GRAFANA_LOCAL_PORT}"
+grafana_code="$(curl -fsS -o /dev/null -w '%{http_code}' "${grafana_url}/api/health")" \
+  || die "GET ${grafana_url}/api/health did not return 2xx"
 [ "$grafana_code" = "200" ] || die "GET /api/health returned ${grafana_code}, expected 200"
+stop_port_forwards
 echo "ok: grafana /api/health 200"
 
 echo "ok: smoke passed (${state} state)"

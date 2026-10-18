@@ -3,14 +3,17 @@
 # Compose provenance: the `grafana` service in docker-compose.yml at
 # f33b65909820d9a4659e291f166e448077dab677 (retired, D40).
 #
-# The one hostPort workload since the api moved to a NodePort Service in
-# Phase 3 O2 (D19 and its O2 erratum): 3000 is the port the README tells a
-# reader to open, and traefik/servicelb are disabled on this host.
+# No hostPort since D52. It was the last one in the namespace after the api
+# moved to a NodePort Service in Phase 3 O2 (D19 and its O2 erratum), and the
+# one thing in it that broke the Pod Security baseline profile (#82). The
+# dashboards are reached through `kubectl port-forward`, over SSM on the host
+# (README, "Viewing the dashboards").
 #
 # No Service object, deliberately. Nothing inside the cluster dials Grafana —
 # the traffic is one-way, Grafana to `prometheus:9090` — and the only client is
-# a browser on the host, which arrives through the hostPort. A ClusterIP with no
-# in-cluster consumer would be an object to maintain and nothing to show for it.
+# a browser at the far end of a port-forward, which targets this Deployment and
+# needs no Service. A ClusterIP with no in-cluster consumer would be an object
+# to maintain and nothing to show for it.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,8 +24,10 @@ metadata:
     app: grafana
 spec:
   replicas: 1
-  # The hostPort deadlock D22 describes: a RollingUpdate would wait forever
-  # for :3000 to be free.
+  # Recreate outlived its first reason, the hostPort deadlock D22 describes,
+  # and stays (D52): one Grafana pod at a time on the 4GB host, and the
+  # strategy of the pre-cutover tree's Grafana, which D36's way-back applies
+  # over this one, so the rollback never changes a live Deployment's strategy.
   strategy:
     type: Recreate
   selector:
@@ -39,7 +44,6 @@ spec:
           ports:
             - name: http
               containerPort: 3000
-              hostPort: 3000
           env:
             # Anonymous read-only access: single-node demo with no auth
             # (docs/PLAN.md §0 non-goals); the login screen only gets in the way.

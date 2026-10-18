@@ -36,9 +36,10 @@ owns `deployment/api`, created or adopted from the `ServingDeployment` in
 `deployment/api-canary`, which runs only inside a canary window. Eight Services
 named exactly as the Compose DNS names so `prometheus/prometheus.yml` is mounted
 unchanged (D21), plus `api-canary`, the canary's own scrape address. One PVC,
-for Postgres (D20). No Ingress and no LoadBalancer: `grafana` publishes host
-port 3000, the api is a NodePort Service on 8000 (D34), and traefik and
-servicelb are disabled on the host (D19).
+for Postgres (D20). No Ingress, no LoadBalancer and no host port: the api is a
+NodePort Service on 8000 (D34), `grafana` is reached through
+`kubectl port-forward` (D52), and traefik and servicelb are disabled on the
+host (D19).
 
 Nothing under this directory is a copy of anything. `apply.sh` builds every
 ConfigMap from the canonical files — `prometheus/prometheus.yml`,
@@ -105,7 +106,9 @@ together by hand fails the check. In either state it then asserts the
 rollouts, `GET /health` 200 and a `POST /predict` round trip carrying
 `request_id` + `label` + `confidence` through the api's node port; that
 Prometheus reports exactly the state's jobs up, `drift_shadow` included in
-both; and Grafana `/api/health` 200. In a window it also sends twenty
+both; and Grafana `/api/health` 200 through a port-forward to
+`deployment/grafana` on local port 3001 (`GRAFANA_LOCAL_PORT`), clear of a
+dashboard port-forward's 3000. In a window it also sends twenty
 `/predict` connections through the same port and requires the canary's own
 predictions counter to have moved: the canary is serving behind the shared
 Service, not only running. Needs `kubectl`, `curl` and `python3` on PATH.
@@ -178,13 +181,14 @@ Everything below assumes `-n mlobs`.
 | `docker compose exec -T postgres psql -U mlobs -d mlobs` | `kubectl -n mlobs exec -it deployment/postgres -- psql -U mlobs -d mlobs` |
 | `127.0.0.1:9090` (Prometheus loopback publish) | `kubectl -n mlobs port-forward svc/prometheus 9090:9090` |
 | `127.0.0.1:6379` (Redis loopback publish) | `kubectl -n mlobs port-forward svc/redis 6379:6379` |
-| `localhost:8000` / `localhost:3000` | unchanged — `:3000` is Grafana's host port, and `:8000` the api's NodePort (D34) |
+| `localhost:8000` | unchanged — the api's NodePort (D34) |
+| `localhost:3000` (Grafana publish) | `kubectl -n mlobs port-forward deployment/grafana 3000:3000`, then `localhost:3000`; Grafana has no host port since D52 |
 | `docker compose up -d --build` | rebuild, push or import, then re-run `apply.sh` with the new `IMAGE_TAG` |
 | `docker compose down` | `kubectl delete namespace mlobs` (also deletes the PVC) |
 
-Prometheus and Redis lost their loopback publishes on purpose: a port-forward
-opens a socket only while someone is using it, which is strictly less exposure
-than a permanently bound port (D19).
+Prometheus and Redis lost their loopback publishes on purpose, and Grafana its
+public port with D52: a port-forward opens a socket only while someone is using
+it, which is strictly less exposure than a permanently bound port (D19).
 
 ### Schema changes
 
@@ -227,15 +231,15 @@ sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
 # 2. a cluster shaped like the host: same k3s, same add-ons disabled, the
 #    same exact node-port range with network policy off (D34 and its O2
 #    erratum; the two lines are a pair, never one without the other), and
-#    :8000 and :3000 published through to your machine. On a Linux machine,
-#    load br_netfilter first: k3s loads it itself on a real host but cannot
-#    from inside a k3d node, and with network policy off nothing else does,
-#    so no pod would reach a Service. Docker Desktop already has it loaded.
+#    :8000 published through to your machine (Grafana is a port-forward,
+#    D52). On a Linux machine, load br_netfilter first: k3s loads it itself
+#    on a real host but cannot from inside a k3d node, and with network
+#    policy off nothing else does, so no pod would reach a Service. Docker
+#    Desktop already has it loaded.
 sudo modprobe br_netfilter   # Linux only
 k3d cluster create mlobs-dev \
   --image rancher/k3s:v1.36.4-k3s1 \
   -p '8000:8000@server:0' \
-  -p '3000:3000@server:0' \
   --k3s-arg '--disable=traefik@server:*' \
   --k3s-arg '--disable=servicelb@server:*' \
   --k3s-arg '--disable=metrics-server@server:*' \
@@ -305,8 +309,12 @@ pre-cutover tree redeployed by its own `apply.sh`, and its `smoke.sh` green.
 The host procedure it rehearses is in [`docs/RUNBOOK.md`](../../docs/RUNBOOK.md).
 
 It needs a cluster that has had nothing deployed — it refuses one that
-already holds the `mlobs` namespace — so on the cluster from step 2 it runs in
-place of step 5. Besides the five images of step 3 it needs two more tags on
+already holds the `mlobs` namespace — so it runs in place of step 5, on the
+cluster from step 2 created with one more mapping, `-p '3000:3000@server:0'`,
+as `RollbackRehearsal`'s is. That mapping is the pre-cutover tree's alone: its
+Grafana still carries hostPort 3000, and its `smoke.sh` looks for it on
+`127.0.0.1:3000`. This tree's `smoke.sh` port-forwards Grafana on 3001, clear
+of it. Besides the five images of step 3 it needs two more tags on
 the same builds: the pre-cutover SHA, which the job pins to the SHA the host
 ran before O4, and a canary tag. The pre-cutover tree is read from git history
 with `git archive`, so a shallow clone has to be deepened first.
@@ -325,15 +333,17 @@ IMAGE_PREFIX=docker.io/library PRE_CUTOVER_SHA="${PRE}" IMAGE_TAG="${TAG}" \
 # ends "ok: D36 rollback rehearsal passed"
 ```
 
-On a machine where something else already holds `:8000`, `:3000` and `:9090`
-(a Compose-era stack left running, say), publish the cluster on other ports
-(`-p '18000:8000@server:0'`, `-p '13000:3000@server:0'`) and point both trees'
-`smoke.sh` there through the environment the rehearsal passes on:
-`API_URL=http://127.0.0.1:18000`, `GRAFANA_URL=http://127.0.0.1:13000` and
-`PROMETHEUS_LOCAL_PORT=19090`.
-Without the last one, the port-forward to the cluster's Prometheus cannot bind
-`:9090`, and `smoke.sh`'s readiness probe is answered by whatever holds
-`:9090` instead.
+On a machine where something else already holds `:8000`, `:3000`, `:3001` or
+`:9090` (a Compose-era stack left running, say), publish the cluster on other
+ports (`-p '18000:8000@server:0'`, and for the rehearsal
+`-p '13000:3000@server:0'`) and point both trees' `smoke.sh` there through the
+environment the rehearsal passes on: `API_URL=http://127.0.0.1:18000` and
+`PROMETHEUS_LOCAL_PORT=19090` for both, `GRAFANA_LOCAL_PORT=13001` for this
+tree's Grafana port-forward, and `GRAFANA_URL=http://127.0.0.1:13000` for the
+pre-cutover tree, whose `smoke.sh` still reaches Grafana's host port.
+Without the port-forward ports, a port-forward to the cluster cannot bind its
+local port, and `smoke.sh`'s readiness probe is answered by whatever holds that
+port instead.
 
 ## Migration record and rehearsal results (2026-09-27)
 
