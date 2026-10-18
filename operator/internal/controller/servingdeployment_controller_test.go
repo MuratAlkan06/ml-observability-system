@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -16,8 +19,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -311,5 +317,100 @@ var _ = Describe("Reconciling the stable api Deployment", func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sd), latest)).To(Succeed())
 			g.Expect(meta.IsStatusConditionTrue(latest.Status.Conditions, servingv1alpha1.ConditionReady)).To(BeTrue())
 		}).WithTimeout(managerPollTimeout).WithPolling(managerPollInterval).Should(Succeed())
+	})
+})
+
+// conflictLogMessage is the Info line of a status write the optimistic lock
+// refused.
+const conflictLogMessage = "The status write conflicted with a newer ServingDeployment; deciding again from it"
+
+// jsonLogLines decodes what a production zap logger wrote to logs: one JSON
+// object a line.
+func jsonLogLines(logs *bytes.Buffer) []map[string]any {
+	var out []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		entry := map[string]any{}
+		Expect(json.Unmarshal([]byte(line), &entry)).To(Succeed(), line)
+		out = append(out, entry)
+	}
+	return out
+}
+
+var _ = Describe("Writing the status, locked to what was read (#60, V1-S7)", func() {
+	It("requeues a write the optimistic lock refuses, logged at Info and not returned: a reconcile served a "+
+		"stale ServingDeployment logs no Reconciler error and takes no backoff, and the next decides again from "+
+		"what was written", func() {
+		h := newGateHarness(nil)
+		setCanarySpec(h.sd, canaryImageTag, 1)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		opening := getServingDeployment(h.sd)
+		markStatefulSetObserved(h.ns, shadowStatefulSetName)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		written := getServingDeployment(h.sd)
+		Expect(written.ResourceVersion).NotTo(Equal(opening.ResourceVersion), "a status write landed since the open")
+
+		By("a reconcile served the open's ServingDeployment: its write conflicts, and is requeued, not returned")
+		logs := &bytes.Buffer{}
+		conflicts := h.writes.conflictCount()
+		result, err := h.reconcileReadingIn(logf.IntoContext(ctx, zap.New(zap.WriteTo(logs))), opening)
+		Expect(err).NotTo(HaveOccurred(), "a returned error is a Reconciler error at ERROR, retried with backoff")
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: conflictRequeueAfter}))
+		Expect(h.writes.conflictCount()).To(Equal(conflicts + 1))
+		entries := jsonLogLines(logs)
+		Expect(entries).To(ContainElement(And(
+			HaveKeyWithValue("level", "info"),
+			HaveKeyWithValue("msg", conflictLogMessage),
+			HaveKeyWithValue("error", ContainSubstring("the object has been modified")))))
+		Expect(entries).NotTo(ContainElement(HaveKeyWithValue("level", "error")))
+		Expect(getServingDeployment(h.sd).ResourceVersion).To(Equal(written.ResourceVersion),
+			"the stale write left nothing")
+
+		By("the next reconcile reads the API server and decides again, conflicting nothing")
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+		Expect(h.writes.conflictCount()).To(Equal(conflicts + 1))
+		expectCanaryReplicas(h.ns, 1)
+	})
+
+	It("returns a status write's other errors as before: one the API server fails it with is the reconcile's "+
+		"error", func() {
+		h := newGateHarness(nil)
+		live := h.r.Client
+		DeferCleanup(func() { h.r.Client = live })
+		h.r.Client = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+				patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if sub != statusSubresource {
+					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				}
+				return apierrors.NewServiceUnavailable("the API server is shedding load")
+			},
+		})
+		setCanarySpec(h.sd, canaryImageTag, 1)
+		result, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
+		Expect(err).To(MatchError(ContainSubstring("writing the status of servingdeployment/api: ")))
+		Expect(apierrors.IsServiceUnavailable(err)).To(BeTrue(), "%v", err)
+		Expect(result).To(BeZero())
+	})
+
+	It("returns a conflict beside another error with it, as before: the reconcile's own failure stays its "+
+		"error", func() {
+		h := newGateHarness(nil)
+		Expect(k8sClient.Create(ctx, newCanaryDeployment(h.ns, "example.com/elsewhere:latest", 1))).To(Succeed())
+		stale := getServingDeployment(h.sd)
+		setCanarySpec(h.sd, canaryImageTag, 1)
+		Expect(reconcileServingDeployment(h.r, h.sd)).To(
+			MatchError(ContainSubstring("deployment/api-canary exists and is not controlled")))
+		Expect(getServingDeployment(h.sd).ResourceVersion).NotTo(Equal(stale.ResourceVersion))
+
+		By("a reconcile served the ServingDeployment from before: its write conflicts, and both are returned")
+		conflicts := h.writes.conflictCount()
+		_, err := h.reconcileReadingIn(ctx, stale)
+		Expect(h.writes.conflictCount()).To(Equal(conflicts + 1))
+		Expect(err).To(MatchError(ContainSubstring("deployment/api-canary exists and is not controlled")))
+		Expect(err).To(MatchError(ContainSubstring("writing the status of servingdeployment/api: ")))
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "%v", err)
 	})
 })

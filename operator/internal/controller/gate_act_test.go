@@ -10,7 +10,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -132,11 +131,14 @@ func (h *gateHarness) reopen(at time.Time) {
 	Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
 }
 
-// reconcileReading reconciles h's ServingDeployment once, its reconciler served
-// read, a copy taken earlier, in place of the one the API server holds: the
-// manager's informer cache, lagging a write for a moment. Everything else is
-// read and written as before; the reconcile's error is returned.
-func (h *gateHarness) reconcileReading(read *servingv1alpha1.ServingDeployment) error {
+// reconcileReadingIn reconciles h's ServingDeployment once, in reconcileCtx,
+// its reconciler served read, a copy taken earlier, in place of the one the
+// API server holds: the manager's informer cache, lagging a write for a
+// moment. Everything else is read and written as before; the reconcile's
+// result and error are returned.
+func (h *gateHarness) reconcileReadingIn(
+	reconcileCtx context.Context, read *servingv1alpha1.ServingDeployment,
+) (reconcile.Result, error) {
 	live := h.r.Client
 	defer func() { h.r.Client = live }()
 	h.r.Client = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
@@ -149,8 +151,37 @@ func (h *gateHarness) reconcileReading(read *servingv1alpha1.ServingDeployment) 
 			return c.Get(ctx, key, obj, opts...)
 		},
 	})
-	_, err := h.r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
-	return err
+	return h.r.Reconcile(reconcileCtx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(h.sd)})
+}
+
+// reconcileReading is reconcileReadingIn in the suite's context, and reports
+// whether the reconcile's status write conflicted: one decided from read, with
+// anything written since, is refused by the optimistic lock (#121, F4; #129).
+// Either way the reconcile returns no error, a conflict being requeued after
+// conflictRequeueAfter rather than returned (#60, V1-S7).
+func (h *gateHarness) reconcileReading(read *servingv1alpha1.ServingDeployment) bool {
+	GinkgoHelper()
+	before := h.writes.conflictCount()
+	result, err := h.reconcileReadingIn(ctx, read)
+	Expect(err).NotTo(HaveOccurred())
+	conflicted := h.writes.conflictCount() > before
+	if conflicted {
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: conflictRequeueAfter}))
+	}
+	return conflicted
+}
+
+// tagMovedEvent is the Event of a tag pair moved from the window's canary tag
+// to another under a gate running at level.
+func tagMovedEvent(level servingv1alpha1.GateMode, to string) string {
+	does := "records every interval in status.gate and rolls the window back on a tripped line"
+	if level == levelActPromote {
+		does = "records every interval in status.gate, rolls the window back on a tripped line, and dispatches " +
+			"the promote verdict to deploy.yml at most once"
+	}
+	return fmt.Sprintf("Normal GateCanaryTagChanged spec.canaryImageTag and spec.gate.forCanaryImageTag both moved "+
+		"mid-window, from %s at the gate's last boundary to %s at this one: the gate runs on as %s, now for canary "+
+		"tag %s: it %s", canaryImageTag, to, level, to, does)
 }
 
 var _ = Describe("The gate in ActRollback (D45, D47)", func() {
@@ -331,7 +362,7 @@ var _ = Describe("The gate in ActRollback (D45, D47)", func() {
 		Expect(active.LastTransitionTime.Time).To(BeTemporally("==", h.boundaryTime(3)), "the latch does not move")
 		Expect(condition(latest, servingv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionFalse))
 		Expect(latest.Status.Gate).To(Equal(evidence))
-		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
+		Expect(stale).To(BeTrue(), "the stale reconcile's write conflicts")
 		expectCanaryReplicas(h.ns, 1)
 
 		By("deployment/api Available: the canary goes to 0 and stays there, the window never opened again")
@@ -625,7 +656,7 @@ var _ = Describe("The acting level, sampled at window open (#119)", func() {
 
 		By("a third is served the opening's write, and nothing written since conflicts its own")
 		h.clock.t = windowStart.Add(2 * time.Second)
-		Expect(h.reconcileReading(opening)).To(Succeed())
+		Expect(h.reconcileReading(opening)).To(BeFalse(), "its write does not conflict")
 
 		By("a fourth reads the API server: the gate armed once, at the open's anchor and level")
 		h.clock.t = windowStart.Add(3 * time.Second)
@@ -638,7 +669,7 @@ var _ = Describe("The acting level, sampled at window open (#119)", func() {
 		Expect(condition(latest, servingv1alpha1.ConditionCanaryActive).LastTransitionTime.Time).
 			To(BeTemporally("==", windowStart))
 		Expect(latest.Status.Gate.WindowStart.Time).To(BeTemporally("==", windowStart))
-		Expect(apierrors.IsConflict(staleOpen)).To(BeTrue(), "the stale open's write: %v", staleOpen)
+		Expect(staleOpen).To(BeTrue(), "the stale open's write conflicts")
 
 		By("the window acts at that level: line 3's two in a row roll it back, every record at ActRollback")
 		h.clean(2)
@@ -674,7 +705,7 @@ var _ = Describe("The acting level, sampled at window open (#119)", func() {
 		Expect(condition(latest, servingv1alpha1.ConditionCanaryActive).LastTransitionTime.Time).
 			To(BeTemporally("==", windowStart))
 		Expect(latest.Status.Gate).To(Equal(evidence))
-		Expect(apierrors.IsConflict(stale)).To(BeTrue(), "the stale reconcile's write: %v", stale)
+		Expect(stale).To(BeTrue(), "the stale reconcile's write conflicts")
 		expectOpen(h)
 
 		By("the next boundary records at Observe")
@@ -683,6 +714,53 @@ var _ = Describe("The acting level, sampled at window open (#119)", func() {
 		Expect(st.Mode).To(Equal(levelObserve))
 		Expect(levels(st)).To(Equal(repeat(levelObserve, 3)))
 	})
+
+	DescribeTable("records a tag pair moved mid-window under an acting gate in one Event at the next boundary, and "+
+		"changes nothing: the level, the arming and the records stay what they were, and at Observe nothing is "+
+		"recorded (#60, V1-S7)",
+		func(spec *servingv1alpha1.GateSpec, withToken bool, level servingv1alpha1.GateMode, event bool) {
+			h := newGateHarness(spec)
+			if withToken {
+				armDispatch(h)
+			}
+			h.addCanary(at(windowStart.Add(-time.Minute)))
+			h.open()
+			h.clean(3)
+			h.drainOpenEvents()
+			before := h.gate()
+
+			By("a host patch moves spec.canaryImageTag and spec.gate.forCanaryImageTag together, mid-interval")
+			setTagPair(h.sd, thirdCanaryImageTag)
+			h.clock.t = h.boundaryTime(3).Add(10 * time.Second)
+			Expect(reconcileServingDeployment(h.r, h.sd)).To(Succeed())
+			Expect(apiContainer(getCanaryDeployment(h.ns)).Image).To(Equal(stableImage(thirdCanaryImageTag)))
+			Expect(h.gateEvents()).To(BeEmpty(), "between boundaries the gate records nothing")
+
+			By("the next boundary: the gate runs on at its level and arming, every record at that level")
+			h.clean(1)
+			st := h.gate()
+			Expect(st.Mode).To(Equal(level))
+			Expect(st.Arming).To(Equal(before.Arming))
+			Expect(levels(st)).To(Equal(repeat(level, 4)))
+			Expect(verdicts(st)).To(Equal(repeat(gateVerdict(gate.VerdictClean), 4)))
+			if event {
+				Expect(h.gateEvents()).To(ConsistOf(tagMovedEvent(level, thirdCanaryImageTag)))
+			} else {
+				Expect(h.gateEvents()).To(BeEmpty())
+			}
+
+			By("transitions only: later boundaries record no more")
+			h.clean(2)
+			Expect(h.gateEvents()).To(BeEmpty())
+			expectOpen(h)
+		},
+		Entry("ActRollback", actRollback, false, levelActRollback, true),
+		Entry("ActPromote with its token", actPromote, true, levelActPromote, true),
+		Entry("ActPromote with no token, at ActRollback (TokenAbsent)", actPromote, false, levelActRollback, true),
+		Entry("Observe, which acts on nothing and needs no tag",
+			&servingv1alpha1.GateSpec{Mode: servingv1alpha1.GateModeObserve, ForCanaryImageTag: canaryImageTag},
+			false, levelObserve, false),
+	)
 })
 
 var _ = Describe("The rolled-back window's latch and evidence", func() {

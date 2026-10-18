@@ -62,17 +62,19 @@ const gateIntervalFloor = 4 * scrape.ReadTimeout
 const gateRingSize = 50
 
 // Event reasons the gate records, on transitions only (D42): the gate armed or
-// degraded, the window's first breach, and the first verdict of each kind —
-// a rollback verdict acted on at an acting level, or recorded only; a promote
-// verdict recorded below ActPromote, where at ActPromote its dispatch's
-// Events announce it (promote.go).
+// degraded, the canary tag an acting gate runs for moved mid-window, the
+// window's first breach, and the first verdict of each kind — a rollback
+// verdict acted on at an acting level, or recorded only; a promote verdict
+// recorded below ActPromote, where at ActPromote its dispatch's Events
+// announce it (promote.go).
 const (
-	eventReasonGateArmed         = "GateArmed"
-	eventReasonGateDegraded      = "GateDegraded"
-	eventReasonGateBreach        = "GateBreach"
-	eventReasonGateRolledBack    = "GateRolledBack"
-	eventReasonGateWouldRollBack = "GateWouldRollBack"
-	eventReasonGateWouldPromote  = "GateWouldPromote"
+	eventReasonGateArmed            = "GateArmed"
+	eventReasonGateDegraded         = "GateDegraded"
+	eventReasonGateCanaryTagChanged = "GateCanaryTagChanged"
+	eventReasonGateBreach           = "GateBreach"
+	eventReasonGateRolledBack       = "GateRolledBack"
+	eventReasonGateWouldRollBack    = "GateWouldRollBack"
+	eventReasonGateWouldPromote     = "GateWouldPromote"
 )
 
 // gateLevels are the acting levels in the order of D42's lattice, each
@@ -174,6 +176,8 @@ type gateBaseline struct {
 	windowStart time.Time
 	boundary    int32
 	samples     gate.Samples
+	// canaryTag is the spec.canaryImageTag the boundary was read under.
+	canaryTag string
 }
 
 // gateBaselines holds each ServingDeployment's last boundary read.
@@ -286,7 +290,9 @@ func (r *ServingDeploymentReconciler) observe(
 		}
 		step.events = armGate(sd, st, g, true, opened, r.tokenPresent(sd))
 		sd.Status.Gate = st
-		step.baseline = &gateBaseline{uid: sd.UID, windowStart: g.anchor, boundary: k, samples: b.Baseline}
+		step.baseline = &gateBaseline{
+			uid: sd.UID, windowStart: g.anchor, boundary: k, samples: b.Baseline, canaryTag: sd.Spec.CanaryImageTag,
+		}
 		logf.FromContext(ctx).Info("The gate read its first boundary", "boundary", k,
 			"stableReadError", errText(b.StableErr), "canaryReadError", errText(b.CanaryErr))
 		return step, nil
@@ -296,9 +302,12 @@ func (r *ServingDeploymentReconciler) observe(
 		return step, nil
 	}
 
-	step.events = armGate(sd, st, g, false, false, r.tokenPresent(sd))
-	level := st.Mode
 	kept, haveKept := r.baselines.get(gateKey(sd))
+	step.events = armGate(sd, st, g, false, false, r.tokenPresent(sd))
+	if step.events == nil {
+		step.events = tagMoved(sd, st, g, kept, haveKept)
+	}
+	level := st.Mode
 	session := sessionOf(st)
 	// b is this boundary's read, and last the decision on the interval it
 	// ended: what the promote arm acts on.
@@ -312,7 +321,9 @@ func (r *ServingDeploymentReconciler) observe(
 		if read {
 			b = r.scraper.ReadBoundary(ctx, sd.Namespace)
 			iv.Current, iv.CanaryReadyAt, iv.CanaryOOMKilled = b.Current, b.CanaryReadyAt, b.CanaryOOMKilled
-			step.baseline = &gateBaseline{uid: sd.UID, windowStart: g.anchor, boundary: j, samples: b.Baseline}
+			step.baseline = &gateBaseline{
+				uid: sd.UID, windowStart: g.anchor, boundary: j, samples: b.Baseline, canaryTag: sd.Spec.CanaryImageTag,
+			}
 			if b.StableErr != nil || b.CanaryErr != nil {
 				logf.FromContext(ctx).Info("A gate read failed at a boundary", "boundary", j,
 					"stableReadError", errText(b.StableErr), "canaryReadError", errText(b.CanaryErr))
@@ -387,7 +398,13 @@ func (r *ServingDeploymentReconciler) finishGate(sd *servingv1alpha1.ServingDepl
 	case step.forget:
 		r.baselines.forget(gateKey(sd))
 	}
-	for _, e := range step.events {
+	r.recordHeld(sd, step.events)
+}
+
+// recordHeld records events, held back until the status write that carries
+// their transitions landed.
+func (r *ServingDeploymentReconciler) recordHeld(sd *servingv1alpha1.ServingDeployment, events []gateEvent) {
+	for _, e := range events {
 		r.Recorder.Event(sd, e.eventType, e.reason, e.message)
 	}
 }
@@ -492,6 +509,29 @@ func armGate(
 	return []gateEvent{{corev1.EventTypeNormal, eventReasonGateArmed, fmt.Sprintf(
 		"the gate is armed in %s for canary tag %s: every %s interval from %s is recorded in status.gate, and %s",
 		level, sd.Spec.CanaryImageTag, g.interval, g.anchor.UTC().Format(time.RFC3339), acts)}}
+}
+
+// tagMoved returns the Event of a tag pair moved under an acting gate, when
+// armGate has none: spec.canaryImageTag and spec.gate.forCanaryImageTag both
+// changed since kept, this window's last boundary read, was taken, and the
+// arming and the level stayed as they were, so nothing else says so. It
+// records what was observed and changes nothing: the level, the arming and the
+// evidence are what they would be without it (#60, V1-S7; D37). The tag is
+// kept beside the read, in memory alone (D45), so a boundary with no kept read
+// of this window — after an operator restart or a missed boundary — has
+// nothing to compare, and records none.
+func tagMoved(
+	sd *servingv1alpha1.ServingDeployment, st *servingv1alpha1.GateStatus, g grid, kept gateBaseline, haveKept bool,
+) []gateEvent {
+	from, to := kept.canaryTag, sd.Spec.CanaryImageTag
+	if !haveKept || kept.uid != sd.UID || !kept.windowStart.Equal(g.anchor) || from == "" || from == to ||
+		!rollsBack(st.Mode) {
+		return nil
+	}
+	return []gateEvent{{corev1.EventTypeNormal, eventReasonGateCanaryTagChanged, fmt.Sprintf(
+		"spec.canaryImageTag and spec.gate.forCanaryImageTag both moved mid-window, from %s at the gate's last "+
+			"boundary to %s at this one: the gate runs on as %s, now for canary tag %s: it %s",
+		from, to, st.Mode, to, gateDoes(st.Mode))}}
 }
 
 // recordInterval appends interval index's record, evaluated at level, to st's
