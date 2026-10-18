@@ -1639,3 +1639,74 @@ retention jobs, Alembic.
   comment 6098416055); the cleanup rides a k8s.io or controller-runtime release that carries the
   versions. And a job landed red on three findings already rated None is a check that gets
   ignored, which hides the next called finding that matters.
+
+# Post-v4.0.0 hardening — ADR addendum (D52)
+
+> FROZEN (owner ruling 2026-10-18 recorded on #82, comment 6248173104; numbered D52, not D51, by
+> the correction in comment 6248373379). A decision taken on #82's enforce prerequisites after
+> v4.0.0. The 2026-10-10 ruling (comment 6096060314) shipped `warn` and `audit` at baseline and
+> held `enforce` behind two prerequisites: the Grafana exposure redesigned, and the D36 way-back
+> collision proven in the rollback rehearsal. The 2026-10-18 ruling settles the first and binds
+> three conditions to the slice that lands `enforce`; D52 records the ruling, the conditions and
+> the second prerequisite's proof. Everything above is untouched; this block appends only.
+
+- **D52 Pod Security baseline enforced — Grafana's public `:3000` dropped, the dashboards
+  re-homed to `kubectl port-forward` over SSM:** Grafana's container loses `hostPort` 3000, the
+  one baseline violation in `mlobs`. Every other pod spec, the operator-built api Deployments
+  included, breaks none of the profile's controls (no host namespace, host port, hostPath
+  volume, privileged flag, added capability, or unconfined seccomp), as the #82 inspection found
+  and this slice re-read. `00-namespace.yaml` then adds `pod-security.kubernetes.io/enforce:
+  baseline` beside `warn` and `audit`, and `smoke.sh` and `operator/hack/e2e.sh` assert all
+  three. Grafana keeps no Service, since the port-forward targets the Deployment, and keeps
+  `strategy: Recreate` past the hostPort deadlock that first required it: one Grafana pod at a
+  time on the 4GB host, and the pre-cutover tree's strategy, so D36's step 5 never changes a
+  live Deployment's strategy type. D19's "host ports kept", narrowed to Grafana by its O2
+  erratum, ends here for this tree. The three bound conditions: (1) every living `:3000`
+  reference is re-homed: the README, `deploy/k3s/README.md`, `docs/K3S.md`, `docs/RUNBOOK.md`,
+  `infra/README.md`, and the manifests', scripts' and CI's comments; the simulator carries no
+  note on the port. K3sSmoke and the local k3d recipe drop their 3000 mapping; RollbackRehearsal
+  keeps its own for the pre-cutover tree, whose Grafana still carries the hostPort. Historical
+  mentions remain as records: frozen PLAN text (D19, its O2 erratum, D34), phase evidence,
+  issue-quoted text, and the README's measurement conditions and v1.0.0 roadmap entry. (2) The
+  README documents port-forward as the viewing method, under "Viewing the dashboards": a
+  `kubectl -n mlobs port-forward deployment/grafana 3000:3000` held in an SSM session on the
+  host and brought to the reader's machine by an `AWS-StartPortForwardingSession` session, and
+  locally the same port-forward on k3d. `smoke.sh` checks Grafana through a port-forward of its
+  own on local port 3001 (`GRAFANA_LOCAL_PORT`, replacing `GRAFANA_URL`), clear of a reader's
+  3000. (3) `aws_vpc_security_group_ingress_rule.grafana` and its import block leave
+  `infra/ec2`. That is an attack-surface reduction: one fewer port open to `0.0.0.0/0`, an
+  anonymous-Viewer Grafana no longer reachable from the internet, and the public ingress down to
+  the api's 8000 and SSH from the admin `/32`. It is also a regression of the original ask,
+  recorded as one: a stranger can no longer browse to the dashboards at the host's public
+  address, and seeing them takes AWS credentials that may start a Session Manager session on
+  the instance. The live rule goes at the owner's next apply, not at merge; if the merge comes
+  first, TerraformPlan on main reports the removal as drift until that apply. The group's
+  `description` still names grafana 3000, because that attribute forces a replacement of the
+  group. Prerequisite 2: `rehearse-rollback.sh` asserts that the namespace carries exactly this
+  tree's Pod Security labels before step 5 and exactly the pre-cutover tree's after it, which
+  are none. That tree's `apply.sh` applies its own `00-namespace.yaml` first, client-side, and
+  the merge removes each label its last-applied configuration names and its manifest leaves
+  out, so `enforce` is gone before that tree's `hostPort` 8000 api and `hostPort` 3000 Grafana
+  arrive. The 2026-10-10 hypothesis becomes an assertion, proven by the RollbackRehearsal run on
+  the slice's pull request. Stated honestly: the way-back runs with no Pod Security label at
+  all, `warn` and `audit` included, until the roll-forward puts the three back; a label set by
+  hand with `kubectl label` is not in the last-applied configuration and survives the way-back,
+  and an `enforce` set that way refuses the pre-cutover tree's pods, while every label on the
+  host so far has come through `apply.sh`; the viewing path is the SSM agent's port forwarding,
+  the feature behind the agent-version floor in `infra/README.md` (CVE-2026-89049), which the
+  host met at P2c; and until the Recreate rollout replaces it, the running Grafana draws an API
+  server warning at the first namespace apply that carries `enforce`, which refuses only new
+  pods. #82 stays open until the owner verifies `enforce` live.
+  Owner ruling: the 2026-10-18 ruling on #82 (comment 6248173104, numbered by comment
+  6248373379), completing the 2026-10-10 prerequisites (comment 6096060314). *Provenance:* #82,
+  the O2 security review's finding on PR #81: no Pod Security label on `mlobs`, where any
+  service account that can create Deployments, the operator's among them (D33), could admit a
+  privileged or hostPath pod, effectively node root on single-node k3s. *Rejected:* a second
+  namespace for Grafana; a traefik ingress; staying informational. *Why:* a second namespace
+  evades the baseline posture rather than meeting it, and a D36 way-back would bring the
+  pre-cutover tree's Grafana back into `mlobs` beside the moved one, two Grafana pods contending
+  for one hostPort. A traefik ingress is a new public exposure architecture, with its own ADR and
+  security review, for an audience of one reader; a NodePort was already foreclosed by D34's
+  exact range. Staying at `warn` and `audit` leaves #82's finding where it was: both report a
+  privileged pod and admit it. The ask was to see the dashboards, and the port-forward keeps
+  that for every real use.
