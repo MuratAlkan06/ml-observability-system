@@ -24,8 +24,8 @@ resource "aws_security_group" "app" {
 # rule would be silently deleted on the first apply.
 #
 # The one deliberate deletion: Grafana's tcp/3000 rule, removed by D52 when the
-# dashboards moved to `kubectl port-forward` over SSM. It leaves the group at
-# the owner's next apply, not at merge.
+# dashboards moved to `kubectl port-forward` over SSM. It left the group at the
+# owner's apply on 2026-10-18, before the merge.
 
 resource "aws_vpc_security_group_ingress_rule" "api" {
   security_group_id = aws_security_group.app.id

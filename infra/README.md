@@ -65,12 +65,13 @@ Stated plainly, because the gap matters more than the coverage:
   `0.0.0.0/0` as found, which is why the host only runs during a demo window.
   Port 3000, Grafana's, was open the same way until D52 re-homed the
   dashboards to `kubectl port-forward` over SSM and removed its rule from
-  `ec2/compute.tf`. The live group loses that rule at the owner's next apply;
-  until then `TerraformPlan` on `main` reports the removal as drift.
-  Expected owner apply plan: `0 to add, 0 to change, 1 to destroy`, the
-  destroy being `aws_vpc_security_group_ingress_rule.grafana`. Stop if
-  `aws_security_group.app` or `aws_instance.app` shows any change. The
-  group's `description` is ForceNew and is deliberately left as found.
+  `ec2/compute.tf`. The owner applied that removal on 2026-10-18, from the
+  PR #138 branch before the merge, and the plan matched the expected one
+  exactly: `0 to add, 0 to change, 1 to destroy`, the destroy being
+  `aws_vpc_security_group_ingress_rule.grafana`. A plan re-run from the
+  branch reported no changes, and `TerraformPlan` on `main` at `e0d28ed` was
+  a no-op, so the removal never showed as drift there. The group's
+  `description` is ForceNew and is deliberately left as found.
 
 ## Local use
 
