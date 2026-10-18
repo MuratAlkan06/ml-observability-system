@@ -492,7 +492,11 @@ The rest is a person's, by name:
   6, the table's first row, stay human: the operator cannot judge or bury
   itself (D36). Two operator restarts in a row do close an acting window, as
   line 3's two in a row (D45), but a persistent operator fault still takes
-  the first row's path.
+  the first row's path. A reconcile working from a stale read, a lagging
+  cache or a paused leader, is bounded by the optimistic lock on every status
+  write: its write is refused and the next reconcile decides again, so a
+  canary or shadow move it made first costs at worst one unevaluable interval
+  and a fresh warmup, `cleanRun` reset, and never a promote (#60, R-D).
 - **A canary that never turns Ready.** Its intervals are pending and count
   toward nothing, so only the TTL bounds it (D45). The human closes it.
 - **Opening any window**, and with it arming the gate (D32, D42).

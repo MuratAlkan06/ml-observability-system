@@ -1571,6 +1571,26 @@ retention jobs, Alembic.
 > its base the API server's reply to the locked latch, not a cached read. Recorded at V1-S7
 > (issue #129); no frozen text edited.
 
+> **D45 note (2026-10-18, V1-S7 Lows):** V1-S7's third Low — a reconcile working from a stale read
+> moves the canary or the shadow before its status write is refused by the optimistic lock (the
+> D43 clarification of 2026-10-15) — is documented and accepted by the owner's ruling on #60
+> (comment 6248172933, R-D), on the condition of a test that pins its failure direction. The lock
+> bounds the effect to the one reconcile that decides again from what was written: the stale write
+> loses, its gate step and any dispatch it latched go with it, and the next reconcile puts the
+> workload back, so under strong staleness — a paused leader, a lagging API server — the canary pod
+> is replaced, costing at worst an unevaluable interval and a fresh warmup with `cleanRun` reset.
+> That is D45's failure direction, toward rollback or a human, never a promote. Freshness reads
+> before the workload writes would only narrow the window, and writing the status before the
+> workloads would record intent, against D37's observed-never-intent ruling. The condition is met
+> by the envtest "bounds a stale reconcile's workload writes to the one reconcile that decides
+> again, and never lets them reach a promote" (`operator/internal/controller/gate_promote_test.go`);
+> had it been unwritable, or shown another direction, the item would reopen at its real severity.
+> The slice's other V1-S7 Lows (#60, comment 6201912473) ride beside it: a lone conflicted status
+> write is logged at Info and requeued rather than returned, `WindowExpired` is held until the
+> write that records the close lands, a tag pair moved under an acting gate is recorded in a
+> `GateCanaryTagChanged` Event, and a deferred verdict's dispatch names the clean run it rests on
+> in a `GatePromoteDeferralEnded` Event. No frozen text edited.
+
 # Post-v4.0.0 hardening — ADR addendum (D51)
 
 > FROZEN (owner ruling 2026-10-18 recorded on #60). A decision taken while working the #60

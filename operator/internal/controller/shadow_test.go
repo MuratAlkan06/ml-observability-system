@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -139,6 +140,29 @@ type recordingClient struct {
 	// reaches the API server: the moment a concurrent writer lands between a
 	// reconcile's read and its write.
 	beforePatch func(clientWrite)
+	// conflicts counts the subresource patches the API server refused with a
+	// conflict: status writes the optimistic lock turned down, which the
+	// reconcile no longer returns as an error (#60, V1-S7).
+	conflicts int
+}
+
+// refused counts err, the error a subresource patch came back with, if it is
+// a conflict.
+func (rc *recordingClient) refused(err error) {
+	if !apierrors.IsConflict(err) {
+		return
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.conflicts++
+}
+
+// conflictCount is how many subresource patches the API server has refused
+// with a conflict so far.
+func (rc *recordingClient) conflictCount() int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.conflicts
 }
 
 // errOperatorKilled is the panic killAfter raises.
@@ -235,6 +259,7 @@ func newRecordingReconciler() (*ServingDeploymentReconciler, *recordingClient) {
 			w := rc.record("patch", obj, sub, patch)
 			rc.sending(w)
 			if err := c.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
+				rc.refused(err)
 				return err
 			}
 			rc.killIf(w)

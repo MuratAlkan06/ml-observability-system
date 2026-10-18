@@ -42,6 +42,12 @@ const (
 	eventReasonWindowExpired    = "WindowExpired"
 )
 
+// conflictRequeueAfter is how soon a reconcile whose status write the
+// optimistic lock refused runs again, if nothing brings it sooner: the write
+// that conflicted it brings its own watch event, so this is a floor, well
+// inside the half interval a gate boundary's read has to land in.
+const conflictRequeueAfter = time.Second
+
 // ServingDeploymentReconciler reconciles a ServingDeployment object
 type ServingDeploymentReconciler struct {
 	client.Client
@@ -139,10 +145,12 @@ func (r *ServingDeploymentReconciler) apiImage(tag string) string {
 // status.observedGeneration and status.gate. The status is written on failure
 // too, so a refused adoption shows on the resource and not only in the
 // operator's log. That write is locked to the ServingDeployment as read, so
-// one decided from a stale read conflicts and is decided again (#121, F4;
-// #129); a promote dispatch it latches is sent only after it lands, and
-// GitHub's answer is written after (D43). While a window is open the request
-// is requeued for the earlier of its deadline and the gate's next boundary.
+// one decided from a stale read conflicts, is logged at Info and requeued, and
+// is decided again (#121, F4; #129; #60); the Events of the transitions it
+// carries are recorded, and a promote dispatch it latches is sent, only after
+// it lands, and GitHub's answer is written after (D43). While a window is open
+// the request is requeued for the earlier of its deadline and the gate's next
+// boundary.
 // The spec is never written (docs/PLAN.md D31, D32, D37 and their O2 rulings;
 // D42, D43, D47).
 func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -172,11 +180,16 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if w.reason == servingv1alpha1.ReasonBreachRolledBack && sd.Status.Gate != nil {
 		w.rollback = sd.Status.Gate.RollbackVerdict
 	}
+	// The expiry's Event is held, as the gate's are, until the status write
+	// that records the close lands (finishGate): a reconcile whose write
+	// conflicts records none, and the one that decides again records it once
+	// (#60, V1-S7).
+	var held []gateEvent
 	if w.expiredNow {
 		logf.FromContext(ctx).Info("The canary window reached its TTL; closing it", "ttl", canaryWindowTTL)
-		r.Recorder.Eventf(sd, corev1.EventTypeNormal, eventReasonWindowExpired,
+		held = append(held, gateEvent{corev1.EventTypeNormal, eventReasonWindowExpired, fmt.Sprintf(
 			"the canary window reached its %s TTL; closing it and leaving the spec's canary fields to the "+
-				"close-window patch", canaryWindowTTL)
+				"close-window patch", canaryWindowTTL)})
 	}
 	shadow, windowErr := r.reconcileWindow(ctx, sd, dep, &w)
 	if windowErr != nil {
@@ -213,11 +226,28 @@ func (r *ServingDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// asks by then (#129; D42, D47).
 		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
 		if err := r.Status().Patch(ctx, sd, patch); err != nil {
+			if apierrors.IsConflict(err) && reconcileErr == nil {
+				// Refused by the lock, the write is a stale read's, not a
+				// failure: its status, its held Events, its kept read and
+				// any dispatch it latched go with it, and the write that
+				// conflicted it brings the reconcile that decides again. A
+				// workload write made before it stands until that reconcile
+				// puts it back: at worst a replaced canary pod, an
+				// unevaluable interval and a warmup, never a promote (#60,
+				// R-D). It is logged at Info and requeued, not returned, so
+				// a lagging cache logs no Reconciler error and takes no
+				// backoff; a conflict beside another error is returned with
+				// it, as before (#60, V1-S7).
+				logf.FromContext(ctx).Info("The status write conflicted with a newer ServingDeployment; "+
+					"deciding again from it", "error", err.Error())
+				return ctrl.Result{RequeueAfter: conflictRequeueAfter}, nil
+			}
 			return ctrl.Result{}, errors.Join(reconcileErr,
 				fmt.Errorf("writing the status of servingdeployment/%s: %w", sd.Name, err))
 		}
 	}
 	r.finishGate(sd, step)
+	r.recordHeld(sd, held)
 	if step.dispatch != nil {
 		reconcileErr = joinErrors(reconcileErr, r.sendDispatch(ctx, sd, step.dispatch))
 	}

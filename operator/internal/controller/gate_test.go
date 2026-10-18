@@ -223,6 +223,23 @@ func (h *gateHarness) addCanary(readyAt *time.Time) *corev1.Pod {
 	return pod
 }
 
+// replaceCanary stands in for the Deployment controller and the kubelet, which
+// envtest runs neither of, replacing the canary pod: every canary pod is
+// deleted, and a new one running tag's image, Ready since readyAt, takes their
+// place, its /metrics scripted from zero as a new process's are.
+func (h *gateHarness) replaceCanary(tag string, readyAt *time.Time) {
+	old := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, old, client.InNamespace(h.ns), client.MatchingLabels(canaryLabels()))).To(Succeed())
+	Expect(old.Items).NotTo(BeEmpty())
+	for i := range old.Items {
+		Expect(k8sClient.Delete(ctx, &old.Items[i])).To(Succeed())
+	}
+	pod := createAPIPod(h.ns, "api-canary-5c4b3a2d1-r8v6n", canaryLabels(), stableImage(tag), readyAt)
+	h.reads.mu.Lock()
+	defer h.reads.mu.Unlock()
+	h.reads.canary = &podTraffic{pod: podIdentity(pod)}
+}
+
 // interval is the reconciler's grid interval.
 func (h *gateHarness) interval() time.Duration { return h.r.gridInterval() }
 
