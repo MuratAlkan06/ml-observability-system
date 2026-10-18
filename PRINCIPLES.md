@@ -78,7 +78,7 @@ At-least-once in, exactly-once effect out: `XREADGROUP` → validate → one tra
 | No AI-attribution trailers (§6) | CI `DocsGate` PR commit-message sweep |
 | README links this file | CI `DocsGate` |
 | Frozen constants + PLAN Appendix intact (§2) | `tests/test_scaffold.py` (existing) |
-| Lint | CI `ruff check .` (defaults today; ruleset expansion tracked in #38) |
+| Lint | CI `ruff check .` (surface pinned in ruff.toml at the ruff 0.17 defaults, py312; #38) |
 | Integration suites cannot silently skip (§5) | `REQUIRE_DRIFT_INTEGRATION=1` CI job (existing); new suites add theirs |
 | Image size bound; label-map sanity | CI `DockerBuild` / `ShadowBuild` (existing) |
 | Everything else | review → independent verification → release gate |
