@@ -29,6 +29,7 @@
 # cluster emptied of the first install down to its CRD, from the Helm chart
 # at deploy/helm/mlobs-operator with `helm install -n mlobs` (Phase 3 H1,
 # D38):
+#   namespace mlobs carries PSA visibility labels warn/audit at baseline (#82)
 #   2. the operator holds its Lease (leader election, asserted as the
 #      acquisition only — D35)
 #   3. its ServiceAccount may patch the shadow scorer's scale and nothing
@@ -297,6 +298,17 @@ knob_unset() {
 # place, the same for both.
 assert_operator() {
   echo "ok: --- the operator installed from $1 ---"
+
+  # The namespace's Pod Security visibility labels, as shipped (#82).
+  local psa_mode psa_level
+  for psa_mode in warn audit; do
+    psa_level="$(kubectl get namespace "$NAMESPACE" \
+      -o "jsonpath={.metadata.labels.pod-security\.kubernetes\.io/${psa_mode}}" 2>/dev/null)" \
+      || die "namespace ${NAMESPACE} not readable"
+    [ "$psa_level" = baseline ] \
+      || die "namespace ${NAMESPACE} label pod-security.kubernetes.io/${psa_mode}: expected baseline, got ${psa_level:-no label}"
+  done
+  echo "ok: namespace ${NAMESPACE} carries pod-security.kubernetes.io/warn and audit at baseline"
 
   # --- 2. the operator holds its Lease ---------------------------------------
 
