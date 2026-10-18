@@ -587,7 +587,7 @@ jobs:
         # instead of chasing a registry that has never heard of these tags.
         # k3d v5.9.0 can drop an image here and still exit 0 (#141), so every
         # import in this file goes through scripts/ci/k3d-import-verified.sh:
-        # it looks for each tag, normalised as above, in `k3s crictl images` on
+        # it looks for each tag, normalised as above, in `crictl images` on
         # the node, re-imports what is missing, and fails the step after three
         # attempts. It also prints the listing's rows for these tags, as this
         # step did before.
