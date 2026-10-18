@@ -12,11 +12,19 @@
 # short DNS name (`api:8000`, `drift-shadow:9109`) exactly as it did under
 # Compose, and short names only resolve within a namespace. Splitting the stack
 # would force `<svc>.<ns>.svc` targets and edit the frozen scrape config (D21).
+#
+# Pod Security Admission at the baseline profile in all three modes (#82,
+# D52): enforce refuses a pod that breaks it, warn and audit report one. No
+# workload here breaks it since Grafana lost its hostPort. D36's way-back is
+# not refused: the pre-cutover tree's own copy of this file carries none of
+# these labels, so its client-side apply takes them off before its hostPort
+# pods arrive, which deploy/k3s/rehearse-rollback.sh asserts.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: mlobs
   labels:
     app.kubernetes.io/part-of: mlobs
+    pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: baseline
     pod-security.kubernetes.io/audit: baseline

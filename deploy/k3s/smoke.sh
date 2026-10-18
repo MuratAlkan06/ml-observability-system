@@ -26,7 +26,7 @@
 # hand — is polled to a deadline and then rejected.
 #
 # What it asserts, in order:
-#   namespace mlobs carries PSA visibility labels warn/audit at baseline (#82)
+#   namespace mlobs carries PSA labels enforce/warn/audit at baseline (#82, D52)
 #   1. the stack is in exactly one of the two states
 #   2. the state's workloads are rolled out: the nine, plus
 #      deployment/api-canary in a window
@@ -134,15 +134,16 @@ port_forward() {
   done
 }
 
-# The namespace's Pod Security visibility labels, as shipped (#82).
-for psa_mode in warn audit; do
+# The namespace's Pod Security labels, as shipped: enforce, and the two
+# visibility modes (#82, D52).
+for psa_mode in warn audit enforce; do
   psa_level="$(kubectl get namespace "$NAMESPACE" \
     -o "jsonpath={.metadata.labels.pod-security\.kubernetes\.io/${psa_mode}}" 2>/dev/null)" \
     || die "namespace ${NAMESPACE} not readable"
   [ "$psa_level" = baseline ] \
     || die "namespace ${NAMESPACE} label pod-security.kubernetes.io/${psa_mode}: expected baseline, got ${psa_level:-no label}"
 done
-echo "ok: namespace ${NAMESPACE} carries pod-security.kubernetes.io/warn and audit at baseline"
+echo "ok: namespace ${NAMESPACE} carries pod-security.kubernetes.io/warn, audit and enforce at baseline"
 
 # --- 1. state ----------------------------------------------------------------
 
