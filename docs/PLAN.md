@@ -1570,3 +1570,48 @@ retention jobs, Alembic.
 > and the grid are unchanged; the write recording GitHub's answer to a dispatch stays as it was,
 > its base the API server's reply to the locked latch, not a cached read. Recorded at V1-S7
 > (issue #129); no frozen text edited.
+
+# Post-v4.0.0 hardening — ADR addendum (D51)
+
+> FROZEN (owner ruling 2026-10-18 recorded on #60). A decision taken while working the #60
+> deferral register after v4.0.0, on its two supply-chain items: the operator runtime base pinned
+> by tag, not digest, and no govulncheck in CI (the Phase 4 close triage, comment 6199454029).
+> The digest pin needs no D-number: `operator/Dockerfile` pins its runtime base the way it
+> already pins its builder, by manifest-list digest. The owner's ruling on the govulncheck design
+> took the accepted list with two riders and declined the alternatives D51 names; D51 records it.
+> Everything above is untouched; this block appends only.
+
+- **D51 Govulncheck in CI — a called finding fails the job unless it is on an accepted list;
+  each entry cites its rating and the version that retires it, and a stale entry warns:** the
+  `Govulncheck` job in `operator.yml` runs govulncheck v1.9.0, pinned exact and fetched through
+  the module proxy and the checksum database, in source mode over the operator module, behind the
+  workflow's paths filter. The scan writes JSON, in which govulncheck exits 0 whatever it finds,
+  and a jq step classifies each OSV ID at its most precise level: called (symbol-level),
+  imported, or required. The job fails on any called ID that is not on the accepted list, kept in
+  the workflow beside the check; imported and required findings are printed and stay
+  informational. A report that is not a symbol-level scan fails too, since it holds no called
+  finding to judge. The list holds three IDs, each entry citing the #60 rating — rated None
+  against the shipped binary and accepted (comment 6098416055, section 2) — and the cleanup
+  version that retires it: GO-2026-6061 (grpc, item 4), retired by grpc-go v1.82.1; GO-2026-6348
+  (grpc, item 3), retired by grpc-go v1.83.1; GO-2026-6505 (otel, item 1), retired by
+  go.opentelemetry.io/otel v1.45.0. An entry joins only with both citations, so a new called
+  finding is rated on #60 before it is accepted. The job warns, through a `::warning::`
+  annotation, and never fails, when an accepted ID is no longer among the called findings — gone
+  from the output, or reported only at package or module level — so a stale entry surfaces for
+  pruning. Stated honestly: the database is live, so a new called advisory can turn the job red
+  with no change in the repository, which is the check doing its work; the standard library it
+  checks is the go.mod toolchain's, go1.27.2, not the builder image's go1.26.x; and the accepted
+  IDs' call paths now include the Phase 4 dispatch client, the same interface over-approximation
+  class the rating covered, so the register's note to re-run the binary-mode scan on the next
+  image stands. Owner ruling: the 2026-10-18 Govulncheck ruling on #60 (comment 6248373227),
+  the accepted list with both riders. *Provenance:* "no govulncheck in CI", a pre-existing gap
+  the Phase 4 close triage put on the register (#60, comment 6199454029; the V1-S5 security
+  review's F10); the source scan at this slice, against the database as modified
+  2026-10-08T22:31:09Z, reports these three IDs as called and no other, plus four imported and
+  one required. *Rejected:* informational-only, by `continue-on-error` or a scan that never exits
+  nonzero; forcing the indirect dependencies up; landing the job plain and red. *Why:* an
+  informational-only scan is a check that can never fail. Forcing grpc and otel up as indirect
+  overrides under k8s.io/apiserver v0.36.0 is untested and gains nothing for this binary (#60,
+  comment 6098416055); the cleanup rides a k8s.io or controller-runtime release that carries the
+  versions. And a job landed red on three findings already rated None is a check that gets
+  ignored, which hides the next called finding that matters.
