@@ -46,7 +46,7 @@ runtime underneath.
 | | Compose (to 2026-09-27) | k3s `v1.36.4+k3s1` (from 2026-09-27) |
 |---|---|---|
 | Images | built on the host (`up --build`) | `api`, `consumer`, `drift` from GHCR, built by CI; `shadow-scorer` built off-host and imported into containerd (D18) |
-| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward`. From Phase 3 O2 the api's `:8000` is a NodePort Service on the exact 8000-8000 range instead (D34 and the D19 erratum); on the host from O4. From D52 Grafana has no host port either: the dashboards are a `kubectl port-forward` too, over SSM on the host, and the security group's rule for Grafana's port comes out at the owner's next apply |
+| Ports | `:8000`, `:3000` published; `:9090`, `:6379` on loopback | `:8000`, `:3000` as hostPorts, security group untouched (D19); Prometheus and Redis via `kubectl port-forward`. From Phase 3 O2 the api's `:8000` is a NodePort Service on the exact 8000-8000 range instead (D34 and the D19 erratum); on the host from O4. From D52 Grafana has no host port either: the dashboards are a `kubectl port-forward` too, over SSM on the host, and the security group's rule for Grafana's port came out at the owner's apply of 2026-10-18 |
 | Scrape config | `prometheus/prometheus.yml` bind-mounted | the same file as a ConfigMap, mounted verbatim and hash-annotated (D21) |
 | Postgres data | anonymous volume | `local-path` PVC, 5Gi; everything else ephemeral (D20) |
 | Secrets | `.env` interpolated by Compose | the same `.env` rendered into one Secret (D23) |

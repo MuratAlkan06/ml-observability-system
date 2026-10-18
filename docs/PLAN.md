@@ -1710,3 +1710,11 @@ retention jobs, Alembic.
   exact range. Staying at `warn` and `audit` leaves #82's finding where it was: both report a
   privileged pod and admit it. The ask was to see the dashboards, and the port-forward keeps
   that for every real use.
+
+> **D52 note (2026-10-18, #139):** the apply came before the merge, so the drift window D52
+> anticipated, should the merge come first, never opened. The owner applied the rule's removal
+> from the PR #138 branch on 2026-10-18, and the plan was `0 to add, 0 to change, 1 to destroy`,
+> the destroy being `aws_vpc_security_group_ingress_rule.grafana` (`sgr-0c1d9faea74e8404f`); a
+> plan re-run from the branch reported no changes. After the merge, `TerraformPlan` on `main` at
+> `e0d28ed` logged `ok: plan is a no-op` (run 39153140600). #82 stays open until the owner
+> verifies `enforce` live. No frozen text edited.

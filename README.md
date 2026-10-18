@@ -436,8 +436,8 @@ Then open http://localhost:3000: the same three dashboards, anonymous **Viewer**
 in both sessions closes the port again.
 
 This replaced Grafana's public port (D52). In the repository Grafana has no host port, and the live
-host follows at its next deploy; the security group's rule for the port comes out at the owner's
-next Terraform apply ([`infra/`](infra/README.md)). Seeing the dashboards now takes AWS credentials
+host follows at its next deploy; the security group's rule for the port came out in the Terraform
+apply of 2026-10-18 ([`infra/`](infra/README.md)). Seeing the dashboards now takes AWS credentials
 that may open a Session Manager session on the instance, where before any browser could. In
 exchange, the internet no longer reaches an anonymous-access Grafana, and the host port that was
 the one thing in the `mlobs` namespace breaking the Pod Security baseline profile is gone, which is
