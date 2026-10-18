@@ -67,6 +67,10 @@ Stated plainly, because the gap matters more than the coverage:
   dashboards to `kubectl port-forward` over SSM and removed its rule from
   `ec2/compute.tf`. The live group loses that rule at the owner's next apply;
   until then `TerraformPlan` on `main` reports the removal as drift.
+  Expected owner apply plan: `0 to add, 0 to change, 1 to destroy`, the
+  destroy being `aws_vpc_security_group_ingress_rule.grafana`. Stop if
+  `aws_security_group.app` or `aws_instance.app` shows any change. The
+  group's `description` is ForceNew and is deliberately left as found.
 
 ## Local use
 
