@@ -4,6 +4,9 @@
 # / `describe-volumes` on 2026-09-01; imports.tf binds each resource to the
 # object it describes.
 
+# The description still names grafana 3000, whose rule D52 removed below. It
+# stays as found: `description` forces a replacement of the group, which the
+# certified host's instance is attached to.
 resource "aws_security_group" "app" {
   name        = "mlobs-demo-sg"
   description = "mlobs demo: api 8000 + grafana 3000 public, ssh from admin IP"
@@ -19,6 +22,10 @@ resource "aws_security_group" "app" {
 # can be imported and diffed independently. Every rule that exists on the group
 # is represented here, including the default allow-all egress — an unmodelled
 # rule would be silently deleted on the first apply.
+#
+# The one deliberate deletion: Grafana's tcp/3000 rule, removed by D52 when the
+# dashboards moved to `kubectl port-forward` over SSM. It leaves the group at
+# the owner's next apply, not at merge.
 
 resource "aws_vpc_security_group_ingress_rule" "api" {
   security_group_id = aws_security_group.app.id
@@ -26,15 +33,6 @@ resource "aws_vpc_security_group_ingress_rule" "api" {
   ip_protocol       = "tcp"
   from_port         = 8000
   to_port           = 8000
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "grafana" {
-  security_group_id = aws_security_group.app.id
-  description       = "grafana public"
-  ip_protocol       = "tcp"
-  from_port         = 3000
-  to_port           = 3000
   cidr_ipv4         = "0.0.0.0/0"
 }
 

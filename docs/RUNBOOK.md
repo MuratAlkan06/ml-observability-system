@@ -1030,6 +1030,14 @@ operator rolls the stable back (`infra/README.md`, "Rolling back").
    Then approve the run. That tree's `apply.sh` recreates `deployment/api`
    from its `20-api.yaml`, as a new object with no owner and with
    `hostPort: 8000`, and turns `service/api` back into a ClusterIP.
+   It applies its own `00-namespace.yaml` first, which carries no Pod
+   Security label, and its client-side apply takes off the `enforce`, `warn`
+   and `audit` labels this tree set (D52). The namespace therefore enforces
+   nothing when that tree's `hostPort` pods arrive: the api's 8000, and
+   Grafana's 3000, which comes back with that tree. The rehearsal asserts the
+   labels on both sides of this step. A label set by hand with
+   `kubectl label` is not in the last-applied configuration and would survive
+   the apply; an `enforce` label left that way refuses both pods.
    Before that, the run's GHCR preflight skips the operator image for a tree
    that predates the operator, and logs `ok: operator image not required` (#88).
 6. **`smoke.sh` green.** The run's output ends `ok: smoke passed`: the
@@ -1047,7 +1055,13 @@ pair.
 comes first, because the recreated `deployment/api` carries `hostPort: 8000`
 again. Step 1's flags are already in place. The dispatch re-applies the CRD
 and the operator at one replica, and the new ServingDeployment adopts the new
-`deployment/api`. This path is not rehearsed on its own. The rehearsal's
+`deployment/api`. It also puts the namespace's three Pod Security labels back
+before the stack's manifests, so an api still carrying its `hostPort` would
+have its pods refused by `enforce`: one more reason the patch comes first.
+The pre-cutover Grafana's `hostPort` needs no patch, as this tree's manifest
+replaces that pod with one that has none. Until it does, the namespace apply
+draws an API server warning that a running pod breaks the new `enforce`
+level: `enforce` only refuses new pods, and never evicts a running one. This path is not rehearsed on its own. The rehearsal's
 setup runs the same two steps, but on a cluster that had never had the
 operator.
 
@@ -1058,8 +1072,9 @@ pinned k3s with the D34 pair. It deploys the pre-cutover tree through its own
 `apply.sh`, runs #68's steps 2–3 so that the operator adopts `deployment/api`
 in place (same uid), and opens a window. Then it runs the six steps above in
 order, asserting each on what it leaves: conditions, replica counts, owners
-and uids, the Service's type, and the scripts' fixed lines. The local recipe
-is in `deploy/k3s/README.md`.
+and uids, the Service's type, the namespace's Pod Security labels before and
+after step 5, and the scripts' fixed lines. The local recipe is in
+`deploy/k3s/README.md`.
 
 It does not cover:
 

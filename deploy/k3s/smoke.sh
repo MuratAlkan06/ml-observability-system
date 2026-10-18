@@ -26,7 +26,7 @@
 # hand — is polled to a deadline and then rejected.
 #
 # What it asserts, in order:
-#   namespace mlobs carries PSA visibility labels warn/audit at baseline (#82)
+#   namespace mlobs carries PSA labels enforce/warn/audit at baseline (#82, D52)
 #   1. the stack is in exactly one of the two states
 #   2. the state's workloads are rolled out: the nine, plus
 #      deployment/api-canary in a window
@@ -37,7 +37,7 @@
 #   5. Prometheus reports exactly the state's scrape jobs up: every job in
 #      prometheus/prometheus.yml, less api_canary when steady and less
 #      shadow_scorer in a window
-#   6. Grafana's /api/health answers 200
+#   6. Grafana's /api/health answers 200 through a port-forward (D52)
 #
 # Output is fixed lines. Nothing here reads the .env, but the same discipline
 # applies: no xtrace, and failures name the check rather than echoing a payload.
@@ -48,14 +48,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 NAMESPACE="${NAMESPACE:-mlobs}"
-# The api's node port (D34) and Grafana's host port (D19). Overridable so the
-# script can be pointed at a tunnel rather than the box it runs on.
+# The api's node port (D34). Overridable so the script can be pointed at a
+# tunnel rather than the box it runs on.
 API_URL="${API_URL:-http://127.0.0.1:8000}"
-GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
-# Prometheus has no host port, and the canary's metrics are read off its own
-# Service; both are reached over port-forwards this script opens and closes.
+# Prometheus has no host port, nor Grafana since D52, and the canary's metrics
+# are read off its own Service; all three are reached over port-forwards this
+# script opens and closes. Grafana's local port is not its own 3000, which a
+# reader's dashboard port-forward may hold (README, "Viewing the dashboards"),
+# as may the pre-cutover tree's host port in the D36 rehearsal's cluster.
 PROMETHEUS_LOCAL_PORT="${PROMETHEUS_LOCAL_PORT:-9090}"
 CANARY_LOCAL_PORT="${CANARY_LOCAL_PORT:-8001}"
+GRAFANA_LOCAL_PORT="${GRAFANA_LOCAL_PORT:-3001}"
 
 ROLLOUT_TIMEOUT_SECONDS="${ROLLOUT_TIMEOUT_SECONDS:-180}"
 STATE_TIMEOUT_SECONDS="${STATE_TIMEOUT_SECONDS:-180}"
@@ -131,15 +134,16 @@ port_forward() {
   done
 }
 
-# The namespace's Pod Security visibility labels, as shipped (#82).
-for psa_mode in warn audit; do
+# The namespace's Pod Security labels, as shipped: enforce, and the two
+# visibility modes (#82, D52).
+for psa_mode in warn audit enforce; do
   psa_level="$(kubectl get namespace "$NAMESPACE" \
     -o "jsonpath={.metadata.labels.pod-security\.kubernetes\.io/${psa_mode}}" 2>/dev/null)" \
     || die "namespace ${NAMESPACE} not readable"
   [ "$psa_level" = baseline ] \
     || die "namespace ${NAMESPACE} label pod-security.kubernetes.io/${psa_mode}: expected baseline, got ${psa_level:-no label}"
 done
-echo "ok: namespace ${NAMESPACE} carries pod-security.kubernetes.io/warn and audit at baseline"
+echo "ok: namespace ${NAMESPACE} carries pod-security.kubernetes.io/warn, audit and enforce at baseline"
 
 # --- 1. state ----------------------------------------------------------------
 
@@ -351,9 +355,14 @@ stop_port_forwards
 
 # --- 6. grafana --------------------------------------------------------------
 
-grafana_code="$(curl -fsS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/api/health")" \
-  || die "GET ${GRAFANA_URL}/api/health did not return 2xx"
+# The way a reader reaches it: a port-forward to the Deployment, which has no
+# host port and no Service (D52).
+port_forward "deployment/grafana" "$GRAFANA_LOCAL_PORT" 3000 /api/health
+grafana_url="http://127.0.0.1:${GRAFANA_LOCAL_PORT}"
+grafana_code="$(curl -fsS -o /dev/null -w '%{http_code}' "${grafana_url}/api/health")" \
+  || die "GET ${grafana_url}/api/health did not return 2xx"
 [ "$grafana_code" = "200" ] || die "GET /api/health returned ${grafana_code}, expected 200"
+stop_port_forwards
 echo "ok: grafana /api/health 200"
 
 echo "ok: smoke passed (${state} state)"

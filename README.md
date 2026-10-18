@@ -55,9 +55,9 @@ flowchart LR
 
 All services run on a single node: under k3s on the EC2 host since 2026-09-27 (see
 [Deployment](#deployment)), and in a local k3d cluster shaped like it in the quick start below.
-Only the API (`:8000`) and Grafana
-(`:3000`) are published for normal use; Prometheus (`:9090`) is reached through
-`kubectl port-forward` for debugging, and the consumer (`:9108`), drift (`:9109`), and
+Only the API (`:8000`) is published for normal use. Grafana is reached through
+`kubectl port-forward`, over SSM on the host (see [Viewing the dashboards](#viewing-the-dashboards)),
+and Prometheus (`:9090`) the same way for debugging; the consumer (`:9108`), drift (`:9109`), and
 shadow-scorer (`:9110`) metrics endpoints — plus the second `drift-shadow` job — are scraped over
 in-cluster Services and never published to the host. The shadow scorer joins the same
 `mlobs:predictions` stream with its **own consumer group**, so it never touches the primary
@@ -117,7 +117,7 @@ Then look at:
 
 | Where | URL | Notes |
 | --- | --- | --- |
-| Grafana dashboards | http://localhost:3000 | Anonymous **Viewer** — no login. *mlobs — API & Inference*, *mlobs — Pipeline & Drift*, and *mlobs — Model Comparison*. |
+| Grafana dashboards | http://localhost:3000 | Not published: run `kubectl -n mlobs port-forward deployment/grafana 3000:3000` first. Anonymous **Viewer** — no login. *mlobs — API & Inference*, *mlobs — Pipeline & Drift*, and *mlobs — Model Comparison*. |
 | API docs (Swagger) | http://localhost:8000/docs | `POST /predict`, `GET /health`, `GET /metrics`. |
 | Prometheus | http://localhost:9090 | Not published: run `kubectl -n mlobs port-forward svc/prometheus 9090:9090` first. |
 
@@ -321,7 +321,7 @@ percentage; see [Deployment](#deployment).
 ## Deployment
 
 The EC2 numbers above were measured on a single t3.medium in us-west-2 (Ubuntu 24.04, IMDSv2
-required, only `:8000` and `:3000` exposed) — the two compose-era tables under Docker Compose, the
+required, only `:8000` and `:3000` exposed at the time) — the two compose-era tables under Docker Compose, the
 [k3s re-measurement](#k3s-re-measurement-2026-09-27) under k3s.
 
 Since 2026-09-27 that host runs the stack on k3s `v1.36.4+k3s1` from
@@ -411,6 +411,38 @@ CI. Rolling back is the same command with the previous commit; both were
 demonstrated live at the v2.0.0 close (see
 [Deploy pipeline](infra/README.md#deploy-pipeline) and
 [Rolling back](infra/README.md#rolling-back)).
+
+### Viewing the dashboards
+
+The dashboards are viewed through `kubectl port-forward`, locally and on the host (D52). Grafana has
+no host port and no Service, so nothing publishes it: a port-forward to `deployment/grafana` opens
+it for as long as someone is looking, the way Prometheus has always been reached. Locally that is
+the command in the [quick start](#quick-start) table. On the EC2 host it runs over SSM, like the
+[runbook's](docs/RUNBOOK.md) host steps: an SSM session on the instance holds the port-forward, and
+an SSM port-forwarding session brings it to your machine.
+
+```bash
+# 1. In an SSM session on the instance, as ubuntu, with KUBECONFIG=/home/ubuntu/.kube/config:
+kubectl -n mlobs port-forward deployment/grafana 3000:3000
+
+# 2. On your machine: the AWS CLI with the Session Manager plugin, and credentials that may
+#    start a session on the instance. Leave both running.
+aws ssm start-session --region us-west-2 --target i-0ed558a5144e76f4d \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
+```
+
+Then open http://localhost:3000: the same three dashboards, anonymous **Viewer**, no login. Ctrl-C
+in both sessions closes the port again.
+
+This replaced Grafana's public port (D52). In the repository Grafana has no host port, and the live
+host follows at its next deploy; the security group's rule for the port comes out at the owner's
+next Terraform apply ([`infra/`](infra/README.md)). Seeing the dashboards now takes AWS credentials
+that may open a Session Manager session on the instance, where before any browser could. In
+exchange, the internet no longer reaches an anonymous-access Grafana, and the host port that was
+the one thing in the `mlobs` namespace breaking the Pod Security baseline profile is gone, which is
+what lets the namespace enforce that profile
+([#82](https://github.com/MuratAlkan06/ml-observability-system/issues/82)).
 
 ### The canary split, stated plainly
 

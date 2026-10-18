@@ -17,10 +17,12 @@
 #                  file of dummy values written here, as CI does.
 #
 # Runs against the current kubectl context: a fresh cluster on the pinned k3s
-# image, started with the D34 pair as in K3sSmoke, with the api's node port and
-# grafana's host port reachable where smoke.sh looks (API_URL, GRAFANA_URL),
-# and these images already imported (CI's RollbackRehearsal job builds and
-# imports them; deploy/k3s/README.md has the same steps for a laptop):
+# image, started with the D34 pair as in K3sSmoke, with the api's node port
+# reachable where smoke.sh looks (API_URL) and port 3000 published for the
+# pre-cutover tree's Grafana, whose host port that tree's smoke.sh looks for
+# (GRAFANA_URL; this tree's Grafana has none, D52), and these images already
+# imported (CI's RollbackRehearsal job builds and imports them;
+# deploy/k3s/README.md has the same steps for a laptop):
 #   mlobs-{api,consumer,drift,shadow-scorer}:PRE_CUTOVER_SHA
 #   mlobs-{api,consumer,drift,shadow-scorer,operator}:IMAGE_TAG
 #   mlobs-api:CANARY_TAG
@@ -49,7 +51,11 @@
 #      in any namespace
 #   5. the pre-cutover tree deployed again by its own apply.sh: deployment/api
 #      a new object from that tree's 20-api.yaml, no owner, hostPort 8000,
-#      service/api a ClusterIP again, the operator still at 0
+#      service/api a ClusterIP again, the operator still at 0; and the
+#      namespace's Pod Security labels exactly this tree's before it and
+#      exactly the pre-cutover tree's after it: that tree's client-side apply
+#      of its own namespace manifest takes off the labels this tree set, so
+#      the baseline profile never meets its hostPort pods (#82, D52)
 #   6. smoke.sh green: the last step of that apply.sh, then run again on its
 #      own
 set -euo pipefail
@@ -71,6 +77,8 @@ NAMESPACE=mlobs
 CRD_NAME=servingdeployments.serving.mlobs.dev
 SERVINGDEPLOYMENT=servingdeployment/api
 API_PORT=8000
+# The three Pod Security Admission modes a namespace label can set.
+PSA_MODES=(enforce audit warn)
 
 # #68's step 2: the api container's hostPort removed from the adopted
 # Deployment's template. The two test operations make it refuse, changing
@@ -170,6 +178,42 @@ no_servingdeployments() {
   [ -z "$found" ]
 }
 
+# declared_psa TREE MODE: the level TREE's 00-namespace.yaml sets for Pod
+# Security mode MODE, read from the file rather than copied; empty when the
+# manifest sets none.
+declared_psa() {
+  sed -n "s|^[[:space:]]*pod-security\.kubernetes\.io/$2:[[:space:]]*\([a-z]*\)[[:space:]]*\$|\1|p" \
+    "$1/deploy/k3s/manifests/00-namespace.yaml"
+}
+
+# psa_summary TREE: TREE's declared Pod Security labels as mode=level pairs.
+psa_summary() {
+  local mode level out=""
+  for mode in "${PSA_MODES[@]}"; do
+    level="$(declared_psa "$1" "$mode")"
+    if [ -n "$level" ]; then
+      out="${out:+${out}, }${mode}=${level}"
+    fi
+  done
+  printf '%s' "${out:-none}"
+}
+
+# expect_psa_labels WHAT TREE TREE_NAME: the namespace carries, mode by mode,
+# exactly the Pod Security labels TREE's 00-namespace.yaml declares: each at
+# its declared level, and none the manifest leaves out. A failed read is not
+# taken for an absent label.
+expect_psa_labels() {
+  local what="$1" tree="$2" tree_name="$3" mode declared live
+  for mode in "${PSA_MODES[@]}"; do
+    declared="$(declared_psa "$tree" "$mode")"
+    live="$(kubectl get namespace "$NAMESPACE" \
+      -o "jsonpath={.metadata.labels.pod-security\.kubernetes\.io/${mode}}" 2>/dev/null)" \
+      || die "${what}: namespace ${NAMESPACE} not readable"
+    [ "$live" = "$declared" ] \
+      || die "${what}: namespace ${NAMESPACE} label pod-security.kubernetes.io/${mode} is ${live:-absent}, where ${tree_name}'s 00-namespace.yaml declares ${declared:-none}"
+  done
+}
+
 # --- 0. the two trees, and an empty cluster ----------------------------------
 
 git -C "$REPO_ROOT" rev-parse --verify --quiet "${PRE_CUTOVER_SHA}^{commit}" >/dev/null \
@@ -194,6 +238,18 @@ fi
 grep -qE '^kind: ServingDeployment$' "${SCRIPT_DIR}/manifests/40-servingdeployment.yaml" \
   || die "this tree applies no ServingDeployment: there is no boundary to cross"
 echo "ok: the pre-cutover tree ${PRE_CUTOVER_SHA} renders deployment/api; this tree hands it to the operator"
+
+# What step 5 has to take off the namespace (#82, D52): Pod Security labels
+# this tree declares and the pre-cutover tree does not.
+psa_to_strip=""
+for mode in "${PSA_MODES[@]}"; do
+  if [ -n "$(declared_psa "$REPO_ROOT" "$mode")" ] && [ -z "$(declared_psa "$pre_tree" "$mode")" ]; then
+    psa_to_strip="${psa_to_strip:+${psa_to_strip} }${mode}"
+  fi
+done
+[ -n "$psa_to_strip" ] \
+  || die "this tree's 00-namespace.yaml declares no Pod Security label that the tree at ${PRE_CUTOVER_SHA} lacks: the way-back has no label to take off"
+echo "ok: Pod Security labels: this tree declares $(psa_summary "$REPO_ROOT"); the pre-cutover tree $(psa_summary "$pre_tree"); the way-back must take off: ${psa_to_strip}"
 
 if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
   die "namespace ${NAMESPACE} already exists: the rehearsal starts from an empty cluster"
@@ -331,6 +387,11 @@ echo "ok: D36 step 4: the operator scaled to 0 with no pod left; crd/${CRD_NAME}
 
 # --- D36 step 5: the pre-cutover SHA through the pipeline ---------------------
 
+# The namespace as the way-back finds it: this tree's labels, enforce among
+# them once this tree enforces.
+expect_psa_labels "D36 step 5, before the way-back" "$REPO_ROOT" "this tree"
+echo "ok: D36 step 5: before the way-back, the namespace carries this tree's Pod Security labels: $(psa_summary "$REPO_ROOT")"
+
 run_logged "${work_dir}/5-apply.log" deploy_pre_cutover \
   || die "D36 step 5: the pre-cutover tree's apply.sh failed"
 expect_line "${work_dir}/5-apply.log" 'ok: smoke passed' "D36 step 5: the pre-cutover apply.sh"
@@ -348,6 +409,16 @@ rolled_back_uid="$(field deployment/api '{.metadata.uid}')"
 [ "$(field deployment/operator '{.spec.replicas}')" = 0 ] || die "D36 step 5: the operator is no longer at 0"
 no_servingdeployments || die "D36 step 5: a ServingDeployment exists"
 echo "ok: D36 step 5: the pre-cutover tree redeployed by its own apply.sh; deployment/api a new object (uid ${rolled_back_uid}) from its 20-api.yaml, no owner, hostPort ${API_PORT}; service/api ClusterIP; the operator still at 0"
+
+# #82's prerequisite 2, the way-back's collision with enforce. The pre-cutover
+# apply.sh applies its own 00-namespace.yaml first, client-side, and the merge
+# removes each label that the last-applied configuration (this tree's) names
+# and that manifest leaves out. That is what admits its hostPort pods, which
+# the baseline profile refuses: the api's hostPort 8000 asserted above, and
+# its Grafana's hostPort 3000, which its smoke.sh reached on the way to the
+# 'ok: smoke passed' line asserted above.
+expect_psa_labels "D36 step 5" "$pre_tree" "the pre-cutover tree"
+echo "ok: D36 step 5: the namespace's Pod Security labels are the pre-cutover tree's own ($(psa_summary "$pre_tree")): its apply took off this tree's ${psa_to_strip}, and its hostPort pods were admitted"
 
 # --- D36 step 6: smoke.sh green ----------------------------------------------
 

@@ -22,17 +22,14 @@ import {
 }
 
 # One import per security-group rule. Rule ids are per-rule, not per-group, so
-# the four below cover the group completely: tcp/8000, tcp/3000, tcp/22 and the
-# default allow-all egress.
+# the three below cover the group completely: tcp/8000, tcp/22 and the default
+# allow-all egress. A fourth, tcp/3000 (sgr-0c1d9faea74e8404f), was imported
+# here at the bootstrap; D52 removed its resource, and its import block with
+# it, since an import names a resource the configuration must still declare.
 
 import {
   to = aws_vpc_security_group_ingress_rule.api
   id = "sgr-01aa4f16b5235e4cb"
-}
-
-import {
-  to = aws_vpc_security_group_ingress_rule.grafana
-  id = "sgr-0c1d9faea74e8404f"
 }
 
 import {
