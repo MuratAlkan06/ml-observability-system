@@ -27,7 +27,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Pinned 2026-10-18 to the nonroot tag's index (manifest-list) digest, like the
+# builder, so the runtime base changes only with a commit here (#60, I6). The
+# index carries linux/amd64, which GhcrPublish builds, and linux/arm64.
+# Refresh: the Docker-Content-Digest this prints is the new pin.
+# curl -fsSI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' https://gcr.io/v2/distroless/static/manifests/nonroot | grep -i docker-content-digest
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

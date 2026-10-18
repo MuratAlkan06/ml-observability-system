@@ -13,6 +13,9 @@ name: Operator
 # and deploy/helm/ to the paths below (D38). The chart is a projection of the
 # flattened manifests this workflow already guards, so a change on either
 # side runs both.
+#
+# Govulncheck joined from the deferral register (#60, D51): the module's
+# source scanned against the Go vulnerability database, behind the same paths.
 
 on:
   push:
@@ -114,6 +117,114 @@ jobs:
 
       - name: Test
         run: go test ./... -count=1
+
+  Govulncheck:
+    name: Govulncheck
+    # Source-mode govulncheck over the module (#60, D51). The scan writes JSON,
+    # in which govulncheck exits 0 whatever it finds, and the step after it
+    # decides. It fails on a called (symbol-level) finding whose OSV ID is not
+    # on the accepted list there, and warns, never fails, when an accepted ID
+    # is no longer called, so a stale entry surfaces for pruning. Package- and
+    # module-level findings are printed and do not fail the job. The scanner is
+    # pinned to an exact version and fetched through the module proxy and the
+    # checksum database. The database it reads is live, so a new advisory can
+    # turn this job red with no change in the repository, though only at its
+    # next run: it has no schedule, and runs only on the workflow's paths
+    # filter and on manual dispatch. The standard library it checks is the
+    # go.mod toolchain's, not the builder image's go1.26.x (operator/Dockerfile).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: Scan (source mode, JSON)
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... \
+            > "${RUNNER_TEMP}/govulncheck.json"
+      - name: Classify findings against the accepted list
+        run: |
+          # Each entry was rated against the shipped binary and accepted on #60
+          # (comment 6098416055, section 2), and is retired by the named cleanup
+          # version once the k8s.io dependencies carry it (D51).
+          accepted=(
+            GO-2026-6061 # grpc: rated None on #60, item 4; retired by grpc-go v1.82.1
+            GO-2026-6348 # grpc: rated None on #60, item 3; retired by grpc-go v1.83.1
+            GO-2026-6505 # otel: rated None on #60, item 1; retired by otel/sdk and the otlptrace exporters at v1.45.0
+          )
+          report="${RUNNER_TEMP}/govulncheck.json"
+
+          # The runner reads a workflow command (::error::, ::warning:: and the
+          # rest) from any line of this log, and the report's text is the
+          # database's: a summary with a newline in it could forge one. So each
+          # string jq prints here goes through esc, the runner's encoding of a
+          # command's message (% first, then CR and LF), and stays on one line.
+          esc='def esc: tostring | gsub("%";"%25") | gsub("\r";"%0D") | gsub("\n";"%0A");'
+
+          # A report that is not a symbol-level scan holds no called findings
+          # to judge, and would pass on warnings alone.
+          level="$(jq -r "${esc}"' select(.config) | .config.scan_level | esc' "$report")"
+          if [ "$level" != "symbol" ]; then
+            echo "::error::govulncheck report has scan_level '${level}', expected symbol (D51)"
+            exit 1
+          fi
+          jq -r "${esc}"' select(.config) | .config
+            | "scanner: \(.scanner_name) \(.scanner_version), \(.go_version), \(.scan_mode) mode; db \(.db), modified \(.db_last_modified)" | esc' "$report"
+
+          # One line per OSV ID at its most precise level: 2 called (the first
+          # trace frame names a function), 1 imported (a package, no function),
+          # 0 required (the module alone).
+          findings="$(jq -r -s "${esc}"'
+            [.[] | select(.finding) | .finding
+              | {osv, module: "\(.trace[0].module)@\(.trace[0].version)",
+                 rank: (if (.trace[0].function // "") != "" then 2
+                        elif (.trace[0].package // "") != "" then 1
+                        else 0 end)}]
+            | group_by(.osv)[]
+            | "\(.[0].osv) \(map(.rank) | max) \(map(.module) | unique | join(","))" | esc' "$report")"
+
+          declare -A is_accepted=() is_called=() is_reported=()
+          for id in "${accepted[@]}"; do is_accepted[$id]=1; done
+          status=0
+          while read -r id rank modules; do
+            [ -n "$id" ] || continue
+            is_reported[$id]=1
+            case "$rank" in
+              2)
+                is_called[$id]=1
+                if [ -n "${is_accepted[$id]:-}" ]; then
+                  echo "called, accepted on #60: ${id} in ${modules}"
+                else
+                  # The report can repeat an ID's entry; one summary is printed.
+                  summary="$(jq -r -s --arg id "$id" "${esc}"'
+                    first(.[] | select(.osv) | .osv | select((.id | esc) == $id)) | .summary | esc' "$report")"
+                  echo "::error::called finding ${id} in ${modules} is not on the accepted list (D51): ${summary}"
+                  status=1
+                fi
+                ;;
+              1) echo "informational, imported but not called: ${id} in ${modules}" ;;
+              *) echo "informational, required but not imported: ${id} in ${modules}" ;;
+            esac
+          done <<< "$findings"
+
+          for id in "${accepted[@]}"; do
+            [ -z "${is_called[$id]:-}" ] || continue
+            if [ -n "${is_reported[$id]:-}" ]; then
+              where="is reported only below the called level"
+            else
+              where="is no longer in the scanner output"
+            fi
+            echo "::warning::accepted ${id} ${where}; prune it from the accepted list (D51)"
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "Rate each new called finding on #60 and accept it here with its citation, or move the dependency."
+            echo "Call traces: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./... in operator/"
+          fi
+          exit "$status"
 
   OperatorManifestSync:
     name: Operator manifest sync
