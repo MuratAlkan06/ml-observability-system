@@ -128,9 +128,10 @@ jobs:
     # module-level findings are printed and do not fail the job. The scanner is
     # pinned to an exact version and fetched through the module proxy and the
     # checksum database. The database it reads is live, so a new advisory can
-    # turn this job red with no change in the repository. The standard library
-    # it checks is the go.mod toolchain's, not the builder image's go1.26.x
-    # (operator/Dockerfile).
+    # turn this job red with no change in the repository, though only at its
+    # next run: it has no schedule, and runs only on the workflow's paths
+    # filter and on manual dispatch. The standard library it checks is the
+    # go.mod toolchain's, not the builder image's go1.26.x (operator/Dockerfile).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -152,31 +153,38 @@ jobs:
           accepted=(
             GO-2026-6061 # grpc: rated None on #60, item 4; retired by grpc-go v1.82.1
             GO-2026-6348 # grpc: rated None on #60, item 3; retired by grpc-go v1.83.1
-            GO-2026-6505 # otel: rated None on #60, item 1; retired by go.opentelemetry.io/otel v1.45.0
+            GO-2026-6505 # otel: rated None on #60, item 1; retired by otel/sdk and the otlptrace exporters at v1.45.0
           )
           report="${RUNNER_TEMP}/govulncheck.json"
 
+          # The runner reads a workflow command (::error::, ::warning:: and the
+          # rest) from any line of this log, and the report's text is the
+          # database's: a summary with a newline in it could forge one. So each
+          # string jq prints here goes through esc, the runner's encoding of a
+          # command's message (% first, then CR and LF), and stays on one line.
+          esc='def esc: tostring | gsub("%";"%25") | gsub("\r";"%0D") | gsub("\n";"%0A");'
+
           # A report that is not a symbol-level scan holds no called findings
           # to judge, and would pass on warnings alone.
-          level="$(jq -r 'select(.config) | .config.scan_level' "$report")"
+          level="$(jq -r "${esc}"' select(.config) | .config.scan_level | esc' "$report")"
           if [ "$level" != "symbol" ]; then
             echo "::error::govulncheck report has scan_level '${level}', expected symbol (D51)"
             exit 1
           fi
-          jq -r 'select(.config) | .config
-            | "scanner: \(.scanner_name) \(.scanner_version), \(.go_version), \(.scan_mode) mode; db \(.db), modified \(.db_last_modified)"' "$report"
+          jq -r "${esc}"' select(.config) | .config
+            | "scanner: \(.scanner_name) \(.scanner_version), \(.go_version), \(.scan_mode) mode; db \(.db), modified \(.db_last_modified)" | esc' "$report"
 
           # One line per OSV ID at its most precise level: 2 called (the first
           # trace frame names a function), 1 imported (a package, no function),
           # 0 required (the module alone).
-          findings="$(jq -r -s '
+          findings="$(jq -r -s "${esc}"'
             [.[] | select(.finding) | .finding
               | {osv, module: "\(.trace[0].module)@\(.trace[0].version)",
                  rank: (if (.trace[0].function // "") != "" then 2
                         elif (.trace[0].package // "") != "" then 1
                         else 0 end)}]
             | group_by(.osv)[]
-            | "\(.[0].osv) \(map(.rank) | max) \(map(.module) | unique | join(","))"' "$report")"
+            | "\(.[0].osv) \(map(.rank) | max) \(map(.module) | unique | join(","))" | esc' "$report")"
 
           declare -A is_accepted=() is_called=() is_reported=()
           for id in "${accepted[@]}"; do is_accepted[$id]=1; done
@@ -190,7 +198,9 @@ jobs:
                 if [ -n "${is_accepted[$id]:-}" ]; then
                   echo "called, accepted on #60: ${id} in ${modules}"
                 else
-                  summary="$(jq -r --arg id "$id" 'select(.osv) | .osv | select(.id == $id) | .summary' "$report")"
+                  # The report can repeat an ID's entry; one summary is printed.
+                  summary="$(jq -r -s --arg id "$id" "${esc}"'
+                    first(.[] | select(.osv) | .osv | select((.id | esc) == $id)) | .summary | esc' "$report")"
                   echo "::error::called finding ${id} in ${modules} is not on the accepted list (D51): ${summary}"
                   status=1
                 fi

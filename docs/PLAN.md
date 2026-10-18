@@ -1594,7 +1594,8 @@ retention jobs, Alembic.
   against the shipped binary and accepted (comment 6098416055, section 2) — and the cleanup
   version that retires it: GO-2026-6061 (grpc, item 4), retired by grpc-go v1.82.1; GO-2026-6348
   (grpc, item 3), retired by grpc-go v1.83.1; GO-2026-6505 (otel, item 1), retired by
-  go.opentelemetry.io/otel v1.45.0. An entry joins only with both citations, so a new called
+  go.opentelemetry.io/otel/sdk and the otlptrace exporters at v1.45.0. An entry joins only with
+  both citations, so a new called
   finding is rated on #60 before it is accepted. The job warns, through a `::warning::`
   annotation, and never fails, when an accepted ID is no longer among the called findings — gone
   from the output, or reported only at package or module level — so a stale entry surfaces for
@@ -1603,7 +1604,10 @@ retention jobs, Alembic.
   checks is the go.mod toolchain's, go1.27.2, not the builder image's go1.26.x; and the accepted
   IDs' call paths now include the Phase 4 dispatch client, the same interface over-approximation
   class the rating covered, so the register's note to re-run the binary-mode scan on the next
-  image stands. Owner ruling: the 2026-10-18 Govulncheck ruling on #60 (comment 6248373227),
+  image stands. The job has no schedule: it runs only on pull requests and pushes to main that
+  touch the workflow's paths, Dependabot's gomod bumps among them, and on manual dispatch, so a
+  new advisory against unchanged code is seen at the next such run, not when it is published.
+  Owner ruling: the 2026-10-18 Govulncheck ruling on #60 (comment 6248373227),
   the accepted list with both riders. *Provenance:* "no govulncheck in CI", a pre-existing gap
   the Phase 4 close triage put on the register (#60, comment 6199454029; the V1-S5 security
   review's F10); the source scan at this slice, against the database as modified
