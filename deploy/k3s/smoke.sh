@@ -118,7 +118,11 @@ stop_port_forwards() {
 trap stop_port_forwards EXIT
 
 # port_forward RESOURCE LOCAL_PORT REMOTE_PORT READY_PATH: open a port-forward
-# and wait, to a deadline, for READY_PATH to answer through it.
+# and wait, to a deadline, for READY_PATH to answer through it. Every forward
+# below goes through here. An answer counts only if the forwarder is still
+# running once it arrives: another process already holding LOCAL_PORT answers
+# the probe too, and kubectl, unable to bind the port, exits. A forwarder that
+# has not yet come to its bind when the probe answers is not caught by this.
 port_forward() {
   local resource="$1" local_port="$2" remote_port="$3" ready_path="$4" pid deadline
   kubectl port-forward "$resource" "${local_port}:${remote_port}" \
@@ -132,6 +136,8 @@ port_forward() {
       || die "${resource} not reachable over port-forward within ${PORT_FORWARD_TIMEOUT_SECONDS}s"
     sleep 1
   done
+  kill -0 "$pid" 2>/dev/null \
+    || die "kubectl port-forward to ${resource} exited after 127.0.0.1:${local_port}${ready_path} answered, so the answer cannot be counted: another process may hold local port ${local_port}"
 }
 
 # The namespace's Pod Security labels, as shipped: enforce, and the two

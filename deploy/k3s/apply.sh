@@ -18,8 +18,9 @@
 #               optionally GF_ADMIN_USER / SLACK_WEBHOOK_URL. Default <repo>/.env.
 #
 # The order is D32's and is not a matter of taste: every manifest is rendered,
-# k3s's recorded node-port range is read and the api Service is dry-run
-# server-side before the cluster is touched (the preflight, step 2); then the
+# k3s's recorded node-port range is read, the api Service is dry-run
+# server-side and a live deployment/api is refused if it carries a hostPort,
+# all before the cluster is touched (the preflight, step 2); then the
 # namespace, the Secret and the ConfigMaps; the CRD, waited on until
 # Established; the operator, waited on until rolled out; the rest of the
 # stack; the ServingDeployment; the constant close-window patch, which can
@@ -235,6 +236,42 @@ if ! kubectl apply --dry-run=server --namespace "$preflight_namespace" \
   die "preflight: server-side dry-run of service/api was refused. Nothing was applied; to see why, re-run: kubectl apply --dry-run=server -f deploy/k3s/manifests/${API_SERVICE_MANIFEST}"
 fi
 echo "ok: preflight: node-port range ${node_port_range}; service/api accepted by a server-side dry-run"
+
+# --- 2. preflight, continued: no hostPort on a live deployment/api (D52) -----
+
+# A third read, and it writes nothing either. Step 3 applies this tree's
+# namespace, which enforces the Pod Security baseline profile (D52), and
+# baseline refuses any pod carrying a hostPort, in a container or an init
+# container. The operator adopts a live deployment/api in place, changing
+# only its owner and its image (the D19 erratum of O2), so a hostPort on it
+# survives into the adopted template, and deployment/api rolls out by Recreate:
+# its running pod is deleted first, then every replacement is refused at
+# admission. A port conflict becomes an api outage. That is a re-cutover that
+# skipped #68's step 2, the hostPort patch (docs/RUNBOOK.md, "Going forward
+# again"), and it stops here with the stack as it was. No deployment/api at all
+# is a first install and passes: a Deployment has at least one container, so
+# an empty read can only mean there is none. The read is container names and
+# host ports, nothing from the env file. A hostPort of 0 is no host port, and
+# baseline admits it.
+api_ports_jsonpath='{range .spec.template.spec.initContainers[*]}{"initContainer "}{.name}{" "}{.ports[*].hostPort}{"\n"}{end}'
+api_ports_jsonpath+='{range .spec.template.spec.containers[*]}{"container "}{.name}{" "}{.ports[*].hostPort}{"\n"}{end}'
+api_ports="$(kubectl get deployment/api --namespace "$NAMESPACE" --ignore-not-found \
+  -o "jsonpath=${api_ports_jsonpath}" 2>/dev/null)" \
+  || die "preflight: could not read deployment/api in namespace ${NAMESPACE}. Nothing was applied."
+if [ -z "$api_ports" ]; then
+  echo "ok: preflight: no deployment/api in namespace ${NAMESPACE}; a first install carries no hostPort"
+else
+  api_host_ports=""
+  while read -r container_kind container_name container_ports; do
+    for host_port in $container_ports; do
+      [ "$host_port" = 0 ] \
+        || api_host_ports="${api_host_ports:+${api_host_ports}, }${container_kind} ${container_name} hostPort ${host_port}"
+    done
+  done <<<"$api_ports"
+  [ -z "$api_host_ports" ] \
+    || die "preflight: deployment/api in namespace ${NAMESPACE} carries a hostPort (${api_host_ports}). This tree enforces the Pod Security baseline profile on ${NAMESPACE} (D52), which refuses any hostPort, and deployment/api rolls out by Recreate: its running pod would be deleted and every replacement refused at admission, an api outage. Patch the hostPort out first (#68 step 2; docs/RUNBOOK.md, \"Going forward again\"). Nothing was applied."
+  echo "ok: preflight: deployment/api carries no hostPort"
+fi
 
 # --- 3. namespace ------------------------------------------------------------
 
