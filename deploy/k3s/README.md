@@ -80,6 +80,11 @@ condition at its current generation, then for the nine rollouts,
 the deploy's. `deployment/api` is no longer rendered from a manifest: the
 operator creates it, or adopts the one that exists, from the
 `ServingDeployment` (D31).
+Since 2026-10-19 (#147), the preflight also refuses a live `deployment/api`
+that carries any `hostPort`, in a container or an init container. The
+namespace enforces Pod Security `baseline` (D52), and over such a Deployment
+a Recreate rollout would delete the running pod and admission would refuse its
+replacements. No `deployment/api` at all, a first install, passes.
 
 `smoke.sh` also runs on its own — that is the point of it. It is the check after
 a `kubectl rollout undo` or a redeploy of a previous SHA (D25):
@@ -344,6 +349,10 @@ pre-cutover tree, whose `smoke.sh` still reaches Grafana's host port.
 Without the port-forward ports, a port-forward to the cluster cannot bind its
 local port, and `smoke.sh`'s readiness probe is answered by whatever holds that
 port instead.
+Since 2026-10-19 (#147), `smoke.sh` fails that probe on a fixed line when the
+forwarder has already exited by the time the answer arrives. A forwarder that
+has not yet reached its bind is not caught, so publishing on other ports, as
+above, is still the fix.
 
 ## Migration record and rehearsal results (2026-09-27)
 

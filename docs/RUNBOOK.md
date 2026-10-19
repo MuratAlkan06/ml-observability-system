@@ -1058,6 +1058,10 @@ and the operator at one replica, and the new ServingDeployment adopts the new
 `deployment/api`. It also puts the namespace's three Pod Security labels back
 before the stack's manifests, so an api still carrying its `hostPort` would
 have its pods refused by `enforce`: one more reason the patch comes first.
+Since 2026-10-19 (#147), a dispatch sent before the patch stops at `apply.sh`'s
+preflight instead, before anything is applied: a live `deployment/api`
+carrying any `hostPort`, in a container or an init container, ends the run on
+an `error: preflight:` line naming the port, with the stack left as it was.
 The pre-cutover Grafana's `hostPort` needs no patch, as this tree's manifest
 replaces that pod with one that has none. Until it does, the namespace apply
 draws an API server warning that a running pod breaks the new `enforce`
