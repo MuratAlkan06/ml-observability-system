@@ -5,6 +5,60 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**What this is.** A self-hosted DistilBERT sentiment service, built with the observability real
+ML systems need: drift detection (class χ², token-length χ², confidence KL) that alerts to Slack,
+Prometheus metrics with Grafana dashboards, and a smaller MiniLM candidate model shadow-scoring
+the same live traffic off the request path. It runs on k3s on a single EC2 host described in
+Terraform, and deploys are approval-gated: GitHub OIDC to AWS, then a fixed SSM document on the
+host, with no SSH keys and no long-lived cloud credentials in the repository or CI. The api runs
+under a purpose-built Go `ServingDeployment` operator, whose canary windows can opt into a metric
+gate that rolls a window back or dispatches its promotion.
+
+**Architecture at a glance.** traffic simulator → FastAPI (DistilBERT) → Redis Streams →
+consumer + shadow scorer → PostgreSQL → drift jobs → Prometheus → Grafana, with Slack on a drift
+breach and the operator supervising the api's canary windows. The full diagram is under
+[Architecture](#architecture).
+
+**The operator, live.** In live canary windows on the EC2 host, judging each 60 s interval by
+the ratified O4 abort table, the operator observed a window, rolled back an induced p95 breach
+(2026-10-15, `BreachRolledBack` at 02:31:04Z), and dispatched a promotion after 11 consecutive
+clean intervals (2026-10-15, the verdict and dispatch at 18:12:19Z), with a human attending every
+acting window. Evidence: the live-window records on issue
+[#123](https://github.com/MuratAlkan06/ml-observability-system/issues/123), the
+[abort table](docs/RUNBOOK.md#during-the-live-canary-window-close-it) in the
+[operator runbook](docs/RUNBOOK.md), and the decision records D41–D50 in
+[`docs/PLAN.md`](docs/PLAN.md). The full account, with what the windows also showed, is under
+[Deployment](#deployment).
+
+> **What the operator decides**, in a window that opts into the gate, each mode adding to the one
+> before: it judges each interval against the ratified abort table and records what it would do
+> (`Observe`); closes the window and rolls it back on a tripped line (`ActRollback`); and
+> dispatches the Deploy workflow after 11 consecutive clean intervals, at most once
+> (`ActPromote`), so the pipeline still does the promoting.
+>
+> **What stays human:** the host, the stable, the operator itself, opening any window, the deploy
+> approval, and the agreement/confidence judgement. A human attends every acting window. The full
+> line is in
+> [the runbook's v1 gate](docs/RUNBOOK.md#the-v1-gate-what-the-operator-decides-what-stays-human).
+
+**Quick links**
+
+| Where | What it holds |
+| --- | --- |
+| [`docs/PLAN.md`](docs/PLAN.md) | The frozen specification and the D-numbered decision records |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | The operator runbook: canary windows, the TTL, the v1 gate, the O4 abort table, rolling back across the boundary |
+| [`docs/PHASE2.md`](docs/PHASE2.md), [`docs/PHASE3.md`](docs/PHASE3.md), [`docs/PHASE4.md`](docs/PHASE4.md) | The phase task contracts: principles, Terraform, k3s and gated deploys; operator v0, Helm and EKS; operator v1 |
+| [`docs/K3S.md`](docs/K3S.md) | Why k3s on the host, what changed, and when to revisit |
+| [`docs/WHY-NOT-ARGO-KSERVE.md`](docs/WHY-NOT-ARGO-KSERVE.md) | Why a purpose-built operator rather than Argo Rollouts or KServe |
+| [`PRINCIPLES.md`](PRINCIPLES.md) | Engineering rules binding every contributor, and what CI enforces |
+| [`operator/README.md`](operator/README.md) | The Go `ServingDeployment` operator |
+| [`infra/README.md`](infra/README.md) | Terraform for the host and what it does not prove, the deploy pipeline, rolling back, cost |
+| [`deploy/k3s/README.md`](deploy/k3s/README.md) | The k3s manifests, the local k3d recipe, the cutover record |
+| [Load test](#load-test) | Latency and throughput as measured, with methodology: historical, under Docker Compose, then the [k3s re-measurement](#k3s-re-measurement-2026-09-27) |
+| [Releases](https://github.com/MuratAlkan06/ml-observability-system/releases) | Release notes, v1.0.0 through v4.1.0 |
+
+---
+
 Real-time ML observability for a self-hosted sentiment model, treated like production
 infrastructure. A FastAPI service runs DistilBERT (SST-2 sentiment) inference and streams
 every prediction through Redis Streams into PostgreSQL; a drift job continuously compares the
