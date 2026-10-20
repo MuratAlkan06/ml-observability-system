@@ -41,6 +41,10 @@ acting window. Evidence: the live-window records on issue
 > line is in
 > [the runbook's v1 gate](docs/RUNBOOK.md#the-v1-gate-what-the-operator-decides-what-stays-human).
 
+![Terminal recording of the ServingDeployment operator: a canary window opens with the gate armed at ActRollback, extra load aimed at the canary pod alone pushes its p95 above 1.25 times the stable's on two intervals in a row, the operator rolls the window back as BreachRolledBack and the shadow scorer returns, and smoke.sh passes in the steady state](docs/assets/operator-canary-demo.gif)
+
+*Recorded on a local k3d cluster brought up from a clean clone of this repository, not on the EC2 host, with idle pauses trimmed and playback sped up; each line carries its real UTC time.*
+
 **Quick links**
 
 | Where | What it holds |
