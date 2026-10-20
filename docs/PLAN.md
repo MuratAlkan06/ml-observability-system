@@ -1233,6 +1233,12 @@ retention jobs, Alembic.
 > 6097856211), with its companion, the encrypted-root-volume swap `infra/README.md` also deferred
 > to P3; both remain open. No frozen text edited.
 
+> **D10 note (2026-10-20, #157):** the sentence above, "not shown to be rebuildable from it", is
+> retired by the rebuild drill: the infra came up from a clean state via `terraform apply`, the
+> host was provisioned by hand per the migration runbook, the data was restored count-exact, and
+> the smoke passed twice. The drill is recorded in `docs/DRILL.md` and on #60. Provisioning the
+> host is still not code, and the encrypted-root-volume swap remains open. No frozen text edited.
+
 # Operator v1 phase — ADR summary (D41–D50)
 
 > FROZEN (owner ruling 2026-10-12 recorded on #108). Decisions for Phase 4 — operator v1,
