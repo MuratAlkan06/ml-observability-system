@@ -282,6 +282,9 @@ The shadow scorer's cost to the primary path under k3s is ≈2.4 ms at p50 and �
 p95 that computes to +10.1% (111.2 vs 101.0 ms), just outside the ≤10% criterion the compose-era
 run above met at −1.0%; it comes from one matched pair of 120 s windows and is published as
 measured, not re-certified. The compose-era tables stay as measured (D27, [docs/K3S.md](docs/K3S.md)).
+*Interpretation superseded on 2026-10-20 UTC, figures unchanged: six 120 s windows show that a
+single window's p95 on this instance is noise-dominated — see
+[k3s re-measurement (2026-10-20)](#k3s-re-measurement-2026-10-20-the-noise-floor).*
 
 Reproduce: this run used the v1.1 block above with `docker compose start` / `stop shadow-scorer`
 swapped for `kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1` / `--replicas=0`. That
@@ -290,6 +293,50 @@ shadow scorer's scale, holds it at 1 and pauses it only inside a canary window, 
 scale back on its next reconcile (D37). A window runs a second api pod beside the stable, so it
 does not isolate the shadow's cost either; a k3s re-run of this A/B needs a method of its own,
 recorded when one is taken. The Compose block above is unaffected.
+
+### k3s re-measurement (2026-10-20): the noise floor
+
+Re-measured **on the same EC2 t3.medium** on 2026-10-20 UTC under k3s `v1.36.4+k3s1`, deployed
+tree `badf284`, with the v1.1 and 2026-09-27 methodology: [`hey`](https://github.com/rakyll/hey)
+`0.1.5` on-instance, `-c 1 -q 5`, the fixed v1.1 payload, `POST localhost:8000/predict`, six
+**120-second** windows — three with the shadow scorer on, three with it off. Two deviations,
+disclosed:
+
+1. **Operator scaled to 0 for the batch.** The `ServingDeployment` operator puts a hand scale of
+   the shadow scorer back on its next reconcile (D37), so it was scaled to 0 for the batch and
+   restored afterward. It adds no request-path load either way.
+2. **ON2 and ON3 are cold-start-contaminated.** Both began ~10 s after the shadow scale-up, so the
+   shadow's model load and Redis backlog catch-up ran inside those windows: they are not steady
+   state, and their req/s dip is attributable to the same cause.
+
+A single 15 s warm-up (`hey -z 15s -c 1 -q 5`, same payload) preceded the first window (ON1) only;
+the remaining five windows ran back-to-back, separated only by the scaling steps below.
+
+| Window | State | req/s | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| ON1 | shadow on, steady state | 4.997 | 61.0 ms | 92.2 ms | 203.8 ms |
+| OFF1 | shadow off | 4.947 | 61.7 ms | 155.4 ms | 333.7 ms |
+| OFF2 | shadow off | 4.965 | 60.3 ms | 76.3 ms | 299.4 ms |
+| ON2 | shadow on, cold-start-contaminated | 4.806 | 62.3 ms | 271.8 ms | 330.0 ms |
+| OFF3 | shadow off | 4.923 | 60.6 ms | 217.4 ms | 325.7 ms |
+| ON3 | shadow on, cold-start-contaminated | 4.855 | 62.7 ms | 256.0 ms | 372.2 ms |
+
+The three OFF windows — an identical system with no shadow at all — spread **76.3 to 217.4 ms at
+p95 (~2.8×)**. p50 is stable across all six windows (60.3–62.7 ms), and the shadow's p50 cost is
+not resolvable beyond roughly 1 ms. The steady-state ON p95 (92.2 ms) sits inside the OFF range.
+Single 120 s windows therefore cannot resolve the shadow's p95 cost above the noise floor on this
+instance. This supersedes the interpretation of the 2026-09-27 single-pair +10.1% reading above;
+its figures stay as measured (D27).
+
+Reproduce (the measured window, once per row; `$PAYLOAD` is the fixed sentence of the v1.1 block
+above):
+
+```bash
+kubectl -n mlobs scale deployment/operator --replicas=0         # once, before the batch
+kubectl -n mlobs scale statefulset/shadow-scorer --replicas=1   # ON window; --replicas=0 for OFF
+hey -z 120s -c 1 -q 5 -m POST -T "application/json" -d "$PAYLOAD" http://localhost:8000/predict
+kubectl -n mlobs scale deployment/operator --replicas=1         # once, after the batch
+```
 
 ## How drift detection works
 
