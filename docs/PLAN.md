@@ -1732,3 +1732,21 @@ retention jobs, Alembic.
 > plan re-run from the branch reported no changes. After the merge, `TerraformPlan` on `main` at
 > `e0d28ed` logged `ok: plan is a no-op` (run 39153140600). #82 stays open until the owner
 > verifies `enforce` live. No frozen text edited.
+
+> **Demo note (2026-10-20, #159):** the operator canary GIF in the README's top fold,
+> `docs/assets/operator-canary-demo.gif`, is a local re-enactment, and its caption says so. It was
+> recorded on a k3d cluster on the pinned `rancher/k3s:v1.36.4-k3s1`, brought up from a clean
+> clone at `5be3d4d` along the `K3sSmoke` path: the images built locally (arm64), imported through
+> `scripts/ci/k3d-import-verified.sh`, and deployed by `apply.sh` to `ok: smoke passed (steady
+> state)`. The one departure is the api's host port, 18080 rather than 8000, which another local
+> process held; `smoke.sh` reached it through its `API_URL` override. A live take on the EC2 host
+> was weighed and not chosen: an acting window there needs a human attending it (D46), and its
+> dashboards open only through the owner's SSM port-forward (D52), while a local cluster takes
+> retakes freely and leaves no trace in the live data. The take runs the shipped flow: the
+> runbook's arming patch opens a window at `ActRollback`; D50's primary method, extra
+> fresh-connection load on the canary pod alone, breaches line 3 on two intervals in a row; the
+> gate rolls the window back as `BreachRolledBack` on `Line3CanaryLatency` and the shadow scorer
+> returns; the close-window patch and a steady `smoke.sh` end it. The screen carries the gate's
+> p95 ratios and request counts, not latencies: they are local and induced, not performance
+> figures, and are never set beside the EC2 numbers (PRINCIPLES §6). No D-number taken; no frozen
+> text edited.
