@@ -374,7 +374,9 @@ at roughly 7–8× the arrival rate once the scorer recovers.
 **Candidate model:** `philschmid/MiniLM-L6-H384-uncased-sst2` (`minilm-sst2-v1`) — a 6-layer,
 H384 MiniLM (~22.7M params, **91 MB** fp32) fine-tuned on SST-2. On the same 872-sentence SST-2
 validation split it scores **90.1% dev accuracy** versus **≈91.3%** for the primary DistilBERT, so
-the question it lets you ask is: *can we serve a ~4× cheaper model without materially changing what
+the question it lets you ask is: *can we serve a model with roughly a third of the parameters
+(~22.7M vs the primary DistilBERT-base's ~66M, per
+[Sanh et al., 2019](https://arxiv.org/abs/1910.01108), Table 3) without materially changing what
 users see?* It ships no `id2label`, so the label map `LABEL_0→negative, LABEL_1→positive` is frozen
 and asserted with two sanity probes at Docker build time; the shadow computes token counts with its
 **own** tokenizer and builds its own drift baseline (`baseline/baseline-minilm.json`).
