@@ -8,12 +8,12 @@
 # stays as found: `description` forces a replacement of the group, which the
 # certified host's instance is attached to.
 resource "aws_security_group" "app" {
-  name        = "mlobs-demo-sg"
+  name        = "mlobs-demo-sg${var.name_suffix}"
   description = "mlobs demo: api 8000 + grafana 3000 public, ssh from admin IP"
   vpc_id      = data.aws_vpc.default.id
 
   tags = {
-    Name = "mlobs-demo"
+    Name = "mlobs-demo${var.name_suffix}"
   }
 }
 
@@ -92,7 +92,7 @@ resource "aws_instance" "app" {
     delete_on_termination = true
 
     tags = {
-      Name = "mlobs-demo"
+      Name = "mlobs-demo${var.name_suffix}"
     }
   }
 
@@ -101,6 +101,6 @@ resource "aws_instance" "app" {
   # (see ../README.md, "What this root does not do").
 
   tags = {
-    Name = "mlobs-demo"
+    Name = "mlobs-demo${var.name_suffix}"
   }
 }

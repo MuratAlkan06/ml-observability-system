@@ -67,3 +67,28 @@ variable "ssh_ingress_cidr" {
     error_message = "ssh_ingress_cidr must be a single host CIDR in exact wire form A.B.C.D/32; GitHub secret masking depends on the literal form matching what the EC2 API returns."
   }
 }
+
+variable "name_suffix" {
+  description = <<-EOT
+    Appended to the names that would collide with the live host if a second
+    copy were applied in this account: the security group, the host's IAM role
+    and instance profile, plus the matching Name tags. Exists for the Terraform
+    rebuild drill (issue #60), which applies a disposable copy of the host from
+    a second checkout with its own local state, setting e.g. -drill.
+
+    The default, the empty string, reproduces every live name byte for byte,
+    so a plan against the live account stays a no-op. The key pair and the
+    account singletons (OIDC provider, plan/deploy/publish roles, SSM document,
+    buckets) are deliberately not suffixed.
+  EOT
+  type        = string
+  default     = ""
+
+  # Empty, or a leading hyphen plus 1-12 lowercase letters, digits or hyphens,
+  # starting with a letter or digit, so every suffixed name stays a valid
+  # security group and IAM name and reads as a variant of the live one.
+  validation {
+    condition     = can(regex("^$|^-[a-z0-9][a-z0-9-]{0,11}$", var.name_suffix))
+    error_message = "name_suffix must be empty or a hyphen followed by 1-12 lowercase letters, digits or hyphens, the first a letter or digit (e.g. -drill)."
+  }
+}
