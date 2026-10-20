@@ -121,3 +121,37 @@ The shadow scorer's cost to the primary path under k3s is ≈2.4 ms at p50 and
 ≈10 ms at p95. At p95 that computes to +10.1% (111.2 vs 101.0 ms), just outside
 the v1.1 ≤10% criterion the compose-era run met at −1.0%. It comes from one
 matched pair of 120 s windows and is published as measured, not re-certified.
+
+### k3s re-measurement (2026-10-20): the noise floor
+
+A second re-measurement, taken on 2026-10-20 UTC on the same EC2 `t3.medium`
+under k3s `v1.36.4+k3s1`, deployed tree `badf284`: `hey` 0.1.5 on-instance,
+`-c 1 -q 5`, the fixed v1.1 payload, `POST localhost:8000/predict`, six 120 s
+windows — the v1.1 and 2026-09-27 methodology, with two deviations disclosed:
+
+1. The operator was scaled to 0 for the batch, because it puts a hand scale of
+   the shadow scorer back on its next reconcile (D37), and restored afterward.
+   It adds no request-path load either way.
+2. ON2 and ON3 began ~10 s after the shadow scale-up, so the shadow's model
+   load and Redis backlog catch-up ran inside those windows: they are
+   cold-start-contaminated, not steady state, and their req/s dip is
+   attributable to the same cause.
+
+| Window | State | req/s | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| ON1 | shadow on, steady state | 4.997 | 61.0 ms | 92.2 ms | 203.8 ms |
+| OFF1 | shadow off | 4.947 | 61.7 ms | 155.4 ms | 333.7 ms |
+| OFF2 | shadow off | 4.965 | 60.3 ms | 76.3 ms | 299.4 ms |
+| ON2 | shadow on, cold-start-contaminated | 4.806 | 62.3 ms | 271.8 ms | 330.0 ms |
+| OFF3 | shadow off | 4.923 | 60.6 ms | 217.4 ms | 325.7 ms |
+| ON3 | shadow on, cold-start-contaminated | 4.855 | 62.7 ms | 256.0 ms | 372.2 ms |
+
+The three OFF windows — an identical system with no shadow at all — spread
+76.3 to 217.4 ms at p95 (~2.8×). p50 is stable across all six windows
+(60.3–62.7 ms); the shadow's p50 cost is not resolvable beyond roughly 1 ms.
+The steady-state ON p95 (92.2 ms) sits inside the OFF range. Single 120 s
+windows therefore cannot resolve the shadow's p95 cost above the noise floor
+on this instance. This supersedes the interpretation of the 2026-09-27
+single-pair +10.1% reading above; its figures stay as measured. The reproduce
+block is in the
+[README](../README.md#k3s-re-measurement-2026-10-20-the-noise-floor).
