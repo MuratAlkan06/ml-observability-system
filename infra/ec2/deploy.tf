@@ -412,7 +412,7 @@ data "aws_iam_policy_document" "host_assume_role" {
 }
 
 resource "aws_iam_role" "host" {
-  name               = "mlobs-host"
+  name               = "mlobs-host${var.name_suffix}"
   description        = "Instance role for the shadow-test host: SSM agent registration and read of shadow-scorer image tarballs."
   assume_role_policy = data.aws_iam_policy_document.host_assume_role.json
 }
@@ -450,6 +450,6 @@ resource "aws_iam_role_policy" "host_shadow_read" {
 }
 
 resource "aws_iam_instance_profile" "host" {
-  name = "mlobs-host"
+  name = "mlobs-host${var.name_suffix}"
   role = aws_iam_role.host.name
 }

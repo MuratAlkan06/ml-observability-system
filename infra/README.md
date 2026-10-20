@@ -32,6 +32,19 @@ There is exactly one instantiation of this configuration and no second consumer
 to parameterise for, so a module layer would add indirection and buy nothing.
 It becomes worth revisiting when a second environment exists.
 
+> **Note (2026-10-20, #153):** one input exists for a second, short-lived copy
+> rather than a second environment: `var.name_suffix`, for the Terraform
+> rebuild drill recorded on issue #60. The drill applies a disposable copy of
+> the host from a second checkout with its own local state, and without the
+> suffix that apply would collide with the live security group, IAM role and
+> instance profile names. The suffix lands on those three names and on the
+> matching `Name` tags; the key pair and the account singletons (the OIDC
+> provider, the plan, deploy and publish roles, the SSM document, the buckets)
+> stay unsuffixed. Its default is the empty string, which reproduces every live
+> name byte for byte, so `TerraformPlan` against the live account stays a
+> no-op. It accepts only empty or a hyphen plus 1-12 lowercase letters, digits
+> or hyphens, the first not a hyphen (e.g. `-drill`).
+
 ## What this root does not do
 
 Stated plainly, because the gap matters more than the coverage:
