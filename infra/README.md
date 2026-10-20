@@ -49,13 +49,23 @@ It becomes worth revisiting when a second environment exists.
 
 Stated plainly, because the gap matters more than the coverage:
 
-- **It does not prove the host can be rebuilt from code.** These resources were
-  imported, not created by Terraform. A real `apply` from an empty state has
-  never been exercised, so "reproducible from source" is not a claim this slice
-  earns. That evidence was deferred to the P3 ephemeral cluster run, and the
-  run did not earn it: by D39's ruling it was eksctl-based, with Terraform
-  rejected for the cluster and this root left untouched, so no Terraform
-  rebuild was exercised. The item remains open, recorded on issue #60.
+- **Rebuilt once (2026-10-20 UTC, #60), and only in this qualified sense:**
+  infra from a clean state via `terraform apply`; host provisioned by hand per
+  the migration runbook; data restored count-exact; smoke green, twice. These
+  resources were imported, not created by Terraform, so the evidence came from
+  a drill on a disposable copy: the host slice (the instance, its security
+  group and three rules, the host role with its SSM attachment, the instance
+  profile) applied from a second checkout with an empty local state,
+  provisioned by hand from the migration record in `deploy/k3s/README.md`,
+  restored from an off-host dump and destroyed again, with the live host
+  stopped and its state unwritten throughout. That is one drill, with manual
+  provisioning and matching row counts, not a standing "reproducible from
+  source" claim: the account singletons were left out of it, and the host
+  steps are not code (next bullet). The evidence had first been deferred to
+  the P3 ephemeral cluster run, and that run did not earn it: by D39's ruling
+  it was eksctl-based, with Terraform rejected for the cluster and this root
+  left untouched, so no Terraform rebuild was exercised. The procedure, its
+  gates and its lessons are in [`docs/DRILL.md`](../docs/DRILL.md).
 - **It does not provision the host.** The instance's `userData` is empty; Docker,
   the compose stack and the `.env` were configured over SSH by hand. So were
   the k3s install that replaced Compose (P2b, 2026-09-27) and D34's two-line

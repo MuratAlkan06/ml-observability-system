@@ -503,8 +503,12 @@ of its rules through `import` blocks rather than recreating them, keeps state in
 `validate` on every pull request plus a read-only `plan` authenticated by GitHub OIDC — this
 repository holds no long-lived AWS credentials. `infra/README.md` carries the one-time bootstrap
 runbook, the running-versus-stopped cost note (≈ $3/month at the start-for-a-demo, stop-afterwards
-usage pattern), and an explicit list of what the slice does not prove — notably that the host is
-*described* by code, not yet rebuilt from it.
+usage pattern), and an explicit list of what the slice does not prove. The host was at first only
+*described* by code; it has since been rebuilt once (2026-10-20 UTC,
+[#60](https://github.com/MuratAlkan06/ml-observability-system/issues/60)), and only in a qualified
+sense: infra from a clean state via `terraform apply`, host provisioned by hand per the migration
+runbook, data restored count-exact, smoke green twice. The drill and its lessons are recorded in
+[`docs/DRILL.md`](docs/DRILL.md); provisioning the host is still not code.
 
 Deploys are one command: an environment-gated GitHub Actions workflow
 (`deploy.yml`) that requires a human approval, verifies the commit is on `main`
