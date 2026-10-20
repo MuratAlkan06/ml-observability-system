@@ -108,6 +108,27 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
       days_after_initiation = 7
     }
   }
+
+  # The host's pg dumps (#155; host_backups_write below). Ninety days, longer
+  # than the shadow rule's sixty on purpose: this prefix holds the only copy of
+  # the database that lives off the host, so its expiry is how far back a
+  # restore can ever reach. The multipart rule as above.
+  rule {
+    id     = "expire-host-backups"
+    status = "Enabled"
+
+    filter {
+      prefix = "backups/"
+    }
+
+    expiration {
+      days = 90
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -447,6 +468,37 @@ resource "aws_iam_role_policy" "host_shadow_read" {
   name   = "mlobs-host-shadow-read"
   role   = aws_iam_role.host.id
   policy = data.aws_iam_policy_document.host_shadow_read.json
+}
+
+# Off-host copies of the host's pg dumps (#155). Postgres sits on a local-path
+# volume on the host, and until this grant its only dump sat on the same disk.
+# Write only: no s3:GetObject, no s3:ListBucket, no s3:DeleteObject — the host
+# can add a dump under backups/ and cannot read one back, list the prefix or
+# remove one. Restores run from the operator's laptop with the bootstrap
+# credentials, never from the host. One limit, stated plainly: versioning is
+# off, so a put to a key already in use replaces what was there — this grant
+# cannot delete a dump, but it can overwrite one. Multipart and
+# s3:ResourceAccount as on mlobs-artifact-publish's grant; the 90-day expiry
+# is the second lifecycle rule above.
+data "aws_iam_policy_document" "host_backups_write" {
+  statement {
+    sid       = "WriteBackups"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.artifacts.arn}/backups/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:ResourceAccount"
+      values   = ["601548053958"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "host_backups_write" {
+  name   = "mlobs-host-backups-write"
+  role   = aws_iam_role.host.id
+  policy = data.aws_iam_policy_document.host_backups_write.json
 }
 
 resource "aws_iam_instance_profile" "host" {

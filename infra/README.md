@@ -454,6 +454,19 @@ What the pipeline cannot do is the other half of the design: it cannot start
 the instance (no `ec2:StartInstances`), run any command but the document, reach
 any other host, change the document, or deploy a commit that is not on `main`.
 
+> **Note (2026-10-20 UTC, #155):** the artifacts bucket also holds the host's
+> own `pg_dump` files, under a standing `backups/` prefix, so the database has
+> an off-host copy; before this, the only dump sat on the host's own disk. The
+> `mlobs-host` role gains one write-only grant, `mlobs-host-backups-write`:
+> `s3:PutObject` on `backups/*` and nothing else — no `s3:GetObject`, no
+> `s3:ListBucket`, no `s3:DeleteObject` — so the host can upload a dump but
+> cannot read one back, list the prefix or delete one. Versioning stays off,
+> so an upload to a key already in use replaces the earlier object. Objects
+> under `backups/` expire after 90 days, deliberately longer than the 60 days
+> on `shadow/`, because this is the only off-host copy. Restores run from the
+> operator's laptop with the credentials of
+> [One-time bootstrap](#one-time-bootstrap), never from the host.
+
 ### Deploying
 
 1. The commit must be on `main`, and the CI run for its push must have
