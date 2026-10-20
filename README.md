@@ -309,6 +309,9 @@ disclosed:
    shadow's model load and Redis backlog catch-up ran inside those windows: they are not steady
    state, and their req/s dip is attributable to the same cause.
 
+A single 15 s warm-up (`hey -z 15s -c 1 -q 5`, same payload) preceded the first window (ON1) only;
+the remaining five windows ran back-to-back, separated only by the scaling steps below.
+
 | Window | State | req/s | p50 | p95 | p99 |
 | --- | --- | --- | --- | --- | --- |
 | ON1 | shadow on, steady state | 4.997 | 61.0 ms | 92.2 ms | 203.8 ms |

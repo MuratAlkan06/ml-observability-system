@@ -137,6 +137,10 @@ windows — the v1.1 and 2026-09-27 methodology, with two deviations disclosed:
    cold-start-contaminated, not steady state, and their req/s dip is
    attributable to the same cause.
 
+A single 15 s warm-up (same flags and payload) preceded the first window (ON1)
+only; the remaining five windows ran back-to-back, separated only by the
+scaling steps in the README reproduce block.
+
 | Window | State | req/s | p50 | p95 | p99 |
 |---|---|---|---|---|---|
 | ON1 | shadow on, steady state | 4.997 | 61.0 ms | 92.2 ms | 203.8 ms |
