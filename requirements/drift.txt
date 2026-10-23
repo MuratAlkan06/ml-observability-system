@@ -2,5 +2,5 @@
 # No scipy/numpy: drift math is pure Python against hard-coded critical values.
 psycopg[binary]~=3.3.4
 prometheus-client~=0.26.0
-pydantic-settings~=2.14.2
+pydantic-settings~=2.16.1
 httpx~=0.28.1

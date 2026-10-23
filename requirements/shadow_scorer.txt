@@ -8,4 +8,4 @@ torch==2.13.0                 # install from CPU index (Dockerfile)
 redis~=8.1.0
 psycopg[binary]~=3.3.4
 prometheus-client~=0.26.0
-pydantic-settings~=2.14.2
+pydantic-settings~=2.16.1
