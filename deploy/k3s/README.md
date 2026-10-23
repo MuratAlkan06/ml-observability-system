@@ -426,6 +426,10 @@ scorer's scale); the shadow scorer was restored to `replicas=1` afterwards.
 Shadow primary-path cost ≈2.4 ms p50 / ≈10 ms p95. How the p95 figure reads
 against the v1.1 ≤10% criterion is set out in the README's k3s re-measurement
 section.
+*Interpretation superseded on 2026-10-20 UTC, figures unchanged: six 120 s
+windows show that the p50 cost is not resolvable beyond ~1 ms on this instance
+and that a single window's p95 is noise-dominated — see
+[k3s re-measurement (2026-10-20)](../../README.md#k3s-re-measurement-2026-10-20-the-noise-floor).*
 
 **Host facts.** ssm-agent was present at migration (snap 3.3.4793.0,
 latest/stable), confirming the P2c dependency; refreshed to latest/candidate
