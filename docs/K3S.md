@@ -121,6 +121,10 @@ The shadow scorer's cost to the primary path under k3s is ≈2.4 ms at p50 and
 ≈10 ms at p95. At p95 that computes to +10.1% (111.2 vs 101.0 ms), just outside
 the v1.1 ≤10% criterion the compose-era run met at −1.0%. It comes from one
 matched pair of 120 s windows and is published as measured, not re-certified.
+*Interpretation superseded on 2026-10-20 UTC, figures unchanged: six 120 s
+windows show that the p50 cost is not resolvable beyond ~1 ms on this instance
+and that a single window's p95 is noise-dominated — see
+[k3s re-measurement (2026-10-20)](#k3s-re-measurement-2026-10-20-the-noise-floor).*
 
 ### k3s re-measurement (2026-10-20): the noise floor
 
