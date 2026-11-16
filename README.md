@@ -5,6 +5,15 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**In plain terms.** A machine-learning model can keep answering after it has stopped being right,
+because the data it sees in use drifts away from the data it was trained on. This project is a
+small model service that watches itself for that: it records every prediction, alerts when the
+incoming data shifts, scores a replacement model against live traffic before that model serves
+anyone, and can roll back a failing canary release inside a window a human opens and attends. I
+built it to do the monitoring and deployment work of an ML systems engineer end to end on one
+small system, and the main thing it taught me is to freeze the specification and write the abort
+plan down before touching anything live.
+
 **What this is.** A self-hosted DistilBERT sentiment service, built with the observability real
 ML systems need: drift detection (class χ², token-length χ², confidence KL) that alerts to Slack,
 Prometheus metrics with Grafana dashboards, and a smaller MiniLM candidate model shadow-scoring
